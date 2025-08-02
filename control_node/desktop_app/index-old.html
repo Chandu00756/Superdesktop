@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ω Control Center - Personal Supercomputer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="omega-style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Consolas:wght@400;700&family=Segoe+UI:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+  <!-- Loading Screen -->
+  <div id="loading-screen" class="loading-screen">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Initializing Omega Super Desktop Console...</div>
+  </div>
+
+  <!-- Login Modal -->
+  <div id="login-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Login to Omega Console</h2>
+      <form id="login-form">
+        <div class="form-group">
+          <label for="username">Username:</label>
+          <input type="text" id="username" name="username" required>
+        </div>
+        <div class="form-group">
+          <label for="password">Password:</label>
+          <input type="password" id="password" name="password" required>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Login</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main Application -->
+  <div id="app" class="hidden">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">
+          <span class="logo-omega">Ω</span>
+          <span class="logo-text">Omega Super Desktop Console</span>
+        </div>
+        <div class="status-indicator" id="connection-status">
+          <span class="status-dot"></span>
+          <span class="status-text">Connected</span>
+        </div>
+      </div>
+      <div class="header-center">
+        <div class="quick-stats">
+          <div class="stat">
+            <span class="stat-label">Nodes</span>
+            <span class="stat-value" id="node-count">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Sessions</span>
+            <span class="stat-value" id="session-count">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Latency</span>
+            <span class="stat-value" id="avg-latency">0ms</span>
+          </div>
+        </div>
+      </div>
+      <div class="header-right">
+        <button class="btn btn-icon" id="notifications-btn" title="Notifications">
+          <span class="icon"></span>
+          <span class="badge" id="notification-badge">0</span>
+        </button>
+        <button class="btn btn-icon" id="settings-btn" title="Settings">
+          <span class="icon"></span>
+        </button>
+        <button class="btn btn-primary" id="new-session-btn">New Session</button>
+      </div>
+    </header>
+
+    <!-- Navigation -->
+    <nav class="nav">
+      <button class="nav-item active" data-tab="dashboard">
+        <span class="nav-icon"></span>
+        <span class="nav-text">Dashboard</span>
+      </button>
+      <button class="nav-item" data-tab="nodes">
+        <span class="nav-icon"></span>
+        <span class="nav-text">Nodes</span>
+      </button>
+      <button class="nav-item" data-tab="sessions">
+        <span class="nav-icon"></span>
+        <span class="nav-text">Sessions</span>
+      </button>
+      <button class="nav-item" data-tab="tasks">
+        <span class="nav-icon"></span>
+        <span class="nav-text">Tasks</span>
+      </button>
+      <button class="nav-item" data-tab="monitoring">
+        <span class="nav-icon"></span>
+        <span class="nav-text">Monitoring</span>
+      </button>
+      <button class="nav-item" data-tab="storage">
+        <span class="nav-icon"></span>
+        <span class="nav-text">Storage</span>
+      </button>
+      <button class="nav-item" data-tab="ai">
+        <span class="nav-icon"></span>
+        <span class="nav-text">AI Optimization</span>
+      </button>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main">
+      <!-- Dashboard Tab -->
+      <section id="dashboard" class="tab active">
+        <div class="tab-header">
+          <h1>System Dashboard</h1>
+          <div class="tab-actions">
+            <button class="btn btn-secondary" id="refresh-dashboard">Refresh</button>
+          </div>
+        </div>
+        
+        <div class="dashboard-grid">
+          <!-- System Overview -->
+          <div class="card">
+            <div class="card-header">
+              <h3>System Overview</h3>
+            </div>
+            <div class="card-content">
+              <div class="overview-stats">
+                <div class="overview-stat">
+                  <div class="stat-icon cpu"></div>
+                  <div class="stat-details">
+                    <div class="stat-title">CPU Usage</div>
+                    <div class="stat-value" id="cpu-usage">0%</div>
+                  </div>
+                </div>
+                <div class="overview-stat">
+                  <div class="stat-icon memory"></div>
+                  <div class="stat-details">
+                    <div class="stat-title">Memory Usage</div>
+                    <div class="stat-value" id="memory-usage">0%</div>
+                  </div>
+                </div>
+                <div class="overview-stat">
+                  <div class="stat-icon network"></div>
+                  <div class="stat-details">
+                    <div class="stat-title">Network Latency</div>
+                    <div class="stat-value" id="network-latency">0ms</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Performance Chart -->
+          <div class="card span-2">
+            <div class="card-header">
+              <h3>Real-time Performance</h3>
+              <div class="chart-controls">
+                <select id="chart-timeframe" title="Select chart timeframe" aria-label="Chart timeframe selection">
+                  <option value="1h">Last Hour</option>
+                  <option value="6h">Last 6 Hours</option>
+                  <option value="24h">Last 24 Hours</option>
+                </select>
+              </div>
+            </div>
+            <div class="card-content">
+              <canvas id="performance-chart"></canvas>
+            </div>
+          </div>
+
+          <!-- Active Sessions -->
+          <div class="card">
+            <div class="card-header">
+              <h3>Active Sessions</h3>
+            </div>
+            <div class="card-content">
+              <div id="dashboard-sessions" class="session-list"></div>
+            </div>
+          </div>
+
+          <!-- Recent Activity -->
+          <div class="card span-2">
+            <div class="card-header">
+              <h3>Recent Activity</h3>
+            </div>
+            <div class="card-content">
+              <div id="activity-feed" class="activity-feed"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Nodes Tab -->
+      <section id="nodes" class="tab">
+        <div class="tab-header">
+          <h1>Cluster Nodes</h1>
+          <div class="tab-actions">
+            <button class="btn btn-primary" id="add-node-btn">Add Node</button>
+            <button class="btn btn-secondary" id="refresh-nodes">Refresh</button>
+          </div>
+        </div>
+        
+        <div class="content-grid">
+          <div class="nodes-grid" id="nodes-grid"></div>
+        </div>
+      </section>
+
+      <!-- Sessions Tab -->
+      <section id="sessions" class="tab">
+        <div class="tab-header">
+          <h1>Desktop Sessions</h1>
+          <div class="tab-actions">
+            <button class="btn btn-primary" id="create-session-btn">Create Session</button>
+            <button class="btn btn-secondary" id="refresh-sessions">Refresh</button>
+          </div>
+        </div>
+        
+        <div class="content-grid">
+          <div class="sessions-list" id="sessions-list"></div>
+        </div>
+      </section>
+
+      <!-- Tasks Tab -->
+      <section id="tasks" class="tab">
+        <div class="tab-header">
+          <h1>Task Execution</h1>
+          <div class="tab-actions">
+            <button class="btn btn-primary" id="execute-task-btn">Execute Task</button>
+            <button class="btn btn-secondary" id="refresh-tasks">Refresh</button>
+          </div>
+        </div>
+        
+        <div class="content-grid">
+          <div class="tasks-list" id="tasks-list"></div>
+        </div>
+      </section>
+
+      <!-- Monitoring Tab -->
+      <section id="monitoring" class="tab">
+        <div class="tab-header">
+          <h1>System Monitoring</h1>
+          <div class="tab-actions">
+            <button class="btn btn-secondary" id="export-metrics">Export Metrics</button>
+          </div>
+        </div>
+        
+        <div class="monitoring-grid">
+          <div class="card">
+            <div class="card-header">
+              <h3>Latency Heatmap</h3>
+            </div>
+            <div class="card-content">
+              <canvas id="latency-heatmap"></canvas>
+            </div>
+          </div>
+          
+          <div class="card">
+            <div class="card-header">
+              <h3>Resource Utilization</h3>
+            </div>
+            <div class="card-content">
+              <canvas id="resource-chart"></canvas>
+            </div>
+          </div>
+          
+          <div class="card span-2">
+            <div class="card-header">
+              <h3>Node Health Matrix</h3>
+            </div>
+            <div class="card-content">
+              <div id="health-matrix" class="health-matrix"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Storage Tab -->
+      <section id="storage" class="tab">
+        <div class="tab-header">
+          <h1>Distributed Storage</h1>
+          <div class="tab-actions">
+            <button class="btn btn-secondary" id="optimize-storage">Optimize</button>
+          </div>
+        </div>
+        
+        <div class="storage-grid">
+          <div class="card">
+            <div class="card-header">
+              <h3>Storage Overview</h3>
+            </div>
+            <div class="card-content">
+              <div id="storage-overview"></div>
+            </div>
+          </div>
+          
+          <div class="card">
+            <div class="card-header">
+              <h3>Tier Distribution</h3>
+            </div>
+            <div class="card-content">
+              <canvas id="storage-tier-chart"></canvas>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- AI Optimization Tab -->
+      <section id="ai" class="tab">
+        <div class="tab-header">
+          <h1>AI-Driven Optimization</h1>
+          <div class="tab-actions">
+            <button class="btn btn-primary" id="retrain-models">Retrain Models</button>
+          </div>
+        </div>
+        
+        <div class="ai-grid">
+          <div class="card">
+            <div class="card-header">
+              <h3>Prediction Accuracy</h3>
+            </div>
+            <div class="card-content">
+              <canvas id="prediction-chart"></canvas>
+            </div>
+          </div>
+          
+          <div class="card">
+            <div class="card-header">
+              <h3>Resource Scheduling AI</h3>
+            </div>
+            <div class="card-content">
+              <div id="ai-scheduler-status"></div>
+            </div>
+          </div>
+          
+          <div class="card span-2">
+            <div class="card-header">
+              <h3>Model Performance</h3>
+            </div>
+            <div class="card-content">
+              <div id="model-performance"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modals and Dialogs -->
+  <div id="session-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Create New Session</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="session-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="session-app">Application:</label>
+              <select id="session-app" required>
+                <option value="">Select Application</option>
+                <option value="steam://run/730">Counter-Strike 2</option>
+                <option value="blender">Blender 3D</option>
+                <option value="unity">Unity Editor</option>
+                <option value="custom">Custom Application</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="session-priority">Priority:</label>
+              <select id="session-priority">
+                <option value="5">Normal</option>
+                <option value="8">High</option>
+                <option value="10">Critical</option>
+              </select>
+            </div>
+          </div>
+          
+          <div class="form-row">
+            <div class="form-group">
+              <label for="session-cpu">CPU Cores:</label>
+              <input type="number" id="session-cpu" min="1" max="64" value="4">
+            </div>
+            <div class="form-group">
+              <label for="session-gpu">GPU Units:</label>
+              <input type="number" id="session-gpu" min="0" max="8" value="1">
+            </div>
+            <div class="form-group">
+              <label for="session-ram">RAM (GB):</label>
+              <input type="number" id="session-ram" min="1" max="128" value="8">
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="session-low-latency">
+              Low Latency Mode
+            </label>
+          </div>
+          
+          <div class="form-actions">
+            <button type="button" class="btn btn-secondary" id="cancel-session">Cancel</button>
+            <button type="submit" class="btn btn-primary">Create Session</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.min.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,599 @@
+# Omega Super Desktop Console - Initial Prototype Deployment Configuration
+# Docker Compose file for complete system deployment with all microservices
+
+version: '3.8'
+
+networks:
+  omega-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  etcd-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  session-data:
+    driver: local
+  model-cache:
+    driver: local
+
+services:
+  # Core Infrastructure Services
+  
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: omega-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: omega_sessions
+      POSTGRES_USER: omega
+      POSTGRES_PASSWORD: omega_secure_2025
+      TIMESCALEDB_TELEMETRY: 'off'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init_database.py:/docker-entrypoint-initdb.d/01-init.py
+    ports:
+      - "5432:5432"
+    networks:
+      - omega-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omega -d omega_sessions"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: omega-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass omega_secure_2025
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - omega-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: omega-etcd
+    restart: unless-stopped
+    environment:
+      ETCD_NAME: omega-etcd
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd:2380
+      ETCD_INITIAL_CLUSTER: omega-etcd=http://etcd:2380
+      ETCD_INITIAL_CLUSTER_TOKEN: omega-cluster-token
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_AUTO_COMPACTION_RETENTION: 1
+    volumes:
+      - etcd-data:/etcd-data
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    networks:
+      - omega-network
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Monitoring Infrastructure
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: omega-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--storage.tsdb.retention.time=30d'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - omega-network
+    depends_on:
+      - control-node
+      - orchestrator
+      - session-daemon
+      - predictor-service
+      - render-router
+      - memory-fabric
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: omega-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: omega_admin_2025
+      GF_USERS_ALLOW_SIGN_UP: false
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    networks:
+      - omega-network
+    depends_on:
+      - prometheus
+
+  # Core Omega Services
+
+  control-node:
+    build:
+      context: ./control_node
+      dockerfile: Dockerfile
+    container_name: omega-control-node
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: omega
+      POSTGRES_PASSWORD: omega_secure_2025
+      POSTGRES_DB: omega_sessions
+      REDIS_URL: redis://:omega_secure_2025@redis:6379
+      ETCD_HOST: etcd
+      ETCD_PORT: 2379
+      NODE_ID: control-node-001
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    volumes:
+      - session-data:/app/sessions
+    ports:
+      - "8000:8000"
+    networks:
+      - omega-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  orchestrator:
+    build:
+      context: ./omega-orchestrator
+      dockerfile: Dockerfile
+    container_name: omega-orchestrator
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: omega
+      POSTGRES_PASSWORD: omega_secure_2025
+      POSTGRES_DB: omega_sessions
+      REDIS_URL: redis://:omega_secure_2025@redis:6379
+      ETCD_HOST: etcd
+      ETCD_PORT: 2379
+      NODE_ID: orchestrator-001
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    ports:
+      - "8001:8001"
+    networks:
+      - omega-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  session-daemon:
+    build:
+      context: ./session-daemon
+      dockerfile: Dockerfile
+    container_name: omega-session-daemon
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: omega
+      POSTGRES_PASSWORD: omega_secure_2025
+      POSTGRES_DB: omega_sessions
+      REDIS_URL: redis://:omega_secure_2025@redis:6379
+      ETCD_HOST: etcd
+      ETCD_PORT: 2379
+      NODE_ID: session-daemon-001
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    ports:
+      - "8003:8003"
+      - "8001:8001"  # Prometheus metrics
+    networks:
+      - omega-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  predictor-service:
+    build:
+      context: ./predictor-service
+      dockerfile: Dockerfile
+    container_name: omega-predictor-service
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: omega
+      POSTGRES_PASSWORD: omega_secure_2025
+      POSTGRES_DB: omega_sessions
+      REDIS_URL: redis://:omega_secure_2025@redis:6379
+      NODE_ID: predictor-001
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    volumes:
+      - model-cache:/app/models
+    ports:
+      - "8004:8004"
+      - "8002:8002"  # Prometheus metrics
+    networks:
+      - omega-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  render-router:
+    build:
+      context: ./render-router
+      dockerfile: Dockerfile
+    container_name: omega-render-router
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: omega
+      POSTGRES_PASSWORD: omega_secure_2025
+      POSTGRES_DB: omega_sessions
+      REDIS_URL: redis://:omega_secure_2025@redis:6379
+      NODE_ID: render-router-001
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    ports:
+      - "8005:8005"
+      - "8003:8003"  # Prometheus metrics
+    networks:
+      - omega-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  memory-fabric:
+    build:
+      context: ./memory-fabric
+      dockerfile: Dockerfile
+    container_name: omega-memory-fabric
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: omega
+      POSTGRES_PASSWORD: omega_secure_2025
+      POSTGRES_DB: omega_sessions
+      REDIS_URL: redis://:omega_secure_2025@redis:6379
+      NODE_ID: memory-fabric-001
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    ports:
+      - "8006:8006"
+      - "8004:8004"  # Prometheus metrics
+    networks:
+      - omega-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Compute and Storage Nodes
+
+  compute-node-1:
+    build:
+      context: ./compute_node
+      dockerfile: Dockerfile
+    container_name: omega-compute-node-1
+    restart: unless-stopped
+    environment:
+      CONTROL_NODE_URL: http://control-node:8000
+      NODE_ID: compute-node-001
+      NODE_TYPE: compute
+      GPU_COUNT: 2
+      CPU_CORES: 16
+      MEMORY_GB: 128
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    volumes:
+      - /dev:/dev
+      - session-data:/app/sessions
+    privileged: true  # Required for GPU access
+    networks:
+      - omega-network
+    depends_on:
+      - control-node
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  compute-node-2:
+    build:
+      context: ./compute_node
+      dockerfile: Dockerfile
+    container_name: omega-compute-node-2
+    restart: unless-stopped
+    environment:
+      CONTROL_NODE_URL: http://control-node:8000
+      NODE_ID: compute-node-002
+      NODE_TYPE: compute
+      GPU_COUNT: 2
+      CPU_CORES: 16
+      MEMORY_GB: 128
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    volumes:
+      - /dev:/dev
+      - session-data:/app/sessions
+    privileged: true
+    networks:
+      - omega-network
+    depends_on:
+      - control-node
+
+  storage-node-1:
+    build:
+      context: ./storage_node
+      dockerfile: Dockerfile
+    container_name: omega-storage-node-1
+    restart: unless-stopped
+    environment:
+      CONTROL_NODE_URL: http://control-node:8000
+      NODE_ID: storage-node-001
+      NODE_TYPE: storage
+      STORAGE_CAPACITY_GB: 10000
+      ENVIRONMENT: prototype
+      LOG_LEVEL: INFO
+    volumes:
+      - session-data:/app/storage
+    networks:
+      - omega-network
+    depends_on:
+      - control-node
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # API Gateway and Load Balancer
+
+  nginx:
+    image: nginx:alpine
+    container_name: omega-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - omega-network
+    depends_on:
+      - control-node
+      - orchestrator
+      - session-daemon
+      - predictor-service
+      - render-router
+      - memory-fabric
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Log Management
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.10.0
+    container_name: omega-elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: false
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    volumes:
+      - ./elk/elasticsearch/data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - omega-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.10.0
+    container_name: omega-logstash
+    restart: unless-stopped
+    volumes:
+      - ./elk/logstash/config:/usr/share/logstash/config
+      - ./elk/logstash/pipeline:/usr/share/logstash/pipeline
+    ports:
+      - "5044:5044"
+      - "9600:9600"
+    networks:
+      - omega-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.10.0
+    container_name: omega-kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - omega-network
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # Development and Testing Tools
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: omega-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@omega-desktop.io
+      PGADMIN_DEFAULT_PASSWORD: omega_admin_2025
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - ./pgadmin/servers.json:/pgadmin4/servers.json
+    ports:
+      - "5050:80"
+    networks:
+      - omega-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - development
+
+  redis-insight:
+    image: redislabs/redisinsight:latest
+    container_name: omega-redis-insight
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    networks:
+      - omega-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - development
+
+  # Performance Testing
+
+  k6:
+    image: grafana/k6:latest
+    container_name: omega-k6
+    restart: "no"
+    volumes:
+      - ./tests/performance:/scripts
+    networks:
+      - omega-network
+    depends_on:
+      - control-node
+      - orchestrator
+    profiles:
+      - testing
+    command: run /scripts/load_test.js
+
+# Health check and monitoring endpoints
+x-healthcheck-common: &healthcheck-common
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 40s
+
+# Common environment variables
+x-common-env: &common-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_USER: omega
+  POSTGRES_PASSWORD: omega_secure_2025
+  POSTGRES_DB: omega_sessions
+  REDIS_URL: redis://:omega_secure_2025@redis:6379
+  ENVIRONMENT: prototype
+  LOG_LEVEL: INFO
+
+# Resource limits for initial prototype deployment
+x-resources-small: &resources-small
+  cpus: '0.5'
+  memory: 512M
+
+x-resources-medium: &resources-medium
+  cpus: '1.0'
+  memory: 1G
+
+x-resources-large: &resources-large
+  cpus: '2.0'
+  memory: 2G
+
+x-resources-xlarge: &resources-xlarge
+  cpus: '4.0'
+  memory: 4G

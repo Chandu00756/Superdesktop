@@ -1,0 +1,2198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ω Control Center - Personal Supercomputer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="omega-style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Consolas:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <!-- Menu Bar -->
+  <div class="menu-bar">
+    <button class="menu-btn" onclick="newConfiguration()" title="New Configuration">
+      <i class="fas fa-plus"></i> New
+    </button>
+    <button class="menu-btn" onclick="openConfiguration()" title="Open Configuration">
+      <i class="fas fa-folder-open"></i> Open
+    </button>
+    <button class="menu-btn" onclick="saveConfiguration()" title="Save Configuration">
+      <i class="fas fa-save"></i> Save
+    </button>
+    <div class="menu-separator"></div>
+    <button class="menu-btn" onclick="discoverNodes()" title="Discover Nodes">
+      <i class="fas fa-search"></i> Discover
+    </button>
+    <button class="menu-btn" onclick="startCluster()" title="Start Cluster">
+      <i class="fas fa-play"></i> Start
+    </button>
+    <button class="menu-btn" onclick="stopCluster()" title="Stop Cluster">
+      <i class="fas fa-stop"></i> Stop
+    </button>
+    <button class="menu-btn" onclick="restartCluster()" title="Restart Cluster">
+      <i class="fas fa-redo"></i> Restart
+    </button>
+    <div class="menu-separator"></div>
+    <button class="menu-btn" onclick="runBenchmark()" title="Run Benchmark">
+      <i class="fas fa-tachometer-alt"></i> Benchmark
+    </button>
+    <button class="menu-btn" onclick="runHealthCheck()" title="Health Check">
+      <i class="fas fa-heartbeat"></i> Health
+    </button>
+    <div class="menu-separator"></div>
+    <button class="menu-btn" onclick="showPreferences()" title="Settings">
+      <i class="fas fa-cog"></i> Settings
+    </button>
+    <button class="menu-btn" onclick="showAbout()" title="About">
+      <i class="fas fa-info-circle"></i> About
+    </button>
+  </div>
+
+  <!-- Tab Navigation -->
+  <div class="tab-navigation">
+    <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')" title="System overview and cluster status">
+      <i class="fas fa-th-large"></i>
+      <span>Dashboard</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="nodes" onclick="switchTab('nodes')" title="Node management and configuration">
+      <i class="fas fa-server"></i>
+      <span>Nodes</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="resources" onclick="switchTab('resources')" title="Resource allocation and monitoring">
+      <i class="fas fa-microchip"></i>
+      <span>Resources</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="sessions" onclick="switchTab('sessions')" title="Active desktop sessions">
+      <i class="fas fa-desktop"></i>
+      <span>Sessions</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="network" onclick="switchTab('network')" title="Network topology and performance">
+      <i class="fas fa-network-wired"></i>
+      <span>Network</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="performance" onclick="switchTab('performance')" title="Performance metrics and analytics">
+      <i class="fas fa-chart-line"></i>
+      <span>Performance</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="security" onclick="switchTab('security')" title="Security management and monitoring">
+      <i class="fas fa-shield-alt"></i>
+      <span>Security</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="plugins" onclick="switchTab('plugins')" title="Plugin management and extensions">
+      <i class="fas fa-puzzle-piece"></i>
+      <span>Plugins</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="ai" onclick="switchTab('ai')" title="AI optimization and insights">
+      <i class="fas fa-brain"></i>
+      <span>AI Hub</span>
+      <div class="tab-indicator"></div>
+    </button>
+    <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')" title="System configuration and preferences">
+      <i class="fas fa-cog"></i>
+      <span>Settings</span>
+      <div class="tab-indicator"></div>
+    </button>
+  </div>
+
+  <!-- Main Content Area -->
+  <main class="main-content">
+    <!-- Dashboard Tab -->
+    <div class="tab-content active" id="dashboard">
+      <div class="dashboard-header">
+        <h1>Ω System Dashboard</h1>
+        <div class="dashboard-actions">
+          <button class="action-btn" onclick="refreshDashboard()" title="Refresh all data">
+            <i class="fas fa-sync-alt"></i> Refresh
+          </button>
+          <button class="action-btn" onclick="exportDashboard()" title="Export dashboard data">
+            <i class="fas fa-download"></i> Export
+          </button>
+          <button class="action-btn" onclick="customizeDashboard()" title="Customize layout">
+            <i class="fas fa-edit"></i> Customize
+          </button>
+        </div>
+      </div>
+      
+      <div class="dashboard-grid">
+        <!-- Cluster Overview Widget -->
+        <div class="widget cluster-overview span-3">
+          <div class="widget-header">
+            <h3><i class="fas fa-cube"></i> OMEGA-CLUSTER-01</h3>
+            <div class="cluster-status operational">
+              <div class="status-indicator"></div>
+              <span>OPERATIONAL</span>
+            </div>
+          </div>
+          <div class="widget-content">
+            <div class="cluster-info">
+              <div class="info-grid">
+                <div class="info-item">
+                  <span class="label">Active Nodes:</span>
+                  <span class="value" id="activeNodes">Loading...</span>
+                </div>
+                <div class="info-item">
+                  <span class="label">Standby Nodes:</span>
+                  <span class="value" id="standbyNodes">Loading...</span>
+                </div>
+                <div class="info-item">
+                  <span class="label">Total Sessions:</span>
+                  <span class="value" id="totalSessions">Loading...</span>
+                </div>
+                <div class="info-item">
+                  <span class="label">CPU Usage:</span>
+                  <span class="value" id="clusterCpuUsage">Loading...</span>
+                </div>
+                <div class="info-item">
+                  <span class="label">Memory Usage:</span>
+                  <span class="value" id="clusterMemoryUsage">Loading...</span>
+                </div>
+                <div class="info-item">
+                  <span class="label">Network Load:</span>
+                  <span class="value" id="networkLoad">Loading...</span>
+                </div>
+              </div>
+              <div class="cluster-topology">
+                <div class="topology-map" id="topologyMap">
+                  <!-- Topology visualization will be rendered here -->
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </div>
+
+        <!-- Performance Metrics Widget -->
+        <div class="widget performance-metrics">
+          <div class="widget-header">
+            <h3><i class="fas fa-tachometer-alt"></i> Performance Overview</h3>
+            <div class="widget-actions">
+              <button class="widget-btn" onclick="refreshMetrics()" title="Refresh metrics">
+                <i class="fas fa-sync-alt"></i>
+              </button>
+            </div>
+          </div>
+          <div class="widget-content">
+            <div class="performance-grid">
+              <div class="perf-item">
+                <div class="perf-icon cpu">
+                  <i class="fas fa-microchip"></i>
+                </div>
+                <div class="perf-details">
+                  <span class="perf-label">CPU Utilization</span>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: 0%" id="cpuProgress"></div>
+                  </div>
+                  <span class="perf-value" id="cpuValue">Loading...</span>
+                </div>
+              </div>
+              <div class="perf-item">
+                <div class="perf-icon gpu">
+                  <i class="fas fa-tv"></i>
+                </div>
+                <div class="perf-details">
+                  <span class="perf-label">GPU Utilization</span>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: 0%" id="gpuProgress"></div>
+                  </div>
+                  <span class="perf-value" id="gpuValue">Loading...</span>
+                </div>
+              </div>
+              <div class="perf-item">
+                <div class="perf-icon memory">
+                  <i class="fas fa-memory"></i>
+                </div>
+                <div class="perf-details">
+                  <span class="perf-label">Memory Usage</span>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: 0%" id="memoryProgress"></div>
+                  </div>
+                  <span class="perf-value" id="memoryValue">Loading...</span>
+                </div>
+              </div>
+              <div class="perf-item">
+                <div class="perf-icon storage">
+                  <i class="fas fa-hdd"></i>
+                </div>
+                <div class="perf-details">
+                  <span class="perf-label">Storage Usage</span>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: 0%" id="storageProgress"></div>
+                  </div>
+                  <span class="perf-value" id="storageValue">Loading...</span>
+                </div>
+              </div>
+              <div class="perf-item">
+                <div class="perf-icon network">
+                  <i class="fas fa-network-wired"></i>
+                </div>
+                <div class="perf-details">
+                  <span class="perf-label">Network Throughput</span>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: 0%" id="networkProgress"></div>
+                  </div>
+                  <span class="perf-value" id="networkValue">Loading...</span>
+                </div>
+              </div>
+              <div class="perf-item">
+                <div class="perf-icon latency">
+                  <i class="fas fa-clock"></i>
+                </div>
+                <div class="perf-details">
+                  <span class="perf-label">Network Latency</span>
+                  <div class="latency-indicator good">
+                    <span class="latency-value" id="latencyValue">Loading...</span>
+                  </div>
+                  <span class="perf-value" id="latencyStatus">Loading...</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </div>
+
+        <!-- Quick Actions Widget -->
+        <div class="widget quick-actions">
+          <div class="widget-header">
+            <h3><i class="fas fa-bolt"></i> Quick Actions</h3>
+          </div>
+          <div class="widget-content">
+            <div class="actions-grid">
+              <button class="action-btn primary" onclick="discoverNodes()">
+                <i class="fas fa-search"></i>
+                <span>Discover Nodes</span>
+              </button>
+              <button class="action-btn" onclick="createNewSession()">
+                <i class="fas fa-plus-circle"></i>
+                <span>New Session</span>
+              </button>
+              <button class="action-btn" onclick="runBenchmark()">
+                <i class="fas fa-tachometer-alt"></i>
+                <span>Run Benchmark</span>
+              </button>
+              <button class="action-btn" onclick="runHealthCheck()">
+                <i class="fas fa-heartbeat"></i>
+                <span>Health Check</span>
+              </button>
+              <button class="action-btn" onclick="optimizeSystem()">
+                <i class="fas fa-magic"></i>
+                <span>Auto Optimize</span>
+              </button>
+              <button class="action-btn" onclick="backupConfiguration()">
+                <i class="fas fa-save"></i>
+                <span>Backup Config</span>
+              </button>
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </div>
+
+        <!-- Real-Time Metrics Charts -->
+        <div class="widget metrics-charts span-3">
+          <div class="widget-header">
+            <h3><i class="fas fa-chart-line"></i> Real-Time Metrics</h3>
+            <div class="widget-actions">
+              <button class="widget-btn" onclick="pauseMetrics()" title="Pause updates">
+                <i class="fas fa-pause"></i>
+              </button>
+              <button class="widget-btn" onclick="exportMetrics()" title="Export data">
+                <i class="fas fa-download"></i>
+              </button>
+            </div>
+          </div>
+          <div class="widget-content">
+            <div class="metrics-grid">
+              <div class="metric-chart">
+                <h4>CPU Usage</h4>
+                <canvas id="cpuChart" width="400" height="200"></canvas>
+              </div>
+              <div class="metric-chart">
+                <h4>Memory Usage</h4>
+                <canvas id="memoryChart" width="400" height="200"></canvas>
+              </div>
+              <div class="metric-chart">
+                <h4>Network I/O</h4>
+                <canvas id="networkChart" width="400" height="200"></canvas>
+              </div>
+              <div class="metric-chart">
+                <h4>Latency Distribution</h4>
+                <canvas id="latencyChart" width="400" height="200"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </div>
+
+        <!-- Active Sessions Widget -->
+        <div class="widget active-sessions">
+          <div class="widget-header">
+            <h3><i class="fas fa-desktop"></i> Active Sessions</h3>
+            <div class="widget-actions">
+              <button class="widget-btn" onclick="refreshSessions()" title="Refresh sessions">
+                <i class="fas fa-sync-alt"></i>
+              </button>
+              <button class="widget-btn" onclick="createNewSession()" title="Create new session">
+                <i class="fas fa-plus"></i>
+              </button>
+            </div>
+          </div>
+          <div class="widget-content">
+            <div class="session-list" id="sessionList">
+              <!-- Sessions will be dynamically populated -->
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </div>
+
+        <!-- System Alerts Widget -->
+        <div class="widget system-alerts">
+          <div class="widget-header">
+            <h3><i class="fas fa-exclamation-triangle"></i> System Alerts</h3>
+            <div class="widget-actions">
+              <button class="widget-btn" onclick="clearAllAlerts()" title="Clear all alerts">
+                <i class="fas fa-trash"></i>
+              </button>
+              <button class="widget-btn" onclick="refreshAlerts()" title="Refresh alerts">
+                <i class="fas fa-sync-alt"></i>
+              </button>
+            </div>
+          </div>
+          <div class="widget-content">
+            <div class="alert-list" id="alertList">
+              <div class="alert-item warning">
+                <div class="alert-icon">
+                  <i class="fas fa-exclamation-triangle"></i>
+                </div>
+                <div class="alert-content">
+                  <span class="alert-message">Node node-gpu-03 experiencing high temperature (87°C)</span>
+                  <span class="alert-time">2 minutes ago</span>
+                </div>
+                <div class="alert-actions">
+                  <button class="alert-btn" onclick="viewAlert('alert-01')" title="View details">
+                    <i class="fas fa-eye"></i>
+                  </button>
+                  <button class="alert-btn" onclick="dismissAlert('alert-01')" title="Dismiss">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+              </div>
+              <div class="alert-item info">
+                <div class="alert-icon">
+                  <i class="fas fa-info-circle"></i>
+                </div>
+                <div class="alert-content">
+                  <span class="alert-message">New node node-compute-09 discovered and registered</span>
+                  <span class="alert-time">5 minutes ago</span>
+                </div>
+                <div class="alert-actions">
+                  <button class="alert-btn" onclick="viewAlert('alert-02')" title="View details">
+                    <i class="fas fa-eye"></i>
+                  </button>
+                  <button class="alert-btn" onclick="dismissAlert('alert-02')" title="Dismiss">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+              </div>
+              <div class="alert-item success">
+                <div class="alert-icon">
+                  <i class="fas fa-check-circle"></i>
+                </div>
+                <div class="alert-content">
+                  <span class="alert-message">System optimization completed. Performance improved by 12%</span>
+                  <span class="alert-time">8 minutes ago</span>
+                </div>
+                <div class="alert-actions">
+                  <button class="alert-btn" onclick="viewAlert('alert-03')" title="View details">
+                    <i class="fas fa-eye"></i>
+                  </button>
+                  <button class="alert-btn" onclick="dismissAlert('alert-03')" title="Dismiss">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </div>
+
+        <!-- Node Status Widget -->
+        <div class="widget node-status">
+          <div class="widget-header">
+            <h3><i class="fas fa-server"></i> Node Status</h3>
+            <div class="widget-actions">
+              <button class="widget-btn" onclick="refreshNodeStatus()" title="Refresh node status">
+                <i class="fas fa-sync-alt"></i>
+              </button>
+              <button class="widget-btn" onclick="addNewNode()" title="Add new node">
+                <i class="fas fa-plus"></i>
+              </button>
+            </div>
+          </div>
+          <div class="widget-content">
+            <div class="node-grid" id="nodeGrid">
+              <div class="node-item active">
+                <div class="node-icon">
+                  <i class="fas fa-tv"></i>
+                </div>
+                <div class="node-info">
+                  <span class="node-name">node-gpu-01</span>
+                  <span class="node-type">GPU Node</span>
+                </div>
+                <div class="node-metrics">
+                  <span class="metric">RTX 4090</span>
+                  <span class="metric">78% GPU</span>
+                </div>
+                <div class="node-status-indicator online"></div>
+              </div>
+              <div class="node-item active">
+                <div class="node-icon">
+                  <i class="fas fa-microchip"></i>
+                </div>
+                <div class="node-info">
+                  <span class="node-name">node-cpu-02</span>
+                  <span class="node-type">CPU Node</span>
+                </div>
+                <div class="node-metrics">
+                  <span class="metric">Intel Xeon</span>
+                  <span class="metric">45% CPU</span>
+                </div>
+                <div class="node-status-indicator online"></div>
+              </div>
+              <div class="node-item warning">
+                <div class="node-icon">
+                  <i class="fas fa-tv"></i>
+                </div>
+                <div class="node-info">
+                  <span class="node-name">node-gpu-03</span>
+                  <span class="node-type">GPU Node</span>
+                </div>
+                <div class="node-metrics">
+                  <span class="metric">RTX 4080</span>
+                  <span class="metric">High Temp</span>
+                </div>
+                <div class="node-status-indicator warning"></div>
+              </div>
+              <div class="node-item offline">
+                <div class="node-icon">
+                  <i class="fas fa-hdd"></i>
+                </div>
+                <div class="node-info">
+                  <span class="node-name">node-storage-04</span>
+                  <span class="node-type">Storage Node</span>
+                </div>
+                <div class="node-metrics">
+                  <span class="metric">Maintenance</span>
+                </div>
+                <div class="node-status-indicator offline"></div>
+              </div>
+            </div>
+          </div>
+          <div class="resize-handle"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Nodes Tab -->
+    <div class="tab-content" id="nodes">
+      <div class="nodes-layout">
+        <div class="nodes-sidebar">
+          <div class="filter-box">
+            <input type="text" placeholder="Filter nodes..." id="nodeFilter">
+            <i class="fas fa-search"></i>
+          </div>
+          <div class="node-tree" id="nodeTree">
+            <div class="node-category">
+              <div class="category-header">
+                <i class="fas fa-crown"></i>
+                <span>Control Nodes</span>
+                <i class="fas fa-chevron-down"></i>
+              </div>
+              <div class="category-content">
+                <div class="node-item active" data-node="primary-controller">
+                  <span class="node-name">Primary-Controller</span>
+                  <span class="node-ip">192.168.1.100</span>
+                </div>
+              </div>
+            </div>
+            <div class="node-category">
+              <div class="category-header">
+                <i class="fas fa-microchip"></i>
+                <span>Compute Nodes</span>
+                <i class="fas fa-chevron-down"></i>
+              </div>
+              <div class="category-content">
+                <div class="node-item" data-node="workstation-alpha">
+                  <span class="node-name">Workstation-Alpha</span>
+                  <span class="node-spec">32C/64T, 67% load</span>
+                </div>
+                <div class="node-item" data-node="server-beta">
+                  <span class="node-name">Server-Beta</span>
+                  <span class="node-spec">16C/32T, 45% load</span>
+                </div>
+              </div>
+            </div>
+            <div class="node-category">
+              <div class="category-header">
+                <i class="fas fa-display"></i>
+                <span>GPU Nodes</span>
+                <i class="fas fa-chevron-down"></i>
+              </div>
+              <div class="category-content">
+                <div class="node-item" data-node="gaming-rig-01">
+                  <span class="node-name">Gaming-Rig-01</span>
+                  <span class="node-spec">RTX 5090, 67°C</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="node-details">
+          <div class="node-header">
+            <h3 id="selectedNodeName">Primary-Controller</h3>
+            <div class="node-status-badge active">ACTIVE</div>
+            <div class="node-actions">
+              <button class="btn-secondary">Restart</button>
+              <button class="btn-secondary">Shutdown</button>
+              <button class="btn-danger">Remove</button>
+            </div>
+          </div>
+          <div class="node-tabs">
+            <button class="node-tab active" data-tab="overview">Overview</button>
+            <button class="node-tab" data-tab="performance">Performance</button>
+            <button class="node-tab" data-tab="processes">Processes</button>
+            <button class="node-tab" data-tab="logs">Logs</button>
+          </div>
+          <div class="node-tab-content">
+            <div id="nodeOverview" class="node-content active">
+              <div class="specs-grid">
+                <div class="spec-group">
+                  <h4>Hardware</h4>
+                  <div class="spec-item">
+                    <span class="spec-label">CPU:</span>
+                    <span class="spec-value">Intel Core i9-14900K</span>
+                  </div>
+                  <div class="spec-item">
+                    <span class="spec-label">RAM:</span>
+                    <span class="spec-value">64GB DDR5-5600</span>
+                  </div>
+                  <div class="spec-item">
+                    <span class="spec-label">Storage:</span>
+                    <span class="spec-value">2TB NVMe Gen4</span>
+                  </div>
+                  <div class="spec-item">
+                    <span class="spec-label">Network:</span>
+                    <span class="spec-value">10Gbps Ethernet</span>
+                  </div>
+                </div>
+                <div class="spec-group">
+                  <h4>Status</h4>
+                  <div class="spec-item">
+                    <span class="spec-label">Uptime:</span>
+                    <span class="spec-value" id="uptimeValue">Loading...</span>
+                  </div>
+                  <div class="spec-item">
+                    <span class="spec-label">Load:</span>
+                    <span class="spec-value" id="loadValue">Loading...</span>
+                  </div>
+                  <div class="spec-item">
+                    <span class="spec-label">Temperature:</span>
+                    <span class="spec-value" id="temperatureValue">N/A</span>
+                  </div>
+                  <div class="spec-item">
+                    <span class="spec-label">Power:</span>
+                    <span class="spec-value" id="powerValue">N/A</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Resources Tab (2×2 Dashboard Grid) -->
+    <div class="tab-content" id="resources">
+      <div class="resources-grid" style="display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 20px; height: 100%;">
+        
+        <!-- CPU Resources (top-left) -->
+        <div class="resource-panel cpu-resources">
+          <div class="panel-header">
+            <h3><i class="fas fa-microchip"></i> CPU Resources</h3>
+          </div>
+          <div class="panel-content">
+            <div class="resource-summary">
+              <span style="font-size: 14px; font-weight: bold;">1024 logical cores, 847 active (82.7%)</span>
+            </div>
+            <div class="resource-table" style="margin: 16px 0;">
+              <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: #1a1a1a;">
+                    <th style="padding: 8px; text-align: left; border: 1px solid #333333;">Node</th>
+                    <th style="padding: 8px; text-align: left; border: 1px solid #333333;">Cores</th>
+                    <th style="padding: 8px; text-align: left; border: 1px solid #333333;">Usage</th>
+                    <th style="padding: 8px; text-align: left; border: 1px solid #333333;">Temp</th>
+                    <th style="padding: 8px; text-align: left; border: 1px solid #333333;">Clock</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style="padding: 8px; border: 1px solid #333333;">Workstation-Alpha</td>
+                    <td style="padding: 8px; border: 1px solid #333333;">32C/64T</td>
+                    <td style="padding: 8px; border: 1px solid #333333;">67%</td>
+                    <td style="padding: 8px; border: 1px solid #333333;">62°C</td>
+                    <td style="padding: 8px; border: 1px solid #333333;">4.2GHz</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px; border: 1px solid #333333;">Server-Beta</td>
+                    <td style="padding: 8px; border: 1px solid #333333;">16C/32T</td>
+                    <td style="padding: 8px; border: 1px solid #333333;">45%</td>
+                    <td style="padding: 8px; border: 1px solid #333333;">58°C</td>
+                    <td style="padding: 8px; border: 1px solid #333333;">3.8GHz</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="resource-controls" style="display: flex; flex-direction: column; gap: 12px;">
+              <label>Reserve cores: 
+                <input type="range" min="0" max="100" value="10" style="width: 100px; margin-left: 8px;">
+                <span>10%</span>
+              </label>
+              <select title="Priority mode" style="padding: 4px; background: #000000; border: 1px solid #333333; color: #ffffff;">
+                <option>Balanced</option>
+                <option>Performance</option>
+                <option>Efficiency</option>
+              </select>
+              <label>
+                <input type="checkbox" checked> Auto-scaling
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- GPU Resources (top-right) -->
+        <div class="resource-panel gpu-resources">
+          <div class="panel-header">
+            <h3><i class="fas fa-display"></i> GPU Resources</h3>
+          </div>
+          <div class="panel-content">
+            <div class="resource-summary">
+              <span style="font-size: 14px; font-weight: bold;">16 GPU units, 12 active, 512GB total VRAM, 409GB used</span>
+            </div>
+            <div class="gpu-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0;">
+              <div class="gpu-card" style="background: #111111; border: 1px solid #333333; padding: 12px; border-radius: 4px;">
+                <div class="gpu-name" style="font-weight: bold; margin-bottom: 8px;">RTX 5090</div>
+                <div class="gpu-usage-circle" style="text-align: center; margin: 8px 0;">
+                  <div style="width: 60px; height: 60px; border-radius: 50%; border: 3px solid #333333; border-top-color: #ffffff; display: inline-flex; align-items: center; justify-content: center;">
+                    <span style="font-size: 14px; font-weight: bold;">87%</span>
+                  </div>
+                </div>
+                <div class="gpu-temp" style="text-align: center; margin: 4px 0;">67°C</div>
+                <div class="gpu-memory" style="margin: 8px 0;">
+                  <div class="memory-bar" style="width: 100%; height: 8px; background: #333333; border-radius: 4px; overflow: hidden;">
+                    <div class="memory-fill" style="width: 75%; height: 100%; background: #ffffff;"></div>
+                  </div>
+                  <span style="font-size: 12px;">18GB/24GB</span>
+                </div>
+                <div class="gpu-power" style="text-align: center; font-size: 12px;">285W</div>
+              </div>
+              <div class="gpu-card" style="background: #111111; border: 1px solid #333333; padding: 12px; border-radius: 4px;">
+                <div class="gpu-name" style="font-weight: bold; margin-bottom: 8px;">RTX 4080</div>
+                <div class="gpu-usage-circle" style="text-align: center; margin: 8px 0;">
+                  <div style="width: 60px; height: 60px; border-radius: 50%; border: 3px solid #333333; border-top-color: #ffffff; display: inline-flex; align-items: center; justify-content: center;">
+                    <span style="font-size: 14px; font-weight: bold;">54%</span>
+                  </div>
+                </div>
+                <div class="gpu-temp" style="text-align: center; margin: 4px 0;">58°C</div>
+                <div class="gpu-memory" style="margin: 8px 0;">
+                  <div class="memory-bar" style="width: 100%; height: 8px; background: #333333; border-radius: 4px; overflow: hidden;">
+                    <div class="memory-fill" style="width: 60%; height: 100%; background: #ffffff;"></div>
+                  </div>
+                  <span style="font-size: 12px;">9.6GB/16GB</span>
+                </div>
+                <div class="gpu-power" style="text-align: center; font-size: 12px;">220W</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Memory Resources (bottom-left) -->
+        <div class="resource-panel memory-resources">
+          <div class="panel-header">
+            <h3><i class="fas fa-memory"></i> Memory Resources</h3>
+          </div>
+          <div class="panel-content">
+            <div class="resource-summary">
+              <span style="font-size: 14px; font-weight: bold;">1.5TB system RAM, 1.2TB allocated, 180GB cached, 12GB swap</span>
+            </div>
+            <div class="numa-topology" style="margin: 16px 0; text-align: center;">
+              <div style="background: #111111; border: 1px solid #333333; padding: 16px; border-radius: 4px;">
+                <h4 style="margin-bottom: 12px;">NUMA Topology</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                  <div style="background: #000000; border: 1px solid #666666; padding: 8px; border-radius: 4px;">
+                    <div>Node 0</div>
+                    <div style="font-size: 12px;">384GB (80%)</div>
+                  </div>
+                  <div style="background: #000000; border: 1px solid #666666; padding: 8px; border-radius: 4px;">
+                    <div>Node 1</div>
+                    <div style="font-size: 12px;">384GB (75%)</div>
+                  </div>
+                  <div style="background: #000000; border: 1px solid #666666; padding: 8px; border-radius: 4px;">
+                    <div>Node 2</div>
+                    <div style="font-size: 12px;">384GB (82%)</div>
+                  </div>
+                  <div style="background: #000000; border: 1px solid #666666; padding: 8px; border-radius: 4px;">
+                    <div>Node 3</div>
+                    <div style="font-size: 12px;">384GB (78%)</div>
+                  </div>
+                </div>
+                <div style="margin-top: 12px; font-size: 12px;">Interconnect: 400GB/s</div>
+              </div>
+            </div>
+            <div class="memory-controls" style="display: flex; flex-direction: column; gap: 8px;">
+              <button style="padding: 8px 16px; background: #333333; border: 1px solid #666666; color: #ffffff; cursor: pointer;">Defragment</button>
+              <button style="padding: 8px 16px; background: #333333; border: 1px solid #666666; color: #ffffff; cursor: pointer;">Flush Caches</button>
+              <button style="padding: 8px 16px; background: #333333; border: 1px solid #666666; color: #ffffff; cursor: pointer;">Configure Swap</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Storage Resources (bottom-right) -->
+        <div class="resource-panel storage-resources">
+          <div class="panel-header">
+            <h3><i class="fas fa-hdd"></i> Storage Resources</h3>
+          </div>
+          <div class="panel-content">
+            <div class="storage-pools" style="display: flex; flex-direction: column; gap: 16px;">
+              <div class="storage-pool">
+                <h4 style="margin-bottom: 8px;">NVMe Pool</h4>
+                <div style="font-size: 12px; margin-bottom: 8px;">60TB capacity, 45TB used, 850K IOPS</div>
+                <div class="pool-status optimal" style="padding: 4px 8px; background: #1a1a1a; border: 1px solid #333333; border-radius: 4px; display: inline-block;">OPTIMAL</div>
+                <div class="storage-bar" style="margin: 8px 0; width: 100%; height: 12px; background: #333333; border-radius: 6px; overflow: hidden;">
+                  <div style="width: 75%; height: 100%; background: #ffffff;"></div>
+                </div>
+              </div>
+              <div class="storage-pool">
+                <h4 style="margin-bottom: 8px;">SATA Pool</h4>
+                <div style="font-size: 12px; margin-bottom: 8px;">120TB capacity, 89TB used, 45K IOPS</div>
+                <div class="pool-status good" style="padding: 4px 8px; background: #1a1a1a; border: 1px solid #333333; border-radius: 4px; display: inline-block;">GOOD</div>
+                <div class="storage-bar" style="margin: 8px 0; width: 100%; height: 12px; background: #333333; border-radius: 6px; overflow: hidden;">
+                  <div style="width: 74%; height: 100%; background: #ffffff;"></div>
+                </div>
+              </div>
+              <div class="raid-status" style="margin-top: 16px;">
+                <h4 style="margin-bottom: 8px;">RAID Status</h4>
+                <div style="font-size: 12px; margin-bottom: 4px;">Array 1: Rebuilding (67% complete)</div>
+                <div class="rebuild-progress" style="width: 100%; height: 8px; background: #333333; border-radius: 4px; overflow: hidden;">
+                  <div style="width: 67%; height: 100%; background: #ffffff;"></div>
+                </div>
+                <div style="font-size: 12px; margin-top: 8px;">Hot spares: 2 available</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+          </div>
+          <div class="panel-content">
+            <div class="resource-summary">
+              <span>1.5TB system RAM, 1.2TB allocated, 180GB cached, 12GB swap</span>
+            </div>
+            <div class="numa-topology">
+              <div class="numa-diagram">
+                <div class="numa-node">
+                  <span>NUMA 0</span>
+                  <div class="numa-memory">384GB</div>
+                </div>
+                <div class="numa-interconnect"></div>
+                <div class="numa-node">
+                  <span>NUMA 1</span>
+                  <div class="numa-memory">384GB</div>
+                </div>
+              </div>
+            </div>
+            <div class="resource-controls">
+              <button class="btn-secondary">Defragment</button>
+              <button class="btn-secondary">Flush Caches</button>
+              <button class="btn-secondary">Configure Swap</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Storage Resources -->
+        <div class="resource-panel">
+          <div class="panel-header">
+            <h3><i class="fas fa-hdd"></i> Storage Resources</h3>
+          </div>
+          <div class="panel-content">
+            <div class="storage-pools">
+              <div class="storage-pool">
+                <h4>NVMe Pool</h4>
+                <div class="pool-stats">
+                  <span>60TB capacity, 45TB used, 850K IOPS</span>
+                  <span class="health-status optimal">OPTIMAL</span>
+                </div>
+                <div class="storage-bar">
+                  <div class="storage-fill" style="width: 75%"></div>
+                </div>
+              </div>
+              <div class="storage-pool">
+                <h4>SATA Pool</h4>
+                <div class="pool-stats">
+                  <span>120TB capacity, 89TB used, 45K IOPS</span>
+                  <span class="health-status good">GOOD</span>
+                </div>
+                <div class="storage-bar">
+                  <div class="storage-fill" style="width: 74%"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sessions Tab -->
+    <div class="tab-content" id="sessions">
+      <div class="sessions-layout">
+        <div class="sessions-sidebar">
+          <div class="sessions-header">
+            <button class="btn-primary" id="newSessionBtn">+ New Session</button>
+            <input type="text" placeholder="Filter sessions..." id="sessionFilter">
+            <select title="Sort sessions">
+              <option>Sort by Name</option>
+              <option>Sort by Status</option>
+              <option>Sort by Created</option>
+            </select>
+          </div>
+          <div class="sessions-list">
+            <div class="session-item active" data-session="gaming-01">
+              <div class="session-icon"><i class="fas fa-gamepad"></i></div>
+              <div class="session-info">
+                <div class="session-name">Gaming Session 01</div>
+                <div class="session-status running">RUNNING</div>
+                <div class="session-resources">
+                  <div class="resource-bar cpu" style="width: 65%"></div>
+                  <div class="resource-bar gpu" style="width: 87%"></div>
+                  <div class="resource-bar ram" style="width: 72%"></div>
+                </div>
+                <div class="session-time">2h 34m</div>
+              </div>
+              <div class="session-controls">
+                <button class="session-btn pause" title="Pause"><i class="fas fa-pause"></i></button>
+                <button class="session-btn terminate" title="Terminate"><i class="fas fa-stop"></i></button>
+              </div>
+            </div>
+            <div class="session-item" data-session="render-02">
+              <div class="session-icon"><i class="fas fa-cube"></i></div>
+              <div class="session-info">
+                <div class="session-name">Blender Render</div>
+                <div class="session-status paused">PAUSED</div>
+                <div class="session-resources">
+                  <div class="resource-bar cpu" style="width: 0%"></div>
+                  <div class="resource-bar gpu" style="width: 0%"></div>
+                  <div class="resource-bar ram" style="width: 45%"></div>
+                </div>
+                <div class="session-time">45m</div>
+              </div>
+              <div class="session-controls">
+                <button class="session-btn resume" title="Resume"><i class="fas fa-play"></i></button>
+                <button class="session-btn terminate" title="Terminate"><i class="fas fa-stop"></i></button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="session-details">
+          <div class="session-detail-header">
+            <h3 id="sessionName">Gaming Session 01</h3>
+            <span id="sessionId">Session ID: sess_001</span>
+            <div class="session-status-badge running">RUNNING</div>
+            <div class="session-actions">
+              <button class="btn-secondary">Pause</button>
+              <button class="btn-secondary">Snapshot</button>
+              <select title="Migrate">
+                <option>Migrate to...</option>
+                <option>Node-Alpha</option>
+                <option>Node-Beta</option>
+              </select>
+              <button class="btn-danger">Terminate</button>
+            </div>
+          </div>
+          <div class="session-tabs">
+            <button class="session-tab active">Overview</button>
+            <button class="session-tab">Performance</button>
+            <button class="session-tab">Logs</button>
+            <button class="session-tab">Settings</button>
+          </div>
+          <div class="session-tab-content">
+            <div class="session-overview">
+              <div class="session-info-grid">
+                <div class="info-section">
+                  <h4>Application</h4>
+                  <div class="app-info">
+                    <div class="app-icon"><i class="fas fa-gamepad"></i></div>
+                    <div class="app-details">
+                      <div class="app-name">Cyberpunk 2077</div>
+                      <div class="app-path">C:\Games\Cyberpunk2077\bin\x64\Cyberpunk2077.exe</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="info-section">
+                  <h4>Resource Allocation</h4>
+                  <div class="allocation-stats">
+                    <div class="stat-item">
+                      <span>CPU:</span>
+                      <span>16 cores (Workstation-Alpha)</span>
+                    </div>
+                    <div class="stat-item">
+                      <span>GPU:</span>
+                      <span>RTX 5090 (Gaming-Rig-01)</span>
+                    </div>
+                    <div class="stat-item">
+                      <span>RAM:</span>
+                      <span>32GB allocated</span>
+                    </div>
+                    <div class="stat-item">
+                      <span>Storage:</span>
+                      <span>NVMe Pool (100GB)</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Performance Tab -->
+    <div class="tab-content" id="performance">
+      <div class="performance-dashboard">
+        <!-- Benchmark Results -->
+        <div class="performance-panel">
+          <div class="panel-header">
+            <h3>Benchmark Results</h3>
+          </div>
+          <div class="panel-content">
+            <div class="benchmark-score">
+              <div class="score-display">
+                <span class="score-value">847,392</span>
+                <span class="score-unit">points</span>
+              </div>
+              <div class="score-details">
+                <span>2025-08-01 10:30:15 (12m 34s)</span>
+              </div>
+            </div>
+            <div class="component-scores">
+              <div class="component-score">
+                <span class="component-name">CPU</span>
+                <span class="component-value">234,891</span>
+              </div>
+              <div class="component-score">
+                <span class="component-name">GPU</span>
+                <span class="component-value">456,123</span>
+              </div>
+              <div class="component-score">
+                <span class="component-name">Memory</span>
+                <span class="component-value">98,765</span>
+              </div>
+              <div class="component-score">
+                <span class="component-name">Storage</span>
+                <span class="component-value">57,613</span>
+              </div>
+            </div>
+            <div class="benchmark-controls">
+              <button class="btn-primary">Full Benchmark</button>
+              <button class="btn-secondary">Quick Test</button>
+              <button class="btn-secondary">Custom</button>
+              <button class="btn-secondary">Schedule</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- System Performance -->
+        <div class="performance-panel">
+          <div class="panel-header">
+            <h3>System Performance</h3>
+          </div>
+          <div class="panel-content">
+            <div class="health-gauge">
+              <div class="gauge-container">
+                <div class="gauge-circle">
+                  <span class="gauge-value">94</span>
+                </div>
+                <span class="gauge-label">Overall Health</span>
+              </div>
+            </div>
+            <div class="performance-metrics">
+              <div class="metric-item">
+                <span class="metric-label">Efficiency:</span>
+                <div class="star-rating">
+                  <i class="fas fa-star"></i>
+                  <i class="fas fa-star"></i>
+                  <i class="fas fa-star"></i>
+                  <i class="fas fa-star"></i>
+                  <i class="fas fa-star-half-alt"></i>
+                </div>
+              </div>
+              <div class="metric-item">
+                <span class="metric-label">Power Efficiency:</span>
+                <span class="metric-value">2.3 GFLOPS/W</span>
+              </div>
+              <div class="metric-item">
+                <span class="metric-label">Thermal Status:</span>
+                <div class="thermal-gauge">
+                  <div class="thermal-fill" style="width: 65%"></div>
+                  <span>65°C</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Security Tab -->
+    <div class="tab-content" id="security">
+      <div class="security-sections">
+        <div class="security-tabs">
+          <button class="security-tab active" data-tab="auth">Authentication</button>
+          <button class="security-tab" data-tab="encryption">Encryption</button>
+          <button class="security-tab" data-tab="access">Access Control</button>
+          <button class="security-tab" data-tab="monitoring">Monitoring</button>
+        </div>
+        <div class="security-content">
+          <div class="security-section active" id="auth">
+            <h3>Authentication</h3>
+            <div class="auth-panels">
+              <div class="auth-panel">
+                <h4>User Management</h4>
+                <table class="user-table">
+                  <thead>
+                    <tr>
+                      <th>User</th>
+                      <th>Role</th>
+                      <th>Status</th>
+                      <th>Last Login</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>admin</td>
+                      <td>Administrator</td>
+                      <td><span class="status active">Active</span></td>
+                      <td>2025-08-01 10:30</td>
+                      <td><button class="btn-sm">Edit</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Plugins Tab (Marketplace Style) -->
+    <div class="tab-content" id="plugins">
+      <div class="plugins-layout">
+        <div class="plugins-header">
+          <div class="plugins-header-left">
+            <h1>Plugin Marketplace</h1>
+            <div class="marketplace-stats">
+              <span>234 available plugins</span>
+              <span>12 installed</span>
+              <span>3 updates available</span>
+            </div>
+          </div>
+          <div class="plugins-header-right">
+            <div class="plugins-search">
+              <input type="text" placeholder="Search plugins..." id="pluginSearch" style="padding: 8px; background: #000000; border: 1px solid #333333; color: #ffffff;">
+              <button class="btn-primary" onclick="searchPlugins()">Search</button>
+            </div>
+          </div>
+        </div>
+        
+        <div class="plugins-content">
+          <!-- Installed Plugins Section -->
+          <div class="plugins-section">
+            <h2><i class="fas fa-download"></i> Installed Plugins</h2>
+            <div class="plugins-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
+              <div class="plugin-card" style="background: #111111; border: 1px solid #333333; border-radius: 4px; padding: 16px;">
+                <div class="plugin-icon" style="width: 64px; height: 64px; background: #000000; border: 1px solid #333333; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #ffffff;">
+                  <i class="fas fa-tachometer-alt"></i>
+                </div>
+                <div class="plugin-info">
+                  <h4>Advanced Benchmarking Suite</h4>
+                  <p>Professional benchmarking tools with detailed analytics and performance insights.</p>
+                  <div class="plugin-meta" style="display: flex; justify-content: space-between; align-items: center; margin: 12px 0;">
+                    <span class="version" style="background: #333333; padding: 2px 6px; border-radius: 2px; font-size: 10px;">v2.1.0</span>
+                    <span class="rating" style="color: #ffffff;">5 stars</span>
+                  </div>
+                  <div class="plugin-toggle" style="margin: 8px 0;">
+                    <label style="display: flex; align-items: center; gap: 8px;">
+                      <input type="checkbox" checked> Enabled
+                    </label>
+                  </div>
+                </div>
+                <div class="plugin-actions" style="display: flex; gap: 8px; margin-top: 12px;">
+                  <button class="btn-secondary" onclick="configurePlugin('benchmarking')">Configure</button>
+                  <button class="btn-secondary" onclick="updatePlugin('benchmarking')">Update</button>
+                  <button class="btn-danger" onclick="uninstallPlugin('benchmarking')">Uninstall</button>
+                </div>
+              </div>
+              
+              <div class="plugin-card" style="background: #111111; border: 1px solid #333333; border-radius: 4px; padding: 16px;">
+                <div class="plugin-icon" style="width: 64px; height: 64px; background: #000000; border: 1px solid #333333; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #ffffff;">
+                  <i class="fas fa-shield-alt"></i>
+                </div>
+                <div class="plugin-info">
+                  <h4>Security Enhancement Pack</h4>
+                  <p>Advanced security monitoring and threat detection for distributed systems.</p>
+                  <div class="plugin-meta" style="display: flex; justify-content: space-between; align-items: center; margin: 12px 0;">
+                    <span class="version" style="background: #333333; padding: 2px 6px; border-radius: 2px; font-size: 10px;">v1.5.2</span>
+                    <span class="rating" style="color: #ffffff;">4 stars</span>
+                  </div>
+                  <div class="plugin-toggle" style="margin: 8px 0;">
+                    <label style="display: flex; align-items: center; gap: 8px;">
+                      <input type="checkbox" checked> Enabled
+                    </label>
+                  </div>
+                </div>
+                <div class="plugin-actions" style="display: flex; gap: 8px; margin-top: 12px;">
+                  <button class="btn-secondary" onclick="configurePlugin('security')">Configure</button>
+                  <button class="btn-primary" onclick="updatePlugin('security')">Update Available</button>
+                  <button class="btn-danger" onclick="uninstallPlugin('security')">Uninstall</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Plugin Marketplace Section -->
+          <div class="plugins-section" style="margin-top: 32px;">
+            <h2><i class="fas fa-store"></i> Plugin Marketplace</h2>
+            
+            <!-- Categories -->
+            <div class="plugin-categories" style="display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap;">
+              <button class="category-btn active" onclick="filterPlugins('all')" style="padding: 8px 16px; background: #333333; border: 1px solid #666666; color: #ffffff; cursor: pointer;">Featured</button>
+              <button class="category-btn" onclick="filterPlugins('performance')" style="padding: 8px 16px; background: #000000; border: 1px solid #333333; color: #ffffff; cursor: pointer;">Performance</button>
+              <button class="category-btn" onclick="filterPlugins('security')" style="padding: 8px 16px; background: #000000; border: 1px solid #333333; color: #ffffff; cursor: pointer;">Security</button>
+              <button class="category-btn" onclick="filterPlugins('monitoring')" style="padding: 8px 16px; background: #000000; border: 1px solid #333333; color: #ffffff; cursor: pointer;">Monitoring</button>
+              <button class="category-btn" onclick="filterPlugins('integration')" style="padding: 8px 16px; background: #000000; border: 1px solid #333333; color: #ffffff; cursor: pointer;">Integration</button>
+            </div>
+            
+            <!-- Filter Controls -->
+            <div class="marketplace-filters" style="display: flex; gap: 16px; margin: 16px 0; align-items: center;">
+              <select id="ratingFilter" title="Filter by rating" style="padding: 4px; background: #000000; border: 1px solid #333333; color: #ffffff;">
+                <option value="all">All Ratings</option>
+                <option value="5">5 stars Only</option>
+                <option value="4">4 stars and above</option>
+                <option value="3">3 stars and above</option>
+              </select>
+              <select id="priceFilter" title="Filter by price" style="padding: 4px; background: #000000; border: 1px solid #333333; color: #ffffff;">
+                <option value="all">All Plugins</option>
+                <option value="free">Free Only</option>
+                <option value="paid">Paid Only</option>
+                <option value="subscription">Subscription</option>
+              </select>
+            </div>
+            
+            <div class="plugins-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
+              <div class="plugin-card" style="background: #111111; border: 1px solid #333333; border-radius: 4px; padding: 16px;">
+                <div class="plugin-icon" style="width: 64px; height: 64px; background: #000000; border: 1px solid #333333; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #ffffff;">
+                  <i class="fas fa-chart-line"></i>
+                </div>
+                <div class="plugin-info">
+                  <h4>Analytics Dashboard Pro</h4>
+                  <p>Advanced analytics and visualization tools for performance monitoring and resource optimization.</p>
+                  <div class="plugin-meta" style="display: flex; justify-content: space-between; align-items: center; margin: 12px 0;">
+                    <span class="version" style="background: #333333; padding: 2px 6px; border-radius: 2px; font-size: 10px;">v3.0.1</span>
+                    <span class="rating" style="color: #ffffff;">5 stars</span>
+                  </div>
+                  <div class="plugin-price" style="margin: 8px 0; color: #c0c0c0;">$29.99</div>
+                </div>
+                <div class="plugin-actions" style="display: flex; gap: 8px; margin-top: 12px;">
+                  <button class="btn-primary" onclick="installPlugin('analytics-pro')">Install</button>
+                  <button class="btn-secondary" onclick="previewPlugin('analytics-pro')">Preview</button>
+                  <button class="btn-secondary" onclick="learnMore('analytics-pro')">Learn More</button>
+                </div>
+              </div>
+              
+              <div class="plugin-card" style="background: #111111; border: 1px solid #333333; border-radius: 4px; padding: 16px;">
+                <div class="plugin-icon" style="width: 64px; height: 64px; background: #000000; border: 1px solid #333333; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #ffffff;">
+                  <i class="fas fa-brain"></i>
+                </div>
+                <div class="plugin-info">
+                  <h4>AI Optimizer Engine</h4>
+                  <p>Machine learning-powered system optimization with predictive resource allocation and intelligent workload balancing.</p>
+                  <div class="plugin-meta" style="display: flex; justify-content: space-between; align-items: center; margin: 12px 0;">
+                    <span class="version" style="background: #333333; padding: 2px 6px; border-radius: 2px; font-size: 10px;">v2.5.0</span>
+                    <span class="rating" style="color: #ffffff;">4 stars</span>
+                  </div>
+                  <div class="plugin-price" style="margin: 8px 0; color: #c0c0c0;">Free</div>
+                </div>
+                <div class="plugin-actions" style="display: flex; gap: 8px; margin-top: 12px;">
+                  <button class="btn-primary" onclick="installPlugin('ai-optimizer')">Install</button>
+                  <button class="btn-secondary" onclick="previewPlugin('ai-optimizer')">Preview</button>
+                  <button class="btn-secondary" onclick="learnMore('ai-optimizer')">Learn More</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Plugin Development Section -->
+          <div class="plugins-section" style="margin-top: 32px;">
+            <h2><i class="fas fa-code"></i> Plugin Development</h2>
+            <div class="development-tools" style="background: #111111; border: 1px solid #333333; border-radius: 4px; padding: 20px;">
+              <div class="dev-tools-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 32px;">
+                <div class="dev-section">
+                  <h3>Development Tools</h3>
+                  <div class="dev-actions" style="display: flex; flex-direction: column; gap: 12px;">
+                    <button class="btn-primary" onclick="downloadSDK()" style="display: flex; align-items: center; gap: 8px;">
+                      <i class="fas fa-download"></i>
+                      <span>Download SDK v1.2.0</span>
+                    </button>
+                    <button class="btn-secondary" onclick="openDocumentation()" style="display: flex; align-items: center; gap: 8px;">
+                      <i class="fas fa-book"></i>
+                      <span>Developer Documentation</span>
+                    </button>
+                    <button class="btn-secondary" onclick="openSampleRepo()" style="display: flex; align-items: center; gap: 8px;">
+                      <i class="fas fa-code-branch"></i>
+                      <span>Sample Plugin Repository</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="dev-section">
+                  <h3>Testing Environment</h3>
+                  <div class="sandbox-info" style="margin-bottom: 16px;">
+                    <p style="font-size: 12px; color: #999999; margin-bottom: 8px;">Test your plugins in a safe, isolated environment before deployment.</p>
+                    <div class="sandbox-status" style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                      <div style="width: 8px; height: 8px; background: #ffffff; border-radius: 50%;"></div>
+                      <span style="font-size: 12px;">Sandbox Ready</span>
+                    </div>
+                  </div>
+                  <button class="btn-primary" onclick="openSandbox()" style="display: flex; align-items: center; gap: 8px;">
+                    <i class="fas fa-flask"></i>
+                    <span>Open Sandbox Environment</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Network Tab -->
+    <div class="tab-content" id="network">
+      <div class="network-layout">
+        <div class="network-header">
+          <h1>Network Topology & Performance</h1>
+          <div class="network-actions">
+            <button class="action-btn" onclick="refreshTopology()" title="Refresh topology">
+              <i class="fas fa-sync-alt"></i> Refresh
+            </button>
+            <button class="action-btn" onclick="exportTopology()" title="Export topology">
+              <i class="fas fa-download"></i> Export
+            </button>
+            <button class="action-btn" onclick="networkDiagnostics()" title="Run diagnostics">
+              <i class="fas fa-stethoscope"></i> Diagnostics
+            </button>
+          </div>
+        </div>
+        
+        <div class="network-topology-section">
+          <div class="topology-controls">
+            <div class="layout-controls">
+              <label>Layout:</label>
+              <select id="layoutType" onchange="changeLayout(this.value)" title="Select network layout algorithm">
+                <option value="auto">Auto</option>
+                <option value="manual">Manual</option>
+                <option value="hierarchical">Hierarchical</option>
+                <option value="radial">Radial</option>
+              </select>
+            </div>
+            <div class="zoom-controls">
+              <button class="zoom-btn" onclick="zoomIn()" title="Zoom in">
+                <i class="fas fa-search-plus"></i>
+              </button>
+              <button class="zoom-btn" onclick="zoomOut()" title="Zoom out">
+                <i class="fas fa-search-minus"></i>
+              </button>
+              <button class="zoom-btn" onclick="fitToScreen()" title="Fit to screen">
+                <i class="fas fa-expand-arrows-alt"></i>
+              </button>
+            </div>
+          </div>
+          
+          <div class="topology-canvas" id="networkCanvas">
+            <div class="grid-background"></div>
+            <!-- Network topology will be rendered here -->
+            <div class="node-element control-node" style="left: 200px; top: 100px;" title="Primary Controller">
+              <i class="fas fa-crown"></i>
+              <span>Control-01</span>
+            </div>
+            <div class="node-element compute-node" style="left: 100px; top: 200px;" title="Workstation Alpha">
+              <i class="fas fa-server"></i>
+              <span>Compute-01</span>
+            </div>
+            <div class="node-element gpu-node" style="left: 300px; top: 200px;" title="Gaming Rig 01">
+              <i class="fas fa-microchip"></i>
+              <span>GPU-01</span>
+            </div>
+            <div class="node-element storage-node" style="left: 200px; top: 300px;" title="Storage Array">
+              <i class="fas fa-hdd"></i>
+              <span>Storage-01</span>
+            </div>
+            <!-- Connection lines will be drawn with SVG -->
+            <svg class="connection-overlay">
+              <line x1="200" y1="130" x2="130" y2="200" class="connection active" />
+              <line x1="200" y1="130" x2="300" y2="200" class="connection active" />
+              <line x1="200" y1="130" x2="200" y2="270" class="connection active" />
+            </svg>
+          </div>
+        </div>
+        
+        <div class="network-stats-section">
+          <div class="stats-grid">
+            <div class="stats-panel">
+              <h3>Interface Statistics</h3>
+              <div class="interface-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Interface</th>
+                      <th>Status</th>
+                      <th>Speed</th>
+                      <th>RX</th>
+                      <th>TX</th>
+                      <th>Errors</th>
+                    </tr>
+                  </thead>
+                  <tbody id="interfaceTableBody">
+                    <tr>
+                      <td>eth0</td>
+                      <td><span class="status-badge active">Up</span></td>
+                      <td>10 Gbps</td>
+                      <td>2.3 GB/s</td>
+                      <td>1.8 GB/s</td>
+                      <td>0</td>
+                    </tr>
+                    <tr>
+                      <td>ib0</td>
+                      <td><span class="status-badge active">Up</span></td>
+                      <td>200 Gbps</td>
+                      <td>45.2 GB/s</td>
+                      <td>43.7 GB/s</td>
+                      <td>0</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            
+            <div class="stats-panel">
+              <h3>Traffic Analysis</h3>
+              <div class="traffic-charts">
+                <div class="chart-container">
+                  <h4>Bandwidth Usage</h4>
+                  <canvas id="bandwidthChart"></canvas>
+                </div>
+                <div class="chart-container">
+                  <h4>Latency Distribution</h4>
+                  <canvas id="latencyChart"></canvas>
+                </div>
+              </div>
+            </div>
+            
+            <div class="stats-panel">
+              <h3>QoS & Diagnostics</h3>
+              <div class="qos-controls">
+                <div class="qos-slider">
+                  <label>Gaming Priority:</label>
+                  <input type="range" min="0" max="100" value="80" onchange="updateQoS('gaming', this.value)" title="Gaming traffic priority percentage">
+                  <span>80%</span>
+                </div>
+                <div class="qos-slider">
+                  <label>AI Priority:</label>
+                  <input type="range" min="0" max="100" value="70" onchange="updateQoS('ai', this.value)" title="AI processing priority percentage">
+                  <span>70%</span>
+                </div>
+                <div class="qos-slider">
+                  <label>Storage Priority:</label>
+                  <input type="range" min="0" max="100" value="60" onchange="updateQoS('storage', this.value)" title="Storage traffic priority percentage">
+                  <span>60%</span>
+                </div>
+                <div class="qos-slider">
+                  <label>Management Priority:</label>
+                  <input type="range" min="0" max="100" value="90" onchange="updateQoS('management', this.value)" title="Management traffic priority percentage">
+                  <span>90%</span>
+                </div>
+              </div>
+              
+              <div class="diagnostic-tools">
+                <button class="diag-btn" onclick="runPingTest()">
+                  <i class="fas fa-satellite-dish"></i> Ping Test
+                </button>
+                <button class="diag-btn" onclick="runBandwidthTest()">
+                  <i class="fas fa-tachometer-alt"></i> Bandwidth Test
+                </button>
+                <button class="diag-btn" onclick="runLatencyTest()">
+                  <i class="fas fa-clock"></i> Latency Test
+                </button>
+                <button class="diag-btn" onclick="runTraceRoute()">
+                  <i class="fas fa-route"></i> Trace Route
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Tab -->
+    <div class="tab-content" id="ai">
+      <div class="ai-layout">
+        <div class="ai-header">
+          <h1>AI Optimization & Intelligence</h1>
+          <div class="ai-status">
+            <div class="ai-indicator active">
+              <i class="fas fa-brain"></i>
+              <span>AI Engine: Active</span>
+            </div>
+            <div class="model-version">
+              <span>Model v2.3.1</span>
+            </div>
+          </div>
+        </div>
+        
+        <div class="ai-dashboard">
+          <div class="ai-metrics-section">
+            <div class="metric-card">
+              <h3>Prediction Accuracy</h3>
+              <div class="accuracy-gauge">
+                <canvas id="accuracyGauge"></canvas>
+                <div class="gauge-value">94.7%</div>
+              </div>
+              <div class="metric-details">
+                <div class="detail-item">
+                  <span>Input Prediction:</span>
+                  <span>96.2%</span>
+                </div>
+                <div class="detail-item">
+                  <span>Frame Prediction:</span>
+                  <span>93.8%</span>
+                </div>
+                <div class="detail-item">
+                  <span>Resource Forecast:</span>
+                  <span>94.1%</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="metric-card">
+              <h3>Performance Impact</h3>
+              <div class="impact-chart">
+                <canvas id="performanceImpactChart"></canvas>
+              </div>
+              <div class="impact-stats">
+                <div class="stat-item positive">
+                  <i class="fas fa-arrow-up"></i>
+                  <span>+23% Efficiency</span>
+                </div>
+                <div class="stat-item positive">
+                  <i class="fas fa-arrow-down"></i>
+                  <span>-15% Latency</span>
+                </div>
+                <div class="stat-item positive">
+                  <i class="fas fa-arrow-up"></i>
+                  <span>+18% Throughput</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="metric-card">
+              <h3>Learning Progress</h3>
+              <div class="learning-progress">
+                <div class="progress-item">
+                  <label>Model Training:</label>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: 87%"></div>
+                  </div>
+                  <span>87%</span>
+                </div>
+                <div class="progress-item">
+                  <label>Data Processing:</label>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: 92%"></div>
+                  </div>
+                  <span>92%</span>
+                </div>
+                <div class="progress-item">
+                  <label>Pattern Recognition:</label>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width: 78%"></div>
+                  </div>
+                  <span>78%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="ai-controls-section">
+            <div class="control-panel">
+              <h3>AI Engine Controls</h3>
+              <div class="control-groups">
+                <div class="control-group">
+                  <label>Optimization Mode:</label>
+                  <select id="optimizationMode" onchange="changeOptimizationMode(this.value)" title="Select AI optimization mode">
+                    <option value="performance">Performance</option>
+                    <option value="efficiency">Efficiency</option>
+                    <option value="balanced" selected>Balanced</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                
+                <div class="control-group">
+                  <label>Learning Rate:</label>
+                  <input type="range" min="0.1" max="2.0" step="0.1" value="1.0" onchange="updateLearningRate(this.value)" title="AI model learning rate">
+                  <span id="learningRateValue">1.0</span>
+                </div>
+                
+                <div class="control-group">
+                  <label>Prediction Horizon:</label>
+                  <input type="range" min="1" max="60" value="15" onchange="updatePredictionHorizon(this.value)" title="Prediction time horizon in seconds">
+                  <span id="horizonValue">15s</span>
+                </div>
+                
+                <div class="control-group">
+                  <div class="checkbox-group">
+                    <label>
+                      <input type="checkbox" checked onchange="toggleAutoOptimization(this.checked)">
+                      Auto-Optimization
+                    </label>
+                    <label>
+                      <input type="checkbox" checked onchange="toggleAnomalyDetection(this.checked)">
+                      Anomaly Detection
+                    </label>
+                    <label>
+                      <input type="checkbox" onchange="toggleExperimentalFeatures(this.checked)">
+                      Experimental Features
+                    </label>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="action-buttons">
+                <button class="ai-btn primary" onclick="retrainModel()">
+                  <i class="fas fa-cog"></i> Retrain Model
+                </button>
+                <button class="ai-btn secondary" onclick="exportModel()">
+                  <i class="fas fa-download"></i> Export Model
+                </button>
+                <button class="ai-btn danger" onclick="resetModel()">
+                  <i class="fas fa-undo"></i> Reset Model
+                </button>
+              </div>
+            </div>
+            
+            <div class="recommendations-panel">
+              <h3>AI Recommendations</h3>
+              <div class="recommendations-list" id="recommendationsList">
+                <div class="recommendation-card high-impact">
+                  <div class="recommendation-header">
+                    <h4>Optimize GPU Memory Allocation</h4>
+                    <span class="impact-badge high">High Impact</span>
+                  </div>
+                  <p>AI detected suboptimal GPU memory usage patterns. Reallocating can improve performance by ~12%.</p>
+                  <div class="recommendation-actions">
+                    <button class="rec-btn apply" onclick="applyRecommendation('gpu-memory')">Apply</button>
+                    <button class="rec-btn learn-more" onclick="learnMore('gpu-memory')">Learn More</button>
+                    <button class="rec-btn dismiss" onclick="dismissRecommendation('gpu-memory')">Dismiss</button>
+                  </div>
+                </div>
+                
+                <div class="recommendation-card medium-impact">
+                  <div class="recommendation-header">
+                    <h4>Adjust Network QoS Settings</h4>
+                    <span class="impact-badge medium">Medium Impact</span>
+                  </div>
+                  <p>Network traffic patterns suggest gaming workloads could benefit from higher priority allocation.</p>
+                  <div class="recommendation-actions">
+                    <button class="rec-btn apply" onclick="applyRecommendation('network-qos')">Apply</button>
+                    <button class="rec-btn learn-more" onclick="learnMore('network-qos')">Learn More</button>
+                    <button class="rec-btn dismiss" onclick="dismissRecommendation('network-qos')">Dismiss</button>
+                  </div>
+                </div>
+                
+                <div class="recommendation-card low-impact">
+                  <div class="recommendation-header">
+                    <h4>Schedule Background Tasks</h4>
+                    <span class="impact-badge low">Low Impact</span>
+                  </div>
+                  <p>System maintenance tasks can be optimally scheduled during predicted low-usage periods.</p>
+                  <div class="recommendation-actions">
+                    <button class="rec-btn apply" onclick="applyRecommendation('task-schedule')">Apply</button>
+                    <button class="rec-btn learn-more" onclick="learnMore('task-schedule')">Learn More</button>
+                    <button class="rec-btn dismiss" onclick="dismissRecommendation('task-schedule')">Dismiss</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-content" id="plugins">
+      <div class="plugins-layout">
+        <div class="plugins-header">
+          <h2>Plugin Marketplace</h2>
+          <div class="plugins-search">
+            <input type="text" placeholder="Search plugins...">
+            <button class="btn-primary">Search</button>
+          </div>
+        </div>
+        <div class="plugins-content">
+          <div class="plugin-categories">
+            <button class="category-btn active">All</button>
+            <button class="category-btn">Performance</button>
+            <button class="category-btn">Security</button>
+            <button class="category-btn">Monitoring</button>
+            <button class="category-btn">Integration</button>
+          </div>
+          <div class="plugins-grid">
+            <div class="plugin-card">
+              <div class="plugin-icon"><i class="fas fa-tachometer-alt"></i></div>
+              <div class="plugin-info">
+                <h4>Advanced Benchmarking Suite</h4>
+                <p>Professional benchmarking tools with detailed analytics.</p>
+                <div class="plugin-meta">
+                  <span class="version">v2.1.0</span>
+                  <span class="rating">5 stars</span>
+                </div>
+              </div>
+              <div class="plugin-actions">
+                <button class="btn-primary">Install</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Tab -->
+    <div class="tab-content" id="settings">
+      <div class="settings-layout">
+        <div class="settings-header">
+          <h1>System Configuration</h1>
+          <div class="settings-actions">
+            <button class="action-btn" onclick="exportSettings()" title="Export configuration">
+              <i class="fas fa-download"></i> Export
+            </button>
+            <button class="action-btn" onclick="importSettings()" title="Import configuration">
+              <i class="fas fa-upload"></i> Import
+            </button>
+            <button class="action-btn" onclick="resetSettings()" title="Reset to defaults">
+              <i class="fas fa-undo"></i> Reset
+            </button>
+            <button class="action-btn primary" onclick="saveSettings()" title="Save configuration">
+              <i class="fas fa-save"></i> Save
+            </button>
+          </div>
+        </div>
+        
+        <div class="settings-content">
+          <div class="settings-sidebar">
+            <div class="settings-categories">
+              <button class="category-item active" onclick="showSettingsCategory('general')" data-category="general">
+                <i class="fas fa-cog"></i>
+                <span>General</span>
+              </button>
+              <button class="category-item" onclick="showSettingsCategory('performance')" data-category="performance">
+                <i class="fas fa-tachometer-alt"></i>
+                <span>Performance</span>
+              </button>
+              <button class="category-item" onclick="showSettingsCategory('network')" data-category="network">
+                <i class="fas fa-network-wired"></i>
+                <span>Network</span>
+              </button>
+              <button class="category-item" onclick="showSettingsCategory('monitoring')" data-category="monitoring">
+                <i class="fas fa-chart-line"></i>
+                <span>Monitoring</span>
+              </button>
+              <button class="category-item" onclick="showSettingsCategory('advanced')" data-category="advanced">
+                <i class="fas fa-flask"></i>
+                <span>Advanced</span>
+              </button>
+            </div>
+          </div>
+          
+          <div class="settings-main">
+            <!-- General Category -->
+            <div class="settings-category active" id="generalSettings">
+              <h2>General Settings</h2>
+              
+              <div class="setting-section">
+                <h3>Application Settings</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>Startup Behavior:</label>
+                    <select id="startupBehavior" title="Select startup behavior">
+                      <option value="auto-connect">Auto-connect to cluster</option>
+                      <option value="show-dashboard">Show dashboard</option>
+                      <option value="minimize">Start minimized</option>
+                      <option value="restore-session">Restore last session</option>
+                    </select>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Theme:</label>
+                    <div class="radio-group">
+                      <label><input type="radio" name="theme" value="dark" checked> Dark</label>
+                      <label><input type="radio" name="theme" value="light"> Light</label>
+                      <label><input type="radio" name="theme" value="auto"> Auto</label>
+                    </div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Language:</label>
+                    <select id="language" title="Select interface language">
+                      <option value="en">English</option>
+                      <option value="fr">Français</option>
+                      <option value="de">Deutsch</option>
+                      <option value="ja">日本語</option>
+                    </select>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="autoUpdates" checked>
+                      Enable automatic updates
+                    </label>
+                    <div class="setting-description">Automatically download and install updates</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Update Channel:</label>
+                    <select id="updateChannel" title="Select update channel">
+                      <option value="stable">Stable</option>
+                      <option value="beta">Beta</option>
+                      <option value="dev">Development</option>
+                    </select>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="telemetry">
+                      Share anonymous usage data
+                    </label>
+                    <div class="setting-description">Help improve Omega by sharing usage statistics</div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="setting-section">
+                <h3>Cluster Defaults</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>Default Cluster Name:</label>
+                    <input type="text" id="defaultClusterName" value="Personal-Supercomputer-01" title="Default cluster name">
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="autoDiscovery" checked>
+                      Auto-discovery of nodes
+                    </label>
+                    <div class="setting-description">Automatically discover and register new nodes</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Join Timeout (seconds):</label>
+                    <input type="number" id="joinTimeout" value="30" min="5" max="300" title="Node join timeout">
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Heartbeat Interval (seconds):</label>
+                    <input type="number" id="heartbeatInterval" value="5" min="1" max="60" title="Node heartbeat interval">
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Performance Category -->
+            <div class="settings-category" id="performanceSettings">
+              <h2>Performance Settings</h2>
+              
+              <div class="setting-section">
+                <h3>Resource Allocation</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>CPU Reservation (%):</label>
+                    <input type="range" id="cpuReservation" min="0" max="100" value="20" title="Reserved CPU percentage for system">
+                    <span id="cpuReservationValue">20%</span>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Memory Reservation (%):</label>
+                    <input type="range" id="memoryReservation" min="0" max="50" value="15" title="Reserved memory percentage for system">
+                    <span id="memoryReservationValue">15%</span>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>GPU Sharing Policy:</label>
+                    <select id="gpuSharingPolicy" title="GPU sharing mode">
+                      <option value="exclusive">Exclusive</option>
+                      <option value="shared" selected>Shared</option>
+                      <option value="auto">Auto</option>
+                    </select>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Storage Cache Size:</label>
+                    <div class="input-with-unit">
+                      <input type="number" id="storageCacheSize" value="32" min="1" max="512" title="Storage cache size">
+                      <select id="storageCacheUnit" title="Cache size unit">
+                        <option value="GB" selected>GB</option>
+                        <option value="TB">TB</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="setting-section">
+                <h3>Optimization</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="predictionEngine" checked>
+                      Enable prediction engine
+                    </label>
+                    <div class="setting-description">Use AI to predict resource needs</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="autoOptimization" checked>
+                      Enable auto-optimization
+                    </label>
+                    <div class="setting-description">Automatically optimize system performance</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Optimization Aggressiveness:</label>
+                    <input type="range" id="optimizationLevel" min="1" max="10" value="7" title="Optimization aggressiveness level">
+                    <span id="optimizationLevelValue">7</span>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Power Management:</label>
+                    <select id="powerManagement" title="Power management mode">
+                      <option value="performance" selected>Performance</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="efficiency">Efficiency</option>
+                    </select>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Thermal Throttling Temperature (°C):</label>
+                    <input type="range" id="thermalThrottle" min="60" max="90" value="80" title="Thermal throttling temperature">
+                    <span id="thermalThrottleValue">80°C</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Network Category -->
+            <div class="settings-category" id="networkSettings">
+              <h2>Network Configuration</h2>
+              
+              <div class="setting-section">
+                <h3>Network Configuration</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>Preferred Interface:</label>
+                    <select id="preferredInterface" title="Preferred network interface">
+                      <option value="auto" selected>Auto-detect</option>
+                      <option value="eth0">Ethernet (eth0)</option>
+                      <option value="ib0">InfiniBand (ib0)</option>
+                      <option value="wlan0">Wireless (wlan0)</option>
+                    </select>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Port Range Start:</label>
+                    <input type="number" id="portRangeStart" value="8000" min="1024" max="65535" title="Starting port number">
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Port Range End:</label>
+                    <input type="number" id="portRangeEnd" value="9000" min="1024" max="65535" title="Ending port number">
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Bandwidth Limit:</label>
+                    <div class="bandwidth-control">
+                      <input type="range" id="bandwidthLimit" min="0" max="1000" value="0" title="Bandwidth limit in Gbps (0 = unlimited)">
+                      <span id="bandwidthLimitValue">Unlimited</span>
+                      <label>
+                        <input type="checkbox" id="unlimitedBandwidth" checked>
+                        Unlimited
+                      </label>
+                    </div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="qosEnabled" checked>
+                      Enable QoS (Quality of Service)
+                    </label>
+                    <button class="settings-btn" onclick="configureQoS()">Configure QoS</button>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="setting-section">
+                <h3>Security Settings</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="encryptionRequired" checked>
+                      Require encryption for all connections
+                    </label>
+                    <div class="setting-description">Force TLS encryption for all cluster communications</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="certificateValidation" checked>
+                      Validate SSL certificates
+                    </label>
+                    <div class="setting-description">Verify authenticity of SSL certificates</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="firewallIntegration">
+                      Enable firewall integration
+                    </label>
+                    <div class="setting-description">Automatically configure firewall rules</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="vpnSupport">
+                      Enable VPN support
+                    </label>
+                    <button class="settings-btn" onclick="configureVPN()">Configure VPN</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Monitoring Category -->
+            <div class="settings-category" id="monitoringSettings">
+              <h2>Monitoring & Logging</h2>
+              
+              <div class="setting-section">
+                <h3>Logging Configuration</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>Log Level:</label>
+                    <select id="logLevel" title="Logging verbosity level">
+                      <option value="debug">Debug</option>
+                      <option value="info" selected>Info</option>
+                      <option value="warn">Warning</option>
+                      <option value="error">Error</option>
+                    </select>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Log Retention (days):</label>
+                    <input type="number" id="logRetention" value="30" min="1" max="365" title="Number of days to keep logs">
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="logRotation" checked>
+                      Enable log rotation
+                    </label>
+                    <div class="setting-description">Automatically rotate logs when they reach size limit</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Log Rotation Size (MB):</label>
+                    <input type="number" id="logRotationSize" value="100" min="1" max="1000" title="Log file size limit in MB">
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="remoteLogging">
+                      Enable remote logging
+                    </label>
+                    <button class="settings-btn" onclick="configureSyslog()">Configure Syslog</button>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="setting-section">
+                <h3>Metrics Collection</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>Collection Interval:</label>
+                    <select id="metricsInterval" title="Metrics collection frequency">
+                      <option value="1s">1 second</option>
+                      <option value="5s" selected>5 seconds</option>
+                      <option value="10s">10 seconds</option>
+                      <option value="30s">30 seconds</option>
+                    </select>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>Metrics Retention (days):</label>
+                    <input type="number" id="metricsRetention" value="90" min="7" max="365" title="Number of days to keep metrics">
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="externalMetrics">
+                      Export to external systems
+                    </label>
+                    <div class="setting-description">Export metrics to Prometheus/Grafana</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="alertingEnabled" checked>
+                      Enable alerting
+                    </label>
+                    <button class="settings-btn" onclick="configureAlerting()">Configure Alerts</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Advanced Category -->
+            <div class="settings-category" id="advancedSettings">
+              <h2>Advanced Settings</h2>
+              
+              <div class="setting-section">
+                <h3>Experimental Features</h3>
+                <div class="setting-group">
+                  <div class="setting-item experimental">
+                    <label>
+                      <input type="checkbox" id="quantumOptimization">
+                      <i class="fas fa-exclamation-triangle warning-icon"></i>
+                      Quantum optimization (Experimental)
+                    </label>
+                    <div class="setting-description warning">Requires quantum computing hardware. May cause instability.</div>
+                  </div>
+                  
+                  <div class="setting-item experimental">
+                    <label>
+                      <input type="checkbox" id="neuralPredictionV2">
+                      Neural prediction v2 (Beta)
+                    </label>
+                    <div class="setting-description">Advanced neural network for resource prediction</div>
+                  </div>
+                  
+                  <div class="setting-item experimental">
+                    <label>
+                      <input type="checkbox" id="holographicNetworking">
+                      <i class="fas fa-exclamation-triangle warning-icon"></i>
+                      Holographic networking (Requires restart)
+                    </label>
+                    <div class="setting-description warning">Experimental 3D network topology. Requires system restart.</div>
+                  </div>
+                  
+                  <div class="setting-item experimental">
+                    <label>
+                      <input type="checkbox" id="bioFeedback">
+                      Bio-feedback integration (Hardware required)
+                    </label>
+                    <div class="setting-description">Integrate biological feedback sensors for optimization</div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="setting-section">
+                <h3>Developer Options</h3>
+                <div class="setting-group">
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="debugMode">
+                      Enable debug mode
+                    </label>
+                    <div class="setting-description">Enable verbose logging and debug features</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="apiAccess">
+                      Enable API access
+                    </label>
+                    <button class="settings-btn" onclick="generateApiToken()">Generate Token</button>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="pluginDevelopment">
+                      Plugin development mode
+                    </label>
+                    <div class="setting-description warning">Allows loading unsigned plugins. Security risk.</div>
+                  </div>
+                  
+                  <div class="setting-item">
+                    <label>
+                      <input type="checkbox" id="performanceProfiling">
+                      Performance profiling
+                    </label>
+                    <div class="setting-description">Enable performance profiling with ~2% overhead</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Context Menus -->
+  <div class="context-menu" id="contextMenu">
+    <div class="context-item">Copy</div>
+    <div class="context-item">Paste</div>
+    <div class="context-separator"></div>
+    <div class="context-item">Properties</div>
+  </div>
+
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <div class="status-left">
+      <span id="statusText">Ready</span>
+    </div>
+    <div class="status-right">
+      <span id="memoryUsage">Memory: 1.2GB/1.5TB</span>
+      <span id="networkStatus">Network: 10Gbps</span>
+      <span id="currentTime">10:35:42</span>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.min.js"></script>
+  <script src="omega-renderer.js"></script>
+</body>
+</html>
