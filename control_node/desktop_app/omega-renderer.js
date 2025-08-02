@@ -287,7 +287,7 @@ class OmegaControlCenter {
         },
         body: JSON.stringify({
           username: 'admin',
-          password: 'omega123'
+          password: process.env.OMEGA_ADMIN_PASSWORD || 'omega123'
         })
       });
 

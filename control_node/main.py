@@ -41,7 +41,7 @@ NODE_COUNT = Gauge('omega_node_count', 'Number of registered nodes')
 LATENCY_P95 = Gauge('omega_latency_p95_ms', 'P95 latency in milliseconds')
 
 # Secret key for JWT tokens
-SECRET_KEY = "your-secret-key-here"  # In initial prototype, use environment variable
+SECRET_KEY = os.getenv("OMEGA_SECRET_KEY", "omega-super-desktop-secret-key-prototype-change-in-production")
         
 metrics = SimpleMetrics()
 
@@ -55,7 +55,7 @@ import sqlite3
 
 try:
     # Try PostgreSQL first
-    DATABASE_URL = "postgresql://omega:omega@localhost/omega_db"
+    DATABASE_URL = os.getenv("OMEGA_DB_URL", "postgresql://omega:omega@localhost/omega_db")
     engine = create_engine(DATABASE_URL)
     # Test the connection
     with engine.connect():
@@ -90,7 +90,8 @@ except Exception as e:
 redis_client = None
 try:
     import redis
-    redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+    redis_url = os.getenv("OMEGA_REDIS_URL", "redis://localhost:6379")
+    redis_client = redis.from_url(redis_url, decode_responses=True)
     # Test Redis connection
     redis_client.ping()
     print("Using Redis for caching")
@@ -303,7 +304,6 @@ orchestrator = OmegaResourceOrchestrator()
 sync_engine = TemporalSyncEngine()
 
 # Security setup
-SECRET_KEY = "omega-super-desktop-secret-key-prototype"
 security = HTTPBearer()
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
@@ -342,7 +342,9 @@ app.add_middleware(
 @app.post("/auth/login")
 async def login(username: str, password: str):
     # In initial prototype: verify against LDAP/OAuth
-    if username == "admin" and password == "omega123":
+    # Use environment variable for admin password or default
+    admin_password = os.getenv("OMEGA_ADMIN_PASSWORD", "omega123")
+    if username == "admin" and password == admin_password:
         token = jwt.encode(
             {"user_id": username, "exp": datetime.utcnow() + timedelta(hours=8)},
             SECRET_KEY,
@@ -358,15 +360,19 @@ async def register_node(node_info: NodeInfo, user_id: str = Depends(verify_token
     orchestrator.register_node(node_info)
     
     # Store in Redis for real-time access
-    redis_client.hset(
-        f"node:{node_info.node_id}",
-        mapping={
-            "type": node_info.node_type,
-            "status": node_info.status,
-            "resources": json.dumps(node_info.resources),
-            "last_seen": str(datetime.utcnow())
-        }
-    )
+    if redis_client:
+        try:
+            redis_client.hset(
+                f"node:{node_info.node_id}",
+                mapping={
+                    "type": node_info.node_type,
+                    "status": node_info.status,
+                    "resources": json.dumps(node_info.resources),
+                    "last_seen": str(datetime.utcnow())
+                }
+            )
+        except Exception as e:
+            logging.warning(f"Failed to store node data in Redis: {e}")
     
     logging.info(f"Node registered: {node_info.node_id} by user {user_id}")
     return {"status": "registered", "node_id": node_info.node_id}
@@ -380,7 +386,11 @@ async def list_nodes(user_id: str = Depends(verify_token)):
 async def deregister_node(node_id: str, user_id: str = Depends(verify_token)):
     if node_id in orchestrator.nodes:
         del orchestrator.nodes[node_id]
-        redis_client.delete(f"node:{node_id}")
+        if redis_client:
+            try:
+                redis_client.delete(f"node:{node_id}")
+            except Exception as e:
+                logging.warning(f"Failed to delete node from Redis: {e}")
         NODE_COUNT.set(len(orchestrator.nodes))
         return {"status": "deregistered"}
     raise HTTPException(status_code=404, detail="Node not found")
@@ -433,7 +443,11 @@ async def create_session(request: SessionRequest, user_id: str = Depends(verify_
         db.close()
     
     # Store in Redis for real-time access
-    redis_client.hset(f"session:{session_id}", mapping=session_data)
+    if redis_client:
+        try:
+            redis_client.hset(f"session:{session_id}", mapping=session_data)
+        except Exception as e:
+            logging.warning(f"Failed to store session data in Redis: {e}")
     
     logging.info(f"Session created: {session_id} on node {target_node}")
     return {"session_id": session_id, "node_id": target_node, "status": "created"}
@@ -447,7 +461,11 @@ async def list_sessions(user_id: str = Depends(verify_token)):
 async def terminate_session(session_id: str, user_id: str = Depends(verify_token)):
     if session_id in orchestrator.sessions:
         del orchestrator.sessions[session_id]
-        redis_client.delete(f"session:{session_id}")
+        if redis_client:
+            try:
+                redis_client.delete(f"session:{session_id}")
+            except Exception as e:
+                logging.warning(f"Failed to delete session from Redis: {e}")
         ACTIVE_SESSIONS.set(len(orchestrator.sessions))
         
         # Update database
@@ -458,6 +476,8 @@ async def terminate_session(session_id: str, user_id: str = Depends(verify_token
                 session.state = "TERMINATED"
                 session.updated_at = datetime.utcnow()
                 db.commit()
+        except Exception as e:
+            logging.error(f"Failed to update session in database: {e}")
         finally:
             db.close()
         
@@ -490,7 +510,11 @@ async def process_task(task_id: str, task: TaskRequest):
             "completed_at": datetime.utcnow().isoformat()
         }
         
-        redis_client.hset(f"task:{task_id}", mapping=result)
+        if redis_client:
+            try:
+                redis_client.hset(f"task:{task_id}", mapping=result)
+            except Exception as e:
+                logging.warning(f"Failed to store task result in Redis: {e}")
         logging.info(f"Task completed: {task_id}")
         
     except Exception as e:
@@ -500,15 +524,26 @@ async def process_task(task_id: str, task: TaskRequest):
             "error": str(e),
             "completed_at": datetime.utcnow().isoformat()
         }
-        redis_client.hset(f"task:{task_id}", mapping=error_result)
+        if redis_client:
+            try:
+                redis_client.hset(f"task:{task_id}", mapping=error_result)
+            except Exception as redis_error:
+                logging.warning(f"Failed to store task error in Redis: {redis_error}")
         logging.error(f"Task failed: {task_id} - {e}")
 
 @app.get("/api/v1/tasks/{task_id}")
 async def get_task_status(task_id: str, user_id: str = Depends(verify_token)):
-    result = redis_client.hgetall(f"task:{task_id}")
-    if not result:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return result
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Task storage not available")
+    
+    try:
+        result = redis_client.hgetall(f"task:{task_id}")
+        if not result:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return result
+    except Exception as e:
+        logging.error(f"Failed to retrieve task status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve task status")
 
 # Latency reporting and optimization
 @app.post("/api/v1/metrics/latency")
@@ -517,16 +552,20 @@ async def report_latency(metrics: LatencyMetric, user_id: str = Depends(verify_t
     LATENCY_P95.set(metrics.input_to_pixel_ms)
     
     # Store in Redis for real-time monitoring
-    redis_client.lpush("latency_metrics", json.dumps({
-        "timestamp": metrics.timestamp,
-        "input_to_pixel_ms": metrics.input_to_pixel_ms,
-        "network_hop_ms": metrics.network_hop_ms,
-        "gpu_render_ms": metrics.gpu_render_ms,
-        "prediction_confidence": metrics.prediction_confidence
-    }))
-    
-    # Keep only last 1000 metrics
-    redis_client.ltrim("latency_metrics", 0, 999)
+    if redis_client:
+        try:
+            redis_client.lpush("latency_metrics", json.dumps({
+                "timestamp": metrics.timestamp,
+                "input_to_pixel_ms": metrics.input_to_pixel_ms,
+                "network_hop_ms": metrics.network_hop_ms,
+                "gpu_render_ms": metrics.gpu_render_ms,
+                "prediction_confidence": metrics.prediction_confidence
+            }))
+            
+            # Keep only last 1000 metrics
+            redis_client.ltrim("latency_metrics", 0, 999)
+        except Exception as e:
+            logging.warning(f"Failed to store latency metrics in Redis: {e}")
     
     return {"status": "recorded"}
 
@@ -603,8 +642,9 @@ async def login(credentials: dict):
     username = credentials.get("username")
     password = credentials.get("password")
     
-    # Simple demo authentication
-    if username == "admin" and password == "omega123":
+    # Simple demo authentication - use environment variable
+    admin_password = os.getenv("OMEGA_ADMIN_PASSWORD", "omega123")
+    if username == "admin" and password == admin_password:
         token = jwt.encode(
             {"user_id": "admin", "exp": datetime.utcnow() + timedelta(hours=24)},
             SECRET_KEY,

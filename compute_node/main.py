@@ -8,6 +8,7 @@ import logging
 import socket
 import ssl
 import json
+import os
 from typing import Dict, Any
 
 NODE_ID = "compute_node_1"
@@ -18,11 +19,20 @@ CONTROL_NODE_PORT = 8443
 # Security: TLS setup with error handling
 ssl_context = None
 try:
-    ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-    ssl_context.load_cert_chain(certfile="../security/certs/compute_node.crt", keyfile="../security/certs/compute_node.key")
-    ssl_context.load_verify_locations(cafile="../security/certs/ca.crt")
-    ssl_context.verify_mode = ssl.CERT_REQUIRED
-    print("SSL certificates loaded successfully")
+    # Check if certificate files exist before trying to load them
+    cert_file = "../security/certs/compute_node.crt"
+    key_file = "../security/certs/compute_node.key"
+    ca_file = "../security/certs/ca.crt"
+    
+    if os.path.exists(cert_file) and os.path.exists(key_file) and os.path.exists(ca_file):
+        ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ssl_context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        ssl_context.load_verify_locations(cafile=ca_file)
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        print("SSL certificates loaded successfully")
+    else:
+        print("SSL certificate files not found, will use HTTP connection")
+        ssl_context = None
 except Exception as e:
     print(f"SSL setup failed: {e}")
     print("Will attempt connection without SSL")
