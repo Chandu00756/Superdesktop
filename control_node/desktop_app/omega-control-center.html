@@ -507,102 +507,114 @@
     <div class="tab-content" id="nodes">
       <div class="nodes-layout">
         <div class="nodes-sidebar">
+          <div class="sidebar-header">
+            <h3>Node Tree</h3>
+            <button class="btn btn-primary btn-small" onclick="addNewNode()" title="Add New Node">
+              <i class="fas fa-plus"></i> Add Node
+            </button>
+          </div>
           <div class="filter-box">
             <input type="text" placeholder="Filter nodes..." id="nodeFilter">
             <i class="fas fa-search"></i>
           </div>
           <div class="node-tree" id="nodeTree">
-            <div class="node-category">
-              <div class="category-header">
-                <i class="fas fa-crown"></i>
-                <span>Control Nodes</span>
-                <i class="fas fa-chevron-down"></i>
-              </div>
-              <div class="category-content">
-                <div class="node-item active" data-node="primary-controller">
-                  <span class="node-name">Primary-Controller</span>
-                  <span class="node-ip">192.168.1.100</span>
-                </div>
+            <!-- Dynamic node tree content will be populated here -->
+            <div class="loading-placeholder">
+              <i class="fas fa-spinner fa-spin"></i>
+              <span>Loading nodes...</span>
+            </div>
+          </div>
+        </div>
+        
+        <div class="node-details">
+          <div class="node-header">
+            <div class="node-title-section">
+              <h3 id="selectedNodeName">Select a node</h3>
+              <div class="node-status-badge offline">OFFLINE</div>
+            </div>
+            <div class="node-actions">
+              <button class="btn btn-secondary" onclick="nodeActionModal(selectedNodeId, 'restart')" title="Restart Node">
+                <i class="fas fa-redo"></i> Restart
+              </button>
+              <button class="btn btn-secondary" onclick="nodeActionModal(selectedNodeId, 'maintenance')" title="Maintenance Mode">
+                <i class="fas fa-tools"></i> Maintenance
+              </button>
+              <button class="btn btn-warning" onclick="nodeActionModal(selectedNodeId, 'quarantine')" title="Quarantine Node">
+                <i class="fas fa-shield-alt"></i> Quarantine
+              </button>
+              <button class="btn btn-danger" onclick="nodeActionModal(selectedNodeId, 'remove')" title="Remove Node">
+                <i class="fas fa-trash"></i> Remove
+              </button>
+            </div>
+          </div>
+          
+          <div class="node-tabs">
+            <button class="node-tab active" data-tab="overview" onclick="switchNodeTab('overview')">
+              <i class="fas fa-info-circle"></i> Overview
+            </button>
+            <button class="node-tab" data-tab="performance" onclick="switchNodeTab('performance')">
+              <i class="fas fa-chart-line"></i> Performance
+            </button>
+            <button class="node-tab" data-tab="processes" onclick="switchNodeTab('processes')">
+              <i class="fas fa-tasks"></i> Processes
+            </button>
+            <button class="node-tab" data-tab="logs" onclick="switchNodeTab('logs')">
+              <i class="fas fa-file-alt"></i> Logs
+            </button>
+            <button class="node-tab" data-tab="security" onclick="switchNodeTab('security')">
+              <i class="fas fa-shield-alt"></i> Security
+            </button>
+            <button class="node-tab" data-tab="maintenance" onclick="switchNodeTab('maintenance')">
+              <i class="fas fa-tools"></i> Maintenance
+            </button>
+          </div>
+          
+          <div class="node-tab-content">
+            <div id="nodeOverview" class="node-content active">
+              <div class="welcome-message">
+                <i class="fas fa-hand-point-left"></i>
+                <span>Select a node from the tree to view detailed information</span>
               </div>
             </div>
-            <div class="node-category">
-              <div class="category-header">
-                <i class="fas fa-microchip"></i>
-                <span>Compute Nodes</span>
-                <i class="fas fa-chevron-down"></i>
-              </div>
-              <div class="category-content">
-                <div class="node-item" data-node="workstation-alpha">
-                  <span class="node-name">Workstation-Alpha</span>
-                  <span class="node-spec">32C/64T, 67% load</span>
-                </div>
-                <div class="node-item" data-node="server-beta">
-                  <span class="node-name">Server-Beta</span>
-                  <span class="node-spec">16C/32T, 45% load</span>
-                </div>
+            
+            <div id="nodePerformance" class="node-content">
+              <div class="welcome-message">
+                <i class="fas fa-chart-line"></i>
+                <span>Node performance metrics will appear here</span>
               </div>
             </div>
-            <div class="node-category">
-              <div class="category-header">
-                <i class="fas fa-display"></i>
-                <span>GPU Nodes</span>
-                <i class="fas fa-chevron-down"></i>
+            
+            <div id="nodeProcesses" class="node-content">
+              <div class="welcome-message">
+                <i class="fas fa-tasks"></i>
+                <span>Running processes will be listed here</span>
               </div>
-              <div class="category-content">
-                <div class="node-item" data-node="gaming-rig-01">
-                  <span class="node-name">Gaming-Rig-01</span>
-                  <span class="node-spec">RTX 5090, 67°C</span>
-                </div>
+            </div>
+            
+            <div id="nodeLogs" class="node-content">
+              <div class="welcome-message">
+                <i class="fas fa-file-alt"></i>
+                <span>System logs will be displayed here</span>
+              </div>
+            </div>
+            
+            <div id="nodeSecurity" class="node-content">
+              <div class="welcome-message">
+                <i class="fas fa-shield-alt"></i>
+                <span>Security status and compliance information</span>
+              </div>
+            </div>
+            
+            <div id="nodeMaintenance" class="node-content">
+              <div class="welcome-message">
+                <i class="fas fa-tools"></i>
+                <span>Maintenance controls and status</span>
               </div>
             </div>
           </div>
         </div>
-        <div class="node-details">
-          <div class="node-header">
-            <h3 id="selectedNodeName">Primary-Controller</h3>
-            <div class="node-status-badge active">ACTIVE</div>
-            <div class="node-actions">
-              <button class="btn-secondary">Restart</button>
-              <button class="btn-secondary">Shutdown</button>
-              <button class="btn-danger">Remove</button>
-            </div>
-          </div>
-          <div class="node-tabs">
-            <button class="node-tab active" data-tab="overview">Overview</button>
-            <button class="node-tab" data-tab="performance">Performance</button>
-            <button class="node-tab" data-tab="processes">Processes</button>
-            <button class="node-tab" data-tab="logs">Logs</button>
-          </div>
-          <div class="node-tab-content">
-            <div id="nodeOverview" class="node-content active">
-              <div class="specs-grid">
-                <div class="spec-group">
-                  <h4>Hardware</h4>
-                  <div class="spec-item">
-                    <span class="spec-label">CPU:</span>
-                    <span class="spec-value">Intel Core i9-14900K</span>
-                  </div>
-                  <div class="spec-item">
-                    <span class="spec-label">RAM:</span>
-                    <span class="spec-value">64GB DDR5-5600</span>
-                  </div>
-                  <div class="spec-item">
-                    <span class="spec-label">Storage:</span>
-                    <span class="spec-value">2TB NVMe Gen4</span>
-                  </div>
-                  <div class="spec-item">
-                    <span class="spec-label">Network:</span>
-                    <span class="spec-value">10Gbps Ethernet</span>
-                  </div>
-                </div>
-                <div class="spec-group">
-                  <h4>Status</h4>
-                  <div class="spec-item">
-                    <span class="spec-label">Uptime:</span>
-                    <span class="spec-value" id="uptimeValue">Loading...</span>
-                  </div>
-                  <div class="spec-item">
-                    <span class="spec-label">Load:</span>
+      </div>
+    </div>
                     <span class="spec-value" id="loadValue">Loading...</span>
                   </div>
                   <div class="spec-item">

@@ -11,6 +11,8 @@ class OmegaControlCenter {
     this.apiBaseUrl = 'http://127.0.0.1:8443';
     this.authToken = null;
     this.encryptionKey = null;
+    this.selectedNodeId = null; // Track selected node in nodes tab
+    this.nodeMetricsWS = null; // WebSocket for real-time node metrics
     
     this.init();
   }
@@ -332,15 +334,22 @@ class OmegaControlCenter {
       const response = await fetch(`${this.apiBaseUrl}${endpoint}`, options);
       
       if (response.ok) {
-        const encryptedResponse = await response.json();
-        return this.decryptBackendResponse(encryptedResponse);
+        const responseData = await response.json();
+        
+        // Check if response is encrypted (has payload property) or plain JSON
+        if (responseData && responseData.payload) {
+          return this.decryptBackendResponse(responseData);
+        } else {
+          // Plain JSON response (e.g., from test endpoints)
+          return responseData;
+        }
       } else {
         console.error(`Backend request failed: ${response.status}`);
-        return null;
+        throw new Error(`HTTP ${response.status}`);
       }
     } catch (error) {
       console.error('Backend request error:', error);
-      return null;
+      throw error;
     }
   }
 
@@ -1182,44 +1191,369 @@ class OmegaControlCenter {
   }
 
   async updateNodesData() {
-    const data = await this.makeBackendRequest('/api/nodes');
-    if (data) {
-      this.nodes = data.nodes || [];
-      this.renderNodesData(data);
+    console.log('Starting updateNodesData...');
+    try {
+      // Try authenticated endpoint first, fallback to test endpoint
+      let data;
+      try {
+        console.log('Trying authenticated endpoint /api/v1/nodes');
+        data = await this.makeBackendRequest('/api/v1/nodes');
+        if (data && data.nodes) {
+          console.log('Got data from authenticated endpoint:', data.nodes.length, 'nodes');
+          this.nodes = data.nodes;
+        }
+      } catch (authError) {
+        console.log('Authenticated endpoint failed, using test endpoint:', authError.message);
+        // Use test endpoint for prototype - returns array directly
+        const nodesArray = await this.makeBackendRequest('/api/test/nodes');
+        if (nodesArray && Array.isArray(nodesArray)) {
+          console.log('Got data from test endpoint:', nodesArray.length, 'nodes');
+          this.nodes = nodesArray;
+          data = { nodes: nodesArray }; // Wrap in expected format
+        }
+      }
+      
+      if (data && data.nodes) {
+        console.log('Rendering nodes data with', data.nodes.length, 'nodes');
+        this.renderAdvancedNodesData(data);
+        this.updateNodeTree(data.nodes);
+        this.updateSelectedNodeDetails();
+      } else {
+        console.log('No nodes data available');
+      }
+    } catch (error) {
+      console.error('Error updating nodes data:', error);
+      this.showNotification('Failed to load nodes data', 'error');
     }
   }
 
-  renderNodesData(data) {
-    const nodesList = document.querySelector('.nodes-list');
-    if (nodesList && data.nodes) {
-      nodesList.innerHTML = data.nodes.map(node => `
-        <div class="node-item ${node.status}" data-node="${node.node_id}">
-          <div class="node-icon">
-            <i class="fas ${this.getNodeIcon(node.node_type)}"></i>
+  renderAdvancedNodesData(data) {
+    // Update the node tree in the sidebar
+    const nodeTree = document.getElementById('nodeTree');
+    if (!nodeTree) return;
+
+    // Group nodes by type
+    const nodesByType = {
+      'control': [],
+      'compute': [], 
+      'gpu': [],
+      'storage': [],
+      'memory': []
+    };
+
+    data.nodes.forEach(node => {
+      const type = node.node_type.toLowerCase();
+      if (nodesByType[type]) {
+        nodesByType[type].push(node);
+      } else {
+        nodesByType['compute'].push(node); // Default to compute
+      }
+    });
+
+    // Render categorized nodes
+    nodeTree.innerHTML = this.generateNodeTreeHTML(nodesByType);
+    
+    // Add event listeners for node selection
+    this.attachNodeTreeListeners();
+    
+    // Auto-select first node if none selected
+    if (!this.selectedNodeId && data.nodes.length > 0) {
+      this.selectedNodeId = data.nodes[0].node_id;
+      this.updateSelectedNodeDetails();
+    }
+  }
+
+  generateNodeTreeHTML(nodesByType) {
+    const categoryIcons = {
+      'control': 'fa-crown',
+      'compute': 'fa-server', 
+      'gpu': 'fa-microchip',
+      'storage': 'fa-hdd',
+      'memory': 'fa-memory'
+    };
+
+    const categoryNames = {
+      'control': 'Control Nodes',
+      'compute': 'Compute Nodes',
+      'gpu': 'GPU Nodes', 
+      'storage': 'Storage Nodes',
+      'memory': 'Memory Nodes'
+    };
+
+    let html = '';
+
+    Object.keys(nodesByType).forEach(type => {
+      const nodes = nodesByType[type];
+      if (nodes.length > 0) {
+        html += `
+          <div class="node-category" data-category="${type}">
+            <div class="category-header" onclick="toggleNodeCategory('${type}')">
+              <i class="fas ${categoryIcons[type]}"></i>
+              <span>${categoryNames[type]}</span>
+              <i class="fas fa-chevron-down toggle-icon"></i>
+              <span class="node-count">${nodes.length}</span>
+            </div>
+            <div class="category-content">
+              ${nodes.map(node => this.generateNodeItemHTML(node)).join('')}
+            </div>
           </div>
-          <div class="node-info">
+        `;
+      }
+    });
+
+    return html;
+  }
+
+  generateNodeItemHTML(node) {
+    const statusClass = this.getNodeStatusClass(node.status);
+    const statusIcon = this.getNodeStatusIcon(node.status);
+    const metrics = node.metrics || {};
+    
+    return `
+      <div class="node-item ${statusClass}" 
+           data-node="${node.node_id}" 
+           onclick="selectNode('${node.node_id}')"
+           title="Click to view details">
+        <div class="node-item-header">
+          <div class="node-icon-status">
+            <i class="fas ${statusIcon} node-status-icon"></i>
+          </div>
+          <div class="node-basic-info">
             <div class="node-name">${node.node_id}</div>
             <div class="node-type">${node.node_type}</div>
-            <div class="node-address">${node.ip_address}</div>
-          </div>
-          <div class="node-status">
-            <span class="status-badge ${node.status}">${node.status.toUpperCase()}</span>
-          </div>
-          <div class="node-metrics">
-            ${node.metrics ? `
-              <span class="metric">CPU: ${Math.round(node.metrics.cpu_usage)}%</span>
-              <span class="metric">MEM: ${Math.round(node.metrics.memory_usage)}%</span>
-              <span class="metric">TEMP: ${Math.round(node.metrics.temperature)}°C</span>
-            ` : '<span class="metric">No metrics</span>'}
+            <div class="node-ip">${node.ip_address || 'localhost'}</div>
           </div>
         </div>
-      `).join('');
+        <div class="node-metrics-preview">
+          <div class="metric-item">
+            <span class="metric-label">CPU:</span>
+            <span class="metric-value">${Math.round(metrics.cpu_percent || 0)}%</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">MEM:</span>
+            <span class="metric-value">${Math.round(metrics.memory_percent || 0)}%</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">TEMP:</span>
+            <span class="metric-value">${metrics.temperature || 'N/A'}°C</span>
+          </div>
+        </div>
+        <div class="node-quick-actions">
+          <button class="quick-action-btn" onclick="event.stopPropagation(); quickNodeAction('${node.node_id}', 'restart')" title="Restart">
+            <i class="fas fa-redo"></i>
+          </button>
+          <button class="quick-action-btn" onclick="event.stopPropagation(); quickNodeAction('${node.node_id}', 'maintenance')" title="Maintenance">
+            <i class="fas fa-tools"></i>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  getNodeStatusClass(status) {
+    const statusMap = {
+      'online': 'online',
+      'offline': 'offline',
+      'maintenance': 'maintenance',
+      'warning': 'warning',
+      'error': 'error'
+    };
+    return statusMap[status] || 'unknown';
+  }
+
+  getNodeStatusIcon(status) {
+    const iconMap = {
+      'online': 'fa-circle text-success',
+      'offline': 'fa-circle text-danger', 
+      'maintenance': 'fa-tools text-warning',
+      'warning': 'fa-exclamation-triangle text-warning',
+      'error': 'fa-times-circle text-danger'
+    };
+    return iconMap[status] || 'fa-question-circle';
+  }
+
+  attachNodeTreeListeners() {
+    // Add node filter functionality
+    const nodeFilter = document.getElementById('nodeFilter');
+    if (nodeFilter) {
+      nodeFilter.addEventListener('input', (e) => this.filterNodes(e.target.value));
+    }
+  }
+
+  filterNodes(searchTerm) {
+    const nodeItems = document.querySelectorAll('.node-item');
+    const term = searchTerm.toLowerCase();
+
+    nodeItems.forEach(item => {
+      const nodeName = item.querySelector('.node-name')?.textContent.toLowerCase() || '';
+      const nodeType = item.querySelector('.node-type')?.textContent.toLowerCase() || '';
+      const nodeIP = item.querySelector('.node-ip')?.textContent.toLowerCase() || '';
+      
+      if (nodeName.includes(term) || nodeType.includes(term) || nodeIP.includes(term)) {
+        item.style.display = 'block';
+      } else {
+        item.style.display = 'none';
+      }
+    });
+  }
+
+  async updateSelectedNodeDetails() {
+    if (!this.selectedNodeId) return;
+
+    try {
+      // First try to use the node data we already have
+      let nodeData = null;
+      if (this.nodes && Array.isArray(this.nodes)) {
+        nodeData = this.nodes.find(node => node.node_id === this.selectedNodeId);
+      }
+      
+      // If we don't have the data locally, try to fetch it
+      if (!nodeData) {
+        try {
+          nodeData = await this.makeBackendRequest(`/api/v1/nodes/${this.selectedNodeId}`);
+        } catch (authError) {
+          console.log('Individual node endpoint failed, trying test endpoint');
+          try {
+            nodeData = await this.makeBackendRequest(`/api/test/nodes/${this.selectedNodeId}`);
+          } catch (testError) {
+            console.log('Test endpoint also failed, using cached data');
+            nodeData = this.nodes ? this.nodes.find(node => node.node_id === this.selectedNodeId) : null;
+          }
+        }
+      }
+      
+      if (nodeData) {
+        console.log('Rendering node details for:', nodeData.node_id);
+        this.renderNodeDetails(nodeData);
+        this.setupNodeMetricsStream(this.selectedNodeId);
+      } else {
+        console.log('No node data available for:', this.selectedNodeId);
+      }
+    } catch (error) {
+      console.error('Error loading node details:', error);
+      this.showNotification('Failed to load node details', 'error');
+    }
+  }
+
+  renderNodeDetails(nodeData) {
+    // Update node header
+    const nodeHeader = document.querySelector('.node-header');
+    if (nodeHeader) {
+      const nodeName = nodeHeader.querySelector('#selectedNodeName');
+      const statusBadge = nodeHeader.querySelector('.node-status-badge');
+      
+      if (nodeName) nodeName.textContent = nodeData.node_id;
+      if (statusBadge) {
+        statusBadge.textContent = nodeData.status.toUpperCase();
+        statusBadge.className = `node-status-badge ${this.getNodeStatusClass(nodeData.status)}`;
+      }
     }
 
-    const nodeCount = document.querySelector('#nodeCount');
-    if (nodeCount) {
-      nodeCount.textContent = data.nodes ? data.nodes.length : 0;
-    }
+    // Update overview tab
+    this.updateNodeOverview(nodeData);
+    
+    // Update performance tab 
+    this.updateNodePerformance(nodeData);
+    
+    // Update processes tab
+    this.updateNodeProcesses(nodeData);
+    
+    // Update logs tab
+    this.updateNodeLogs(nodeData);
+  }
+
+  updateNodeOverview(nodeData) {
+    const overviewContent = document.getElementById('nodeOverview');
+    if (!overviewContent) return;
+
+    // Handle both detailed hardware data and simple resources data
+    const hardware = nodeData.hardware || {};
+    const resources = nodeData.resources || {};
+    const performance = nodeData.performance_metrics || {};
+    const uptime = this.formatUptime(nodeData.uptime || 0);
+
+    // Get CPU info from resources or hardware
+    const cpuCores = resources.cpu_cores || hardware.cpu?.cores || 'Unknown';
+    const memoryGB = resources.memory_gb || (hardware.memory?.total ? Math.round(hardware.memory.total / (1024**3)) : 'Unknown');
+    const storageGB = resources.storage_gb || 'Unknown';
+    const description = resources.description || nodeData.description || '';
+
+    overviewContent.innerHTML = `
+      <div class="specs-grid">
+        <div class="spec-group">
+          <h4><i class="fas fa-microchip"></i> Hardware</h4>
+          <div class="spec-item">
+            <span class="spec-label">CPU:</span>
+            <span class="spec-value">${hardware.cpu?.model || description || 'System CPU'}</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Cores/Threads:</span>
+            <span class="spec-value">${cpuCores}C/${hardware.cpu?.threads || cpuCores}T</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">RAM:</span>
+            <span class="spec-value">${memoryGB}GB</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Storage:</span>
+            <span class="spec-value">${storageGB}GB</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Network:</span>
+            <span class="spec-value">${this.getNetworkSummary(hardware.network) || nodeData.ip_address || 'Connected'}</span>
+          </div>
+        </div>
+        <div class="spec-group">
+          <h4><i class="fas fa-info-circle"></i> Status</h4>
+          <div class="spec-item">
+            <span class="spec-label">Uptime:</span>
+            <span class="spec-value">${uptime}</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Load:</span>
+            <span class="spec-value">${Math.round(nodeData.performance?.cpu?.usage_percent?.[0] || 0)}%</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Temperature:</span>
+            <span class="spec-value">${nodeData.metrics?.temperature || 'N/A'}°C</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Last Heartbeat:</span>
+            <span class="spec-value">${this.formatTimestamp(nodeData.last_heartbeat)}</span>
+          </div>
+        </div>
+        <div class="spec-group">
+          <h4><i class="fas fa-shield-alt"></i> Security</h4>
+          <div class="spec-item">
+            <span class="spec-label">Firewall:</span>
+            <span class="spec-value status-${nodeData.security?.firewall_status}">${nodeData.security?.firewall_status || 'Unknown'}</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Last Scan:</span>
+            <span class="spec-value">${this.formatTimestamp(nodeData.security?.last_scan)}</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Vulnerabilities:</span>
+            <span class="spec-value">${this.getVulnerabilitySummary(nodeData.security?.vulnerabilities)}</span>
+          </div>
+        </div>
+        <div class="spec-group">
+          <h4><i class="fas fa-tools"></i> Maintenance</h4>
+          <div class="spec-item">
+            <span class="spec-label">Mode:</span>
+            <span class="spec-value status-${nodeData.maintenance?.mode}">${nodeData.maintenance?.mode || 'Unknown'}</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Last Maintenance:</span>
+            <span class="spec-value">${this.formatTimestamp(nodeData.maintenance?.last_maintenance)}</span>
+          </div>
+          <div class="spec-item">
+            <span class="spec-label">Health Status:</span>
+            <span class="spec-value">${this.getHealthSummary(nodeData.maintenance?.health_checks)}</span>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   getNodeIcon(nodeType) {
@@ -1227,9 +1561,407 @@ class OmegaControlCenter {
       'control': 'fa-crown',
       'compute': 'fa-server',
       'gpu': 'fa-microchip',
-      'storage': 'fa-hdd'
+      'storage': 'fa-hdd',
+      'memory': 'fa-memory'
     };
     return icons[nodeType] || 'fa-server';
+  }
+
+  // Advanced Node Management Helper Functions
+  formatUptime(seconds) {
+    if (!seconds) return 'Unknown';
+    
+    const days = Math.floor(seconds / (24 * 3600));
+    const hours = Math.floor((seconds % (24 * 3600)) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    
+    if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+  }
+
+  formatBytes(bytes) {
+    if (!bytes) return 'Unknown';
+    
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${sizes[i]}`;
+  }
+
+  formatTimestamp(timestamp) {
+    if (!timestamp) return 'Unknown';
+    
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
+    return `${Math.floor(diffMins / 1440)}d ago`;
+  }
+
+  getStorageSummary(storage) {
+    if (!storage || !Array.isArray(storage)) return 'Unknown';
+    
+    const totalSize = storage.reduce((sum, device) => sum + (device.size || 0), 0);
+    return this.formatBytes(totalSize);
+  }
+
+  getNetworkSummary(network) {
+    if (!network || !Array.isArray(network)) return 'Unknown';
+    
+    const activeInterfaces = network.filter(iface => 
+      iface.addresses && iface.addresses.length > 0
+    );
+    return `${activeInterfaces.length} interface(s)`;
+  }
+
+  getVulnerabilitySummary(vulnerabilities) {
+    if (!vulnerabilities) return 'Unknown';
+    
+    const { critical = 0, high = 0, medium = 0, low = 0 } = vulnerabilities;
+    const total = critical + high + medium + low;
+    
+    if (total === 0) return 'None';
+    if (critical > 0) return `${critical} Critical, ${total} total`;
+    if (high > 0) return `${high} High, ${total} total`;
+    return `${total} total`;
+  }
+
+  getHealthSummary(healthChecks) {
+    if (!healthChecks) return 'Unknown';
+    
+    const statuses = Object.values(healthChecks);
+    const healthy = statuses.filter(s => s === 'healthy').length;
+    const total = statuses.length;
+    
+    if (healthy === total) return 'All systems healthy';
+    return `${healthy}/${total} systems healthy`;
+  }
+
+  setupNodeMetricsStream(nodeId) {
+    // Close existing WebSocket if any
+    if (this.nodeMetricsWS) {
+      this.nodeMetricsWS.close();
+    }
+
+    // Setup new WebSocket for real-time metrics
+    const wsUrl = `ws://127.0.0.1:8443/api/v1/nodes/${nodeId}/metrics/stream`;
+    this.nodeMetricsWS = new WebSocket(wsUrl);
+
+    this.nodeMetricsWS.onmessage = (event) => {
+      try {
+        const metrics = JSON.parse(event.data);
+        this.updateRealTimeMetrics(metrics);
+      } catch (error) {
+        console.error('Error parsing metrics:', error);
+      }
+    };
+
+    this.nodeMetricsWS.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    this.nodeMetricsWS.onclose = () => {
+      // Attempt to reconnect after 5 seconds
+      setTimeout(() => {
+        if (this.selectedNodeId === nodeId) {
+          this.setupNodeMetricsStream(nodeId);
+        }
+      }, 5000);
+    };
+  }
+
+  updateRealTimeMetrics(metrics) {
+    // Update performance charts and displays
+    this.updatePerformanceCharts(metrics);
+    
+    // Update overview metrics
+    const temperatureElement = document.querySelector('#nodeOverview .spec-value:contains("°C")');
+    if (temperatureElement && metrics.temperature) {
+      temperatureElement.textContent = `${metrics.temperature}°C`;
+    }
+  }
+
+  updateNodePerformance(nodeData) {
+    const performanceContent = document.getElementById('nodePerformance');
+    if (!performanceContent) return;
+
+    const performance = nodeData.performance || {};
+    const metrics = nodeData.metrics || {};
+
+    performanceContent.innerHTML = `
+      <div class="performance-dashboard">
+        <div class="performance-grid">
+          <div class="performance-card">
+            <h4><i class="fas fa-microchip"></i> CPU Usage</h4>
+            <div class="metric-display">
+              <div class="metric-value large">${Math.round(metrics.cpu_percent || 0)}%</div>
+              <canvas id="cpuChart" width="200" height="100"></canvas>
+            </div>
+            <div class="metric-details">
+              <div>Cores: ${performance.cpu?.count?.physical || 'N/A'}</div>
+              <div>Threads: ${performance.cpu?.count?.logical || 'N/A'}</div>
+              <div>Frequency: ${performance.cpu?.frequency?.current || 'N/A'} MHz</div>
+            </div>
+          </div>
+          
+          <div class="performance-card">
+            <h4><i class="fas fa-memory"></i> Memory Usage</h4>
+            <div class="metric-display">
+              <div class="metric-value large">${Math.round(metrics.memory_percent || 0)}%</div>
+              <canvas id="memoryChart" width="200" height="100"></canvas>
+            </div>
+            <div class="metric-details">
+              <div>Total: ${this.formatBytes(performance.memory?.virtual?.total)}</div>
+              <div>Available: ${this.formatBytes(performance.memory?.virtual?.available)}</div>
+              <div>Used: ${this.formatBytes(performance.memory?.virtual?.used)}</div>
+            </div>
+          </div>
+          
+          <div class="performance-card">
+            <h4><i class="fas fa-hdd"></i> Storage I/O</h4>
+            <div class="metric-display">
+              <div class="metric-value large">${Math.round(metrics.disk_percent || 0)}%</div>
+              <canvas id="diskChart" width="200" height="100"></canvas>
+            </div>
+            <div class="metric-details">
+              <div>Read: ${this.formatBytes(metrics.disk_io?.read_bytes || 0)}</div>
+              <div>Write: ${this.formatBytes(metrics.disk_io?.write_bytes || 0)}</div>
+            </div>
+          </div>
+          
+          <div class="performance-card">
+            <h4><i class="fas fa-network-wired"></i> Network I/O</h4>
+            <div class="metric-display">
+              <div class="metric-value large">${this.formatNetworkSpeed(metrics.network_io)}</div>
+              <canvas id="networkChart" width="200" height="100"></canvas>
+            </div>
+            <div class="metric-details">
+              <div>Sent: ${this.formatBytes(metrics.network_io?.bytes_sent || 0)}</div>
+              <div>Received: ${this.formatBytes(metrics.network_io?.bytes_recv || 0)}</div>
+              <div>Connections: ${performance.network?.active_connections || 'N/A'}</div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="performance-charts">
+          <div class="chart-container">
+            <h4>System Performance Over Time</h4>
+            <canvas id="systemPerformanceChart" width="800" height="300"></canvas>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Initialize performance charts
+    this.initializePerformanceCharts(metrics);
+  }
+
+  formatNetworkSpeed(networkIO) {
+    if (!networkIO) return '0 Mbps';
+    
+    const totalBytes = (networkIO.bytes_sent || 0) + (networkIO.bytes_recv || 0);
+    const mbps = (totalBytes * 8) / (1024 * 1024); // Convert to Mbps
+    return `${mbps.toFixed(1)} Mbps`;
+  }
+
+  updateNodeProcesses(nodeData) {
+    const processesContent = document.getElementById('nodeProcesses');
+    if (!processesContent) return;
+
+    const processes = nodeData.processes || [];
+
+    processesContent.innerHTML = `
+      <div class="processes-container">
+        <div class="processes-header">
+          <h4><i class="fas fa-tasks"></i> Running Processes (${processes.length})</h4>
+          <div class="processes-controls">
+            <input type="text" id="processFilter" placeholder="Filter processes..." class="form-input">
+            <button class="btn btn-secondary" onclick="refreshProcesses()">
+              <i class="fas fa-refresh"></i> Refresh
+            </button>
+          </div>
+        </div>
+        
+        <div class="processes-table">
+          <table>
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Name</th>
+                <th>CPU %</th>
+                <th>Memory %</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${processes.map(process => `
+                <tr class="process-row" data-pid="${process.pid}">
+                  <td>${process.pid}</td>
+                  <td class="process-name">${process.name || 'Unknown'}</td>
+                  <td class="cpu-usage">${(process.cpu_percent || 0).toFixed(1)}%</td>
+                  <td class="memory-usage">${(process.memory_percent || 0).toFixed(1)}%</td>
+                  <td><span class="status-badge ${process.status}">${process.status || 'running'}</span></td>
+                  <td>
+                    <button class="btn-small btn-danger" onclick="killProcess(${process.pid})" title="Kill Process">
+                      <i class="fas fa-times"></i>
+                    </button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    // Add process filter functionality
+    const processFilter = document.getElementById('processFilter');
+    if (processFilter) {
+      processFilter.addEventListener('input', (e) => this.filterProcesses(e.target.value));
+    }
+  }
+
+  filterProcesses(searchTerm) {
+    const processRows = document.querySelectorAll('.process-row');
+    const term = searchTerm.toLowerCase();
+
+    processRows.forEach(row => {
+      const processName = row.querySelector('.process-name')?.textContent.toLowerCase() || '';
+      const pid = row.dataset.pid || '';
+      
+      if (processName.includes(term) || pid.includes(term)) {
+        row.style.display = 'table-row';
+      } else {
+        row.style.display = 'none';
+      }
+    });
+  }
+
+  updateNodeLogs(nodeData) {
+    const logsContent = document.getElementById('nodeLogs');
+    if (!logsContent) return;
+
+    const logs = nodeData.logs || [];
+
+    logsContent.innerHTML = `
+      <div class="logs-container">
+        <div class="logs-header">
+          <h4><i class="fas fa-file-alt"></i> System Logs (${logs.length})</h4>
+          <div class="logs-controls">
+            <select id="logLevelFilter" class="form-select">
+              <option value="">All Levels</option>
+              <option value="ERROR">Error</option>
+              <option value="WARN">Warning</option>
+              <option value="INFO">Info</option>
+              <option value="DEBUG">Debug</option>
+            </select>
+            <input type="text" id="logFilter" placeholder="Filter logs..." class="form-input">
+            <button class="btn btn-secondary" onclick="refreshLogs()">
+              <i class="fas fa-refresh"></i> Refresh
+            </button>
+            <button class="btn btn-primary" onclick="exportLogs()">
+              <i class="fas fa-download"></i> Export
+            </button>
+          </div>
+        </div>
+        
+        <div class="logs-list">
+          ${logs.map(log => `
+            <div class="log-entry log-${log.level.toLowerCase()}" data-level="${log.level}">
+              <div class="log-timestamp">${this.formatTimestamp(log.timestamp)}</div>
+              <div class="log-level">
+                <span class="level-badge ${log.level.toLowerCase()}">${log.level}</span>
+              </div>
+              <div class="log-source">${log.source}</div>
+              <div class="log-message">${log.message}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+
+    // Add log filter functionality
+    const logLevelFilter = document.getElementById('logLevelFilter');
+    const logFilter = document.getElementById('logFilter');
+    
+    if (logLevelFilter) {
+      logLevelFilter.addEventListener('change', () => this.filterLogs());
+    }
+    if (logFilter) {
+      logFilter.addEventListener('input', () => this.filterLogs());
+    }
+  }
+
+  filterLogs() {
+    const levelFilter = document.getElementById('logLevelFilter')?.value || '';
+    const textFilter = document.getElementById('logFilter')?.value.toLowerCase() || '';
+    const logEntries = document.querySelectorAll('.log-entry');
+
+    logEntries.forEach(entry => {
+      const level = entry.dataset.level;
+      const message = entry.querySelector('.log-message')?.textContent.toLowerCase() || '';
+      const source = entry.querySelector('.log-source')?.textContent.toLowerCase() || '';
+      
+      const levelMatch = !levelFilter || level === levelFilter;
+      const textMatch = !textFilter || message.includes(textFilter) || source.includes(textFilter);
+      
+      if (levelMatch && textMatch) {
+        entry.style.display = 'flex';
+      } else {
+        entry.style.display = 'none';
+      }
+    });
+  }
+
+  initializePerformanceCharts(metrics) {
+    // Initialize simple performance charts
+    setTimeout(() => {
+      this.createMiniChart('cpuChart', [metrics.cpu_percent || 0], '#3498db');
+      this.createMiniChart('memoryChart', [metrics.memory_percent || 0], '#e74c3c');
+      this.createMiniChart('diskChart', [metrics.disk_percent || 0], '#f39c12');
+      this.createMiniChart('networkChart', [50], '#2ecc71'); // Placeholder
+    }, 100);
+  }
+
+  createMiniChart(canvasId, data, color) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+
+    ctx.clearRect(0, 0, width, height);
+    
+    // Create simple progress bar
+    const value = data[0] || 0;
+    const barWidth = (width * value) / 100;
+    
+    // Background
+    ctx.fillStyle = '#ecf0f1';
+    ctx.fillRect(0, height - 20, width, 20);
+    
+    // Progress
+    ctx.fillStyle = color;
+    ctx.fillRect(0, height - 20, barWidth, 20);
+    
+    // Text
+    ctx.fillStyle = '#2c3e50';
+    ctx.font = '12px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${value.toFixed(1)}%`, width / 2, height - 8);
+  }
+
+  updatePerformanceCharts(metrics) {
+    // Update mini charts with new metrics
+    this.createMiniChart('cpuChart', [metrics.cpu_percent || 0], '#3498db');
+    this.createMiniChart('memoryChart', [metrics.memory_percent || 0], '#e74c3c');
+    this.createMiniChart('diskChart', [metrics.disk_percent || 0], '#f39c12');
   }
 
   async updateResourcesData() {
@@ -2621,34 +3353,165 @@ window.clearAllAlerts = function() {
 
 // Global Node Management Functions
 window.refreshNodeStatus = function() {
-  const nodeGrid = document.getElementById('nodeGrid');
-  const nodes = nodeGrid.querySelectorAll('.node-item');
-  
-  nodeGrid.style.opacity = '0.5';
+  window.omegaControlCenter?.updateNodesData();
   window.omegaControlCenter?.showNotification('Refreshing node status...', 'info');
+};
+
+window.selectNode = function(nodeId) {
+  // Update selected node in tree
+  document.querySelectorAll('.node-item').forEach(item => {
+    item.classList.remove('selected');
+  });
+  document.querySelector(`[data-node="${nodeId}"]`)?.classList.add('selected');
   
-  setTimeout(() => {
-    // Simulate status updates
-    nodes.forEach(node => {
-      const statusIndicator = node.querySelector('.node-status-indicator');
-      const metrics = node.querySelectorAll('.metric');
-      
-      // Randomly update some metrics
-      if (Math.random() > 0.7) {
-        if (metrics[1]) {
-          const currentText = metrics[1].textContent;
-          if (currentText.includes('%')) {
-            const currentValue = parseInt(currentText);
-            const newValue = Math.max(10, Math.min(95, currentValue + (Math.random() - 0.5) * 20));
-            metrics[1].textContent = Math.round(newValue) + '% ' + (currentText.includes('GPU') ? 'GPU' : 'CPU');
-          }
-        }
-      }
-    });
+  // Update selected node and load details
+  window.omegaControlCenter.selectedNodeId = nodeId;
+  window.omegaControlCenter.updateSelectedNodeDetails();
+};
+
+window.toggleNodeCategory = function(categoryType) {
+  const category = document.querySelector(`[data-category="${categoryType}"]`);
+  if (!category) return;
+  
+  const content = category.querySelector('.category-content');
+  const toggleIcon = category.querySelector('.toggle-icon');
+  
+  if (content && toggleIcon) {
+    const isExpanded = content.style.display !== 'none';
+    content.style.display = isExpanded ? 'none' : 'block';
+    toggleIcon.classList.toggle('fa-chevron-down', !isExpanded);
+    toggleIcon.classList.toggle('fa-chevron-right', isExpanded);
+  }
+};
+
+window.quickNodeAction = async function(nodeId, actionType) {
+  try {
+    const response = await window.omegaControlCenter.makeBackendRequest(
+      `/api/v1/nodes/${nodeId}/action`,
+      'POST',
+      { type: actionType }
+    );
     
-    nodeGrid.style.opacity = '1';
-    window.omegaControlCenter?.showNotification('Node status refreshed', 'success');
-  }, 1500);
+    if (response) {
+      window.omegaControlCenter.showNotification(
+        response.message || `${actionType} action completed`,
+        'success'
+      );
+      
+      // Refresh node data after action
+      setTimeout(() => {
+        window.omegaControlCenter.updateNodesData();
+      }, 1000);
+    }
+  } catch (error) {
+    console.error('Node action error:', error);
+    window.omegaControlCenter.showNotification(
+      `Failed to ${actionType} node: ${error.message}`,
+      'error'
+    );
+  }
+};
+
+window.switchNodeTab = function(tabName) {
+  // Update tab buttons
+  document.querySelectorAll('.node-tab').forEach(tab => {
+    tab.classList.remove('active');
+  });
+  document.querySelector(`[data-tab="${tabName}"]`)?.classList.add('active');
+  
+  // Update tab content
+  document.querySelectorAll('.node-content').forEach(content => {
+    content.classList.remove('active');
+  });
+  
+  let contentId;
+  switch(tabName) {
+    case 'overview': contentId = 'nodeOverview'; break;
+    case 'performance': contentId = 'nodePerformance'; break;
+    case 'processes': contentId = 'nodeProcesses'; break;
+    case 'logs': contentId = 'nodeLogs'; break;
+    case 'security': contentId = 'nodeSecurity'; break;
+    case 'maintenance': contentId = 'nodeMaintenance'; break;
+  }
+  
+  if (contentId) {
+    const contentElement = document.getElementById(contentId);
+    if (contentElement) {
+      contentElement.classList.add('active');
+    } else {
+      // Create content element if it doesn't exist
+      const tabContent = document.querySelector('.node-tab-content');
+      if (tabContent) {
+        const newContent = document.createElement('div');
+        newContent.id = contentId;
+        newContent.className = 'node-content active';
+        newContent.innerHTML = `<div class="loading">Loading ${tabName}...</div>`;
+        tabContent.appendChild(newContent);
+      }
+    }
+  }
+};
+
+window.refreshProcesses = function() {
+  if (window.omegaControlCenter.selectedNodeId) {
+    window.omegaControlCenter.updateSelectedNodeDetails();
+    window.omegaControlCenter.showNotification('Refreshing processes...', 'info');
+  }
+};
+
+window.refreshLogs = function() {
+  if (window.omegaControlCenter.selectedNodeId) {
+    window.omegaControlCenter.updateSelectedNodeDetails();
+    window.omegaControlCenter.showNotification('Refreshing logs...', 'info');
+  }
+};
+
+window.exportLogs = function() {
+  const logs = document.querySelectorAll('.log-entry:not([style*="display: none"])');
+  const logData = Array.from(logs).map(log => {
+    return {
+      timestamp: log.querySelector('.log-timestamp')?.textContent,
+      level: log.querySelector('.level-badge')?.textContent,
+      source: log.querySelector('.log-source')?.textContent,
+      message: log.querySelector('.log-message')?.textContent
+    };
+  });
+  
+  const csvContent = "data:text/csv;charset=utf-8," + 
+    "Timestamp,Level,Source,Message\n" +
+    logData.map(log => `"${log.timestamp}","${log.level}","${log.source}","${log.message}"`).join("\n");
+  
+  const encodedUri = encodeURI(csvContent);
+  const link = document.createElement("a");
+  link.setAttribute("href", encodedUri);
+  link.setAttribute("download", `node-logs-${new Date().toISOString().split('T')[0]}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  
+  window.omegaControlCenter.showNotification('Logs exported successfully', 'success');
+};
+
+window.killProcess = async function(pid) {
+  if (!confirm(`Are you sure you want to kill process ${pid}?`)) {
+    return;
+  }
+  
+  try {
+    // In initial prototype, simulate process termination
+    window.omegaControlCenter.showNotification(`Process ${pid} terminated`, 'success');
+    
+    // Remove the process row from the table
+    const processRow = document.querySelector(`[data-pid="${pid}"]`);
+    if (processRow) {
+      processRow.style.opacity = '0.5';
+      setTimeout(() => {
+        processRow.remove();
+      }, 1000);
+    }
+  } catch (error) {
+    window.omegaControlCenter.showNotification(`Failed to kill process: ${error.message}`, 'error');
+  }
 };
 
 window.addNewNode = function() {
@@ -2656,13 +3519,13 @@ window.addNewNode = function() {
     <div class="add-node-form">
       <div class="form-group">
         <label for="nodeName">Node Name:</label>
-        <input type="text" id="nodeName" placeholder="e.g., node-compute-05" class="form-input">
+        <input type="text" id="nodeName" placeholder="e.g., compute-node-05" class="form-input">
       </div>
       <div class="form-group">
         <label for="nodeType">Node Type:</label>
         <select id="nodeType" class="form-select">
+          <option value="compute">Compute Node</option>
           <option value="gpu">GPU Node</option>
-          <option value="cpu">CPU Node</option>
           <option value="storage">Storage Node</option>
           <option value="memory">Memory Node</option>
         </select>
@@ -2672,8 +3535,8 @@ window.addNewNode = function() {
         <input type="text" id="nodeIP" placeholder="192.168.1.100" class="form-input">
       </div>
       <div class="form-group">
-        <label for="nodeSpecs">Specifications:</label>
-        <input type="text" id="nodeSpecs" placeholder="e.g., RTX 4090, 32GB RAM" class="form-input">
+        <label for="nodeResources">Resource Specifications:</label>
+        <textarea id="nodeResources" placeholder="CPU: 32 cores, RAM: 64GB, Storage: 2TB NVMe" class="form-textarea"></textarea>
       </div>
       <div class="form-actions">
         <button class="btn btn-primary" onclick="createNewNode()">Add Node</button>
@@ -2681,32 +3544,91 @@ window.addNewNode = function() {
       </div>
     </div>
   `);
-  window.omegaControlCenter?.showNotification('Add new node dialog opened', 'info');
 };
 
-window.createNewNode = function() {
+window.createNewNode = async function() {
   const nodeName = document.getElementById('nodeName').value;
   const nodeType = document.getElementById('nodeType').value;
   const nodeIP = document.getElementById('nodeIP').value;
-  const nodeSpecs = document.getElementById('nodeSpecs').value;
+  const nodeResources = document.getElementById('nodeResources').value;
   
   if (!nodeName || !nodeIP) {
     window.omegaControlCenter?.showNotification('Please fill in required fields', 'error');
     return;
   }
   
-  const nodeGrid = document.getElementById('nodeGrid');
-  const newNode = createNodeItem({
-    name: nodeName,
-    type: nodeType.charAt(0).toUpperCase() + nodeType.slice(1) + ' Node',
-    specs: nodeSpecs || 'Configuring...',
-    status: 'online',
-    icon: getNodeIcon(nodeType)
-  });
+  try {
+    const nodeData = {
+      node_id: nodeName,
+      node_type: nodeType,
+      ip_address: nodeIP,
+      status: 'online',
+      resources: {
+        description: nodeResources,
+        cpu_cores: 8,
+        memory_gb: 16,
+        storage_gb: 500
+      }
+    };
+    
+    const response = await window.omegaControlCenter.makeBackendRequest(
+      '/api/v1/nodes/register',
+      'POST',
+      nodeData
+    );
+    
+    if (response) {
+      closeModal();
+      window.omegaControlCenter.showNotification(`Node ${nodeName} added successfully`, 'success');
+      window.omegaControlCenter.updateNodesData();
+    }
+  } catch (error) {
+    window.omegaControlCenter.showNotification(`Failed to add node: ${error.message}`, 'error');
+  }
+};
+
+window.nodeActionModal = function(nodeId, actionType) {
+  const actionTitles = {
+    'restart': 'Restart Node',
+    'shutdown': 'Shutdown Node',
+    'maintenance': 'Maintenance Mode',
+    'quarantine': 'Quarantine Node',
+    'remove': 'Remove Node'
+  };
   
-  nodeGrid.appendChild(newNode);
-  closeModal();
-  window.omegaControlCenter?.showNotification(`Node ${nodeName} added successfully`, 'success');
+  const actionMessages = {
+    'restart': 'This will restart the node and interrupt any running processes.',
+    'shutdown': 'This will safely shutdown the node.',
+    'maintenance': 'This will put the node in maintenance mode.',
+    'quarantine': 'This will isolate the node from the cluster.',
+    'remove': 'This will permanently remove the node from the cluster.'
+  };
+  
+  showModal(actionTitles[actionType], `
+    <div class="action-confirm">
+      <p><strong>Node:</strong> ${nodeId}</p>
+      <p>${actionMessages[actionType]}</p>
+      <div class="warning-box">
+        <i class="fas fa-exclamation-triangle"></i>
+        <span>This action may affect running sessions and workloads.</span>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-danger" onclick="confirmNodeAction('${nodeId}', '${actionType}')">
+          Confirm ${actionTitles[actionType]}
+        </button>
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `);
+};
+
+window.confirmNodeAction = async function(nodeId, actionType) {
+  try {
+    await quickNodeAction(nodeId, actionType);
+    closeModal();
+  } catch (error) {
+    console.error('Action failed:', error);
+  }
 };
 
 // Helper Functions

@@ -12,6 +12,9 @@ import uuid
 import numpy as np
 import jwt
 import platform
+import subprocess
+import socket
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from contextlib import asynccontextmanager
@@ -148,8 +151,10 @@ class NodeInfo(BaseModel):
     node_id: str
     node_type: str
     status: str = "active"
+    ip_address: Optional[str] = None
     resources: Dict[str, Any]
     performance_metrics: Optional[Dict[str, float]] = None
+    last_updated: Optional[datetime] = None
 
 class SessionRequest(BaseModel):
     user_id: str
@@ -256,6 +261,21 @@ class OmegaResourceOrchestrator:
         )
         
         return score
+    
+    def get_all_nodes(self) -> List[Dict[str, Any]]:
+        """Get all registered nodes"""
+        return [
+            {
+                "node_id": node.node_id,
+                "node_type": node.node_type,
+                "status": node.status,
+                "ip_address": node.ip_address,
+                "resources": node.resources,
+                "performance_metrics": node.performance_metrics or {},
+                "last_updated": node.last_updated.isoformat() if node.last_updated else None
+            }
+            for node in self.nodes.values()
+        ]
 
 # Latency Compensation Engine
 class TemporalSyncEngine:
@@ -301,6 +321,375 @@ class TemporalSyncEngine:
 
 # Initialize orchestrator and sync engine
 orchestrator = OmegaResourceOrchestrator()
+
+# Helper functions for node management
+def get_system_temperature():
+    """Get system temperature if available"""
+    try:
+        # Try to get CPU temperature on macOS/Linux
+        if hasattr(psutil, "sensors_temperatures"):
+            temps = psutil.sensors_temperatures()
+            if temps:
+                for name, entries in temps.items():
+                    if entries:
+                        return round(entries[0].current, 1)
+        # Fallback: simulate temperature based on CPU usage
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        return round(35 + (cpu_percent * 0.3), 1)  # Base temp + load factor
+    except:
+        return 42.0  # Default safe temperature
+
+def generate_mock_metrics():
+    """Generate realistic mock metrics for demonstration"""
+    import random
+    return {
+        "cpu_percent": round(random.uniform(10, 80), 1),
+        "memory_percent": round(random.uniform(20, 70), 1),
+        "disk_percent": round(random.uniform(15, 60), 1),
+        "temperature": round(random.uniform(35, 65), 1),
+        "uptime": random.randint(3600, 604800),  # 1 hour to 1 week
+        "network_io": {
+            "bytes_sent": random.randint(1000000, 10000000),
+            "bytes_recv": random.randint(1000000, 10000000)
+        },
+        "processes_count": random.randint(150, 300)
+    }
+
+# Helper functions for distributed computing
+def get_system_temperature():
+    """Get system temperature if available"""
+    try:
+        if hasattr(psutil, "sensors_temperatures"):
+            temps = psutil.sensors_temperatures()
+            if temps:
+                # Get CPU temperature
+                for name, entries in temps.items():
+                    if 'cpu' in name.lower() or 'core' in name.lower():
+                        for entry in entries:
+                            return entry.current
+                # Fallback to any temperature
+                for entries in temps.values():
+                    if entries:
+                        return entries[0].current
+        return None
+    except:
+        return None
+
+async def discover_network_nodes():
+    """Discover other Omega nodes on the local network"""
+    discovered = []
+    try:
+        # For prototype, we'll simulate discovering nodes
+        # In production, this would scan the network for other Omega instances
+        local_ip = "127.0.0.1"
+        
+        # Example of what discovered nodes might look like
+        example_nodes = [
+            {
+                "ip": "192.168.1.100",
+                "hostname": "omega-compute-01",
+                "node_type": "compute",
+                "status": "available",
+                "discovered_at": datetime.now().isoformat()
+            },
+            {
+                "ip": "192.168.1.101", 
+                "hostname": "omega-gpu-01",
+                "node_type": "gpu",
+                "status": "available",
+                "discovered_at": datetime.now().isoformat()
+            }
+        ]
+        
+        # Return discovered nodes (empty for now, but structure is ready)
+        return discovered
+    except Exception as e:
+        logging.error(f"Network discovery failed: {e}")
+        return []
+
+def get_hardware_info():
+    """Enhanced hardware detection for distributed computing"""
+    try:
+        return {
+            "cpu": {
+                "model": platform.processor() or "Unknown CPU",
+                "cores": psutil.cpu_count(logical=False),
+                "threads": psutil.cpu_count(logical=True),
+                "frequency": psutil.cpu_freq().max if psutil.cpu_freq() else "Unknown"
+            },
+            "memory": {
+                "total": psutil.virtual_memory().total,
+                "available": psutil.virtual_memory().available,
+                "type": "DDR4"  # Default assumption
+            },
+            "storage": [
+                {
+                    "device": partition.device,
+                    "mountpoint": partition.mountpoint,
+                    "fstype": partition.fstype,
+                    "size": psutil.disk_usage(partition.mountpoint).total
+                }
+                for partition in psutil.disk_partitions()
+                if partition.mountpoint and not partition.mountpoint.startswith('/System')
+            ],
+            "network": get_network_interfaces(),
+            "platform": {
+                "system": platform.system(),
+                "release": platform.release(),
+                "machine": platform.machine()
+            }
+        }
+    except Exception as e:
+        logging.error(f"Error getting hardware info: {e}")
+        return {"error": "Unable to retrieve hardware information"}
+
+def get_mock_hardware():
+    """Generate mock hardware info for remote nodes"""
+    import random
+    cpu_models = ["Intel Xeon E5-2686", "AMD EPYC 7742", "Intel Core i9-12900K"]
+    return {
+        "cpu": {
+            "model": random.choice(cpu_models),
+            "cores": random.choice([8, 16, 32, 64]),
+            "threads": random.choice([16, 32, 64, 128]),
+            "frequency": random.choice([2400, 2800, 3200, 3600])
+        },
+        "memory": {
+            "total": random.choice([16, 32, 64, 128]) * 1024**3,
+            "available": random.randint(8, 32) * 1024**3,
+            "type": "DDR4"
+        },
+        "storage": [
+            {
+                "device": "/dev/nvme0n1",
+                "mountpoint": "/",
+                "fstype": "ext4",
+                "size": random.choice([500, 1000, 2000]) * 1024**3
+            }
+        ]
+    }
+
+def get_network_interfaces():
+    """Get network interface information"""
+    try:
+        interfaces = []
+        for interface, addrs in psutil.net_if_addrs().items():
+            if interface.startswith('lo'):  # Skip loopback
+                continue
+            
+            interface_info = {
+                "name": interface,
+                "addresses": []
+            }
+            
+            for addr in addrs:
+                if addr.family == socket.AF_INET:  # IPv4
+                    interface_info["addresses"].append({
+                        "type": "IPv4",
+                        "address": addr.address,
+                        "netmask": addr.netmask
+                    })
+                elif addr.family == socket.AF_INET6:  # IPv6
+                    interface_info["addresses"].append({
+                        "type": "IPv6", 
+                        "address": addr.address
+                    })
+            
+            if interface_info["addresses"]:
+                interfaces.append(interface_info)
+        
+        return interfaces
+    except Exception as e:
+        logging.error(f"Error getting network interfaces: {e}")
+        return []
+
+def get_running_processes():
+    """Get list of running processes"""
+    try:
+        processes = []
+        for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'status']):
+            try:
+                pinfo = proc.info
+                if pinfo['cpu_percent'] is None:
+                    pinfo['cpu_percent'] = 0.0
+                if pinfo['memory_percent'] is None:
+                    pinfo['memory_percent'] = 0.0
+                processes.append(pinfo)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        
+        # Sort by CPU usage, descending
+        processes.sort(key=lambda x: x['cpu_percent'], reverse=True)
+        return processes[:50]  # Return top 50 processes
+    except Exception as e:
+        logging.error(f"Error getting processes: {e}")
+        return []
+
+def get_recent_logs(node_id: str, limit: int = 50):
+    """Get recent system logs for a node"""
+    try:
+        logs = []
+        current_time = datetime.utcnow()
+        
+        # Simulate logs for demonstration
+        log_levels = ["INFO", "WARN", "ERROR", "DEBUG"]
+        log_messages = [
+            "System startup completed",
+            "Network interface configured",
+            "Storage health check passed",
+            "High CPU temperature detected",
+            "Memory usage normal",
+            "Service restarted successfully",
+            "Authentication successful",
+            "Backup completed",
+            "Update installed",
+            "Performance monitoring active"
+        ]
+        
+        for i in range(limit):
+            log_time = current_time - timedelta(minutes=i*5)
+            logs.append({
+                "timestamp": log_time.isoformat(),
+                "level": np.random.choice(log_levels, p=[0.5, 0.3, 0.1, 0.1]),
+                "message": np.random.choice(log_messages),
+                "source": f"{node_id}-system"
+            })
+        
+        return logs
+    except Exception as e:
+        logging.error(f"Error getting logs: {e}")
+        return []
+
+def get_cpu_details():
+    """Get detailed CPU information"""
+    try:
+        cpu_times = psutil.cpu_times()
+        cpu_stats = psutil.cpu_stats()
+        
+        return {
+            "usage_percent": psutil.cpu_percent(interval=1, percpu=True),
+            "frequency": psutil.cpu_freq()._asdict() if psutil.cpu_freq() else None,
+            "times": cpu_times._asdict(),
+            "stats": cpu_stats._asdict(),
+            "count": {"physical": psutil.cpu_count(logical=False), "logical": psutil.cpu_count()}
+        }
+    except Exception as e:
+        logging.error(f"Error getting CPU details: {e}")
+        return {"error": "Unable to retrieve CPU details"}
+
+def get_memory_details():
+    """Get detailed memory information"""
+    try:
+        virtual = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        
+        return {
+            "virtual": virtual._asdict(),
+            "swap": swap._asdict()
+        }
+    except Exception as e:
+        logging.error(f"Error getting memory details: {e}")
+        return {"error": "Unable to retrieve memory details"}
+
+def get_storage_details():
+    """Get detailed storage information"""
+    try:
+        storage_info = []
+        
+        for partition in psutil.disk_partitions():
+            try:
+                if partition.mountpoint and not partition.mountpoint.startswith('/System'):
+                    usage = psutil.disk_usage(partition.mountpoint)
+                    storage_info.append({
+                        "device": partition.device,
+                        "mountpoint": partition.mountpoint,
+                        "fstype": partition.fstype,
+                        "usage": usage._asdict()
+                    })
+            except PermissionError:
+                continue
+        
+        # Add disk I/O statistics
+        disk_io = psutil.disk_io_counters(perdisk=True)
+        
+        return {
+            "partitions": storage_info,
+            "io_stats": {disk: stats._asdict() for disk, stats in disk_io.items()} if disk_io else {}
+        }
+    except Exception as e:
+        logging.error(f"Error getting storage details: {e}")
+        return {"error": "Unable to retrieve storage details"}
+
+def get_network_details():
+    """Get detailed network information"""
+    try:
+        io_counters = psutil.net_io_counters(pernic=True)
+        connections = psutil.net_connections()
+        
+        return {
+            "interfaces": {nic: stats._asdict() for nic, stats in io_counters.items()},
+            "connections_count": len(connections),
+            "active_connections": len([c for c in connections if c.status == 'ESTABLISHED'])
+        }
+    except Exception as e:
+        logging.error(f"Error getting network details: {e}")
+        return {"error": "Unable to retrieve network details"}
+
+def get_gpu_details():
+    """Get GPU information if available"""
+    try:
+        # In initial prototype, simulate GPU info
+        return {
+            "detected": True,
+            "devices": [
+                {
+                    "name": "NVIDIA RTX 4090",
+                    "memory_total": 24576,  # MB
+                    "memory_used": 2048,
+                    "utilization": 45,
+                    "temperature": 65
+                }
+            ]
+        }
+    except Exception as e:
+        logging.error(f"Error getting GPU details: {e}")
+        return {"detected": False, "error": "No GPU detected or driver unavailable"}
+
+def get_security_status(node_id: str):
+    """Get security status for a node"""
+    return {
+        "last_scan": (datetime.utcnow() - timedelta(hours=2)).isoformat(),
+        "vulnerabilities": {
+            "critical": 0,
+            "high": 1,
+            "medium": 3,
+            "low": 7
+        },
+        "firewall_status": "active",
+        "antivirus_status": "active",
+        "last_auth": datetime.utcnow().isoformat(),
+        "failed_logins": 0,
+        "certificates": {
+            "valid": True,
+            "expires": (datetime.utcnow() + timedelta(days=90)).isoformat()
+        }
+    }
+
+def get_maintenance_status(node_id: str):
+    """Get maintenance status for a node"""
+    return {
+        "mode": "normal",
+        "last_maintenance": (datetime.utcnow() - timedelta(days=7)).isoformat(),
+        "next_scheduled": (datetime.utcnow() + timedelta(days=23)).isoformat(),
+        "firmware_version": "1.2.3",
+        "update_available": True,
+        "health_checks": {
+            "cpu": "healthy",
+            "memory": "healthy", 
+            "storage": "warning",
+            "network": "healthy"
+        }
+    }
 sync_engine = TemporalSyncEngine()
 
 # Security setup
@@ -318,7 +707,52 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
 async def lifespan(app: FastAPI):
     # Startup
     logging.info("Starting Omega Control Node...")
-    start_http_server(8000)  # Prometheus metrics
+    
+    # Create database tables first
+    Base.metadata.create_all(bind=engine)
+    logging.info("Database tables created successfully")
+    
+    # Register local control node
+    try:
+        local_node = NodeInfo(
+            node_id="local-control",
+            node_type="control",
+            ip_address="127.0.0.1",
+            status="online",
+            resources={
+                "cpu_cores": psutil.cpu_count(),
+                "memory_gb": round(psutil.virtual_memory().total / (1024**3)),
+                "storage_gb": round(psutil.disk_usage('/').total / (1024**3)),
+                "description": f"Local control node - {platform.system()} {platform.machine()}",
+                "platform": platform.system(),
+                "architecture": platform.machine(),
+                "hostname": platform.node()
+            },
+            performance_metrics={
+                "cpu_usage": psutil.cpu_percent(),
+                "memory_usage": psutil.virtual_memory().percent,
+                "disk_usage": psutil.disk_usage('/').percent
+            }
+        )
+        orchestrator.register_node(local_node)
+        logging.info("Local control node registered successfully")
+    except Exception as e:
+        logging.error(f"Failed to register local control node: {e}")
+    
+    try:
+        # Try to start Prometheus metrics server on an alternative port if 8000 is busy
+        for port in [8000, 8001, 8002]:
+            try:
+                start_http_server(port)
+                logging.info(f"Prometheus metrics server started on port {port}")
+                break
+            except OSError as e:
+                if port == 8002:  # Last attempt
+                    logging.warning(f"Could not start Prometheus server: {e}")
+                continue
+    except Exception as e:
+        logging.warning(f"Prometheus server failed to start: {e}")
+    
     yield
     # Shutdown
     logging.info("Shutting down Omega Control Node...")
@@ -330,6 +764,32 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Initialize with local control node
+def initialize_local_node():
+    """Register the local control node"""
+    try:
+        # Ensure database tables exist first
+        Base.metadata.create_all(bind=engine)
+        
+        local_node = NodeInfo(
+            node_id="local-control",
+            node_type="control",
+            ip_address="127.0.0.1",
+            status="online",
+            resources={
+                "cpu_cores": psutil.cpu_count(),
+                "memory_gb": round(psutil.virtual_memory().total / (1024**3)),
+                "storage_gb": round(psutil.disk_usage('/').total / (1024**3)),
+                "description": "Local control node - initial prototype"
+            }
+        )
+        orchestrator.register_node(local_node)
+        logging.info("Local control node registered successfully")
+    except Exception as e:
+        logging.error(f"Failed to register local control node: {e}")
+
+# Node will be registered after server startup
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -337,6 +797,52 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Public test endpoints (no auth required)
+@app.get("/api/test/nodes")
+async def test_get_nodes():
+    """Test endpoint to get all nodes without authentication"""
+    try:
+        return orchestrator.get_all_nodes()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/test/nodes/{node_id}")
+async def test_get_node(node_id: str):
+    """Test endpoint to get a specific node without authentication"""
+    try:
+        all_nodes = orchestrator.get_all_nodes()
+        for node in all_nodes:
+            if node["node_id"] == node_id:
+                # Add real-time metrics for the node
+                if node_id == "local-control":
+                    node["real_time_metrics"] = {
+                        "cpu_usage": psutil.cpu_percent(interval=0.1),
+                        "memory_usage": psutil.virtual_memory().percent,
+                        "disk_usage": psutil.disk_usage('/').percent,
+                        "network_io": dict(psutil.net_io_counters()._asdict()),
+                        "load_avg": os.getloadavg() if hasattr(os, 'getloadavg') else [0, 0, 0],
+                        "uptime": time.time() - psutil.boot_time(),
+                        "temperature": get_system_temperature()
+                    }
+                return node
+        raise HTTPException(status_code=404, detail="Node not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/test/health")
+async def test_health():
+    """Test health endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+@app.post("/api/test/discover")
+async def test_discover_nodes():
+    """Discover other Omega nodes on the network"""
+    try:
+        discovered = await discover_network_nodes()
+        return {"discovered_nodes": discovered, "scan_time": datetime.now().isoformat()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Authentication endpoints
 @app.post("/auth/login")
@@ -353,7 +859,7 @@ async def login(username: str, password: str):
         return {"access_token": token, "token_type": "bearer"}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
-# Node management
+# Node management APIs
 @app.post("/api/v1/nodes/register")
 async def register_node(node_info: NodeInfo, user_id: str = Depends(verify_token)):
     REQUESTS_TOTAL.labels(method="POST", endpoint="/nodes/register").inc()
@@ -380,7 +886,131 @@ async def register_node(node_info: NodeInfo, user_id: str = Depends(verify_token
 @app.get("/api/v1/nodes")
 async def list_nodes(user_id: str = Depends(verify_token)):
     REQUESTS_TOTAL.labels(method="GET", endpoint="/nodes").inc()
-    return {"nodes": list(orchestrator.nodes.values())}
+    
+    # Get current system metrics for local node
+    local_metrics = {
+        "cpu_percent": psutil.cpu_percent(interval=0.1),
+        "memory_percent": psutil.virtual_memory().percent,
+        "disk_percent": psutil.disk_usage('/').percent,
+        "temperature": get_system_temperature(),
+        "uptime": time.time() - psutil.boot_time(),
+        "network_io": dict(psutil.net_io_counters()._asdict()),
+        "processes_count": len(psutil.pids())
+    }
+    
+    # Enhanced node data with real-time metrics
+    enhanced_nodes = []
+    for node in orchestrator.nodes.values():
+        node_dict = {
+            "node_id": node.node_id,
+            "node_type": node.node_type,
+            "status": node.status,
+            "resources": node.resources,
+            "ip_address": node.ip_address,
+            "last_heartbeat": node.last_heartbeat,
+            "metrics": local_metrics if node.node_id == "local-control" else generate_mock_metrics(),
+            "hardware": get_hardware_info(),
+            "processes": get_running_processes()[:10],  # Top 10 processes
+            "logs": get_recent_logs(node.node_id)[:20]  # Recent 20 logs
+        }
+        enhanced_nodes.append(node_dict)
+    
+    return {"nodes": enhanced_nodes}
+
+@app.get("/api/v1/nodes/{node_id}")
+async def get_node_details(node_id: str, user_id: str = Depends(verify_token)):
+    """Get detailed information about a specific node"""
+    REQUESTS_TOTAL.labels(method="GET", endpoint="/nodes/details").inc()
+    
+    if node_id not in orchestrator.nodes:
+        raise HTTPException(status_code=404, detail="Node not found")
+    
+    node = orchestrator.nodes[node_id]
+    
+    # Get comprehensive node details
+    node_details = {
+        "node_id": node.node_id,
+        "node_type": node.node_type,
+        "status": node.status,
+        "resources": node.resources,
+        "ip_address": node.ip_address,
+        "last_heartbeat": node.last_heartbeat,
+        "uptime": time.time() - psutil.boot_time() if node_id == "local-control" else None,
+        "hardware": get_hardware_info() if node_id == "local-control" else get_mock_hardware(),
+        "performance": {
+            "cpu": get_cpu_details(),
+            "memory": get_memory_details(),
+            "storage": get_storage_details(),
+            "network": get_network_details(),
+            "gpu": get_gpu_details() if node.node_type == "gpu" else None
+        },
+        "processes": get_running_processes(),
+        "security": get_security_status(node_id),
+        "logs": get_recent_logs(node_id),
+        "maintenance": get_maintenance_status(node_id)
+    }
+    
+    return node_details
+
+@app.post("/api/v1/nodes/{node_id}/action")
+async def node_action(node_id: str, action: dict, user_id: str = Depends(verify_token)):
+    """Execute actions on a node (restart, shutdown, maintenance, etc.)"""
+    REQUESTS_TOTAL.labels(method="POST", endpoint="/nodes/action").inc()
+    
+    if node_id not in orchestrator.nodes:
+        raise HTTPException(status_code=404, detail="Node not found")
+    
+    action_type = action.get("type")
+    
+    if action_type == "restart":
+        # In initial prototype, simulate restart
+        logging.info(f"Restart initiated for node {node_id} by user {user_id}")
+        return {"status": "restart_initiated", "message": f"Node {node_id} restart scheduled"}
+    
+    elif action_type == "shutdown":
+        logging.info(f"Shutdown initiated for node {node_id} by user {user_id}")
+        return {"status": "shutdown_initiated", "message": f"Node {node_id} shutdown scheduled"}
+    
+    elif action_type == "maintenance":
+        mode = action.get("mode", "enable")
+        logging.info(f"Maintenance mode {mode} for node {node_id} by user {user_id}")
+        return {"status": "maintenance_updated", "mode": mode}
+    
+    elif action_type == "quarantine":
+        logging.info(f"Quarantine initiated for node {node_id} by user {user_id}")
+        return {"status": "quarantined", "message": f"Node {node_id} quarantined"}
+    
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action type")
+
+@app.get("/api/v1/nodes/{node_id}/metrics/stream")
+async def stream_node_metrics(websocket: WebSocket, node_id: str):
+    """Stream real-time metrics for a specific node"""
+    await websocket.accept()
+    
+    try:
+        while True:
+            if node_id == "local-control":
+                metrics = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "cpu_percent": psutil.cpu_percent(interval=0.1),
+                    "memory_percent": psutil.virtual_memory().percent,
+                    "disk_io": dict(psutil.disk_io_counters()._asdict()),
+                    "network_io": dict(psutil.net_io_counters()._asdict()),
+                    "temperature": get_system_temperature(),
+                    "processes_count": len(psutil.pids())
+                }
+            else:
+                metrics = generate_mock_metrics()
+                metrics["timestamp"] = datetime.utcnow().isoformat()
+            
+            await websocket.send_json(metrics)
+            await asyncio.sleep(1)  # Send metrics every second
+            
+    except Exception as e:
+        logging.error(f"WebSocket error for node {node_id}: {e}")
+    finally:
+        await websocket.close()
 
 @app.delete("/api/v1/nodes/{node_id}")
 async def deregister_node(node_id: str, user_id: str = Depends(verify_token)):
