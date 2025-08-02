@@ -7,7 +7,7 @@
   "license": "GPL-3.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/omega/super-desktop-console.git"
+    "url": "https://github.com/Chandu00756/Superdesktop.git"
   },
   "scripts": {
     "start": "electron .",
@@ -116,8 +116,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "omega",
-        "repo": "super-desktop-console"
+        "owner": "Chandu00756",
+        "repo": "Superdesktop"
       }
     ]
   },
