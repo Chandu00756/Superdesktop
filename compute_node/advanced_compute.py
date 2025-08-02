@@ -47,22 +47,22 @@ class HardwareMonitor:
         try:
             if platform.system() == "Linux":
                 result = subprocess.run(['nvidia-smi', '-L'], 
-                                      capture_output=True, text=True)
+                                      capture_output=True, text=True, timeout=5)
                 return len([line for line in result.stdout.split('\n') if 'GPU' in line])
             elif platform.system() == "Darwin":  # macOS
                 # Check for Metal-capable GPUs
                 return 1 if self._has_metal_gpu() else 0
             return 0
-        except:
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
             return 0
     
     def _has_metal_gpu(self) -> bool:
         """Check for Metal-capable GPU on macOS"""
         try:
             result = subprocess.run(['system_profiler', 'SPDisplaysDataType'], 
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, timeout=10)
             return 'Metal' in result.stdout
-        except:
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
             return False
     
     def get_current_metrics(self) -> Dict[str, Any]:
@@ -77,7 +77,7 @@ class HardwareMonitor:
                 temps = psutil.sensors_temperatures()
                 if 'coretemp' in temps:
                     cpu_temp = temps['coretemp'][0].current
-        except:
+        except (AttributeError, KeyError, Exception):
             pass
         
         # GPU metrics simulation
