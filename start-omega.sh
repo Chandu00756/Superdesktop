@@ -78,6 +78,9 @@ else
     print_warning "requirements.txt not found"
 fi
 
+# Note: Database schema will be auto-created by SQLAlchemy
+print_header "Database will be auto-initialized by the application..."
+
 # Check if PostgreSQL is running
 print_header "Checking PostgreSQL..."
 if pg_isready -h localhost -p 5432 &> /dev/null; then
@@ -112,7 +115,10 @@ export OMEGA_ENV=prototype
 export OMEGA_LOG_LEVEL=INFO
 export OMEGA_HOST=0.0.0.0
 export OMEGA_PORT=8443
+export OMEGA_SESSIONS_ENABLED=true
+export OMEGA_WEBSOCKET_ENABLED=true
 print_status "Control Center starting on https://localhost:8443"
+print_status "Sessions API enabled with real-time updates"
 python main.py &
 CONTROL_PID=$!
 cd ..
@@ -150,8 +156,10 @@ echo "$CONTROL_PID ${ELECTRON_PID:-}" > omega.pid
 print_header "[CELEBRATE] Omega Super Desktop Console started successfully!"
 echo ""
 echo "[DASHBOARD] Web Interface:    https://localhost:8443"
-echo "[DESKTOP] Desktop App:      Electron (if available)"
+echo "[DESKTOP] Desktop App:      Electron Sessions Tab Ready"
 echo "[API] API Documentation:    https://localhost:8443/docs"
+echo "[SESSIONS] Sessions API:    https://localhost:8443/api/test/sessions"
+echo "[WEBSOCKET] Real-time:      ws://localhost:8443/ws/sessions"
 echo "[HEALTH] Health Check:      https://localhost:8443/health"
 echo ""
 echo "[CHECKLIST] Active Services:"

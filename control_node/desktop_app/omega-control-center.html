@@ -878,106 +878,496 @@
     <!-- Sessions Tab -->
     <div class="tab-content" id="sessions">
       <div class="sessions-layout">
-        <div class="sessions-sidebar">
+        <!-- Left Panel: Session List -->
+        <div class="sessions-left-panel">
           <div class="sessions-header">
-            <button class="btn-primary" id="newSessionBtn">+ New Session</button>
-            <input type="text" placeholder="Filter sessions..." id="sessionFilter">
-            <select title="Sort sessions">
-              <option>Sort by Name</option>
-              <option>Sort by Status</option>
-              <option>Sort by Created</option>
-            </select>
-          </div>
-          <div class="sessions-list">
-            <div class="session-item active" data-session="gaming-01">
-              <div class="session-icon"><i class="fas fa-gamepad"></i></div>
-              <div class="session-info">
-                <div class="session-name">Gaming Session 01</div>
-                <div class="session-status running">RUNNING</div>
-                <div class="session-resources">
-                  <div class="resource-bar cpu" style="width: 65%"></div>
-                  <div class="resource-bar gpu" style="width: 87%"></div>
-                  <div class="resource-bar ram" style="width: 72%"></div>
-                </div>
-                <div class="session-time">2h 34m</div>
+            <div class="header-controls">
+              <button class="btn-primary" id="newSessionBtn" onclick="createNewSession()">
+                <i class="fas fa-plus"></i> New Session
+              </button>
+              <button class="btn-secondary" onclick="refreshSessions()" title="Refresh">
+                <i class="fas fa-sync-alt"></i>
+              </button>
+            </div>
+            
+            <div class="search-filter-bar">
+              <div class="search-box">
+                <i class="fas fa-search"></i>
+                <input type="text" placeholder="Search sessions..." id="sessionFilter" onkeyup="filterSessions(this.value)">
               </div>
-              <div class="session-controls">
-                <button class="session-btn pause" title="Pause"><i class="fas fa-pause"></i></button>
-                <button class="session-btn terminate" title="Terminate"><i class="fas fa-stop"></i></button>
+              <div class="filter-controls">
+                <select id="statusFilter" onchange="filterSessionsByStatus(this.value)">
+                  <option value="">All Status</option>
+                  <option value="RUNNING">Running</option>
+                  <option value="PAUSED">Paused</option>
+                  <option value="TERMINATED">Terminated</option>
+                  <option value="MIGRATING">Migrating</option>
+                </select>
+                <select id="sortOrder" onchange="sortSessions(this.value)">
+                  <option value="created_desc">Newest First</option>
+                  <option value="created_asc">Oldest First</option>
+                  <option value="name_asc">Name A-Z</option>
+                  <option value="name_desc">Name Z-A</option>
+                  <option value="cpu_desc">CPU Usage</option>
+                  <option value="memory_desc">Memory Usage</option>
+                </select>
               </div>
             </div>
-            <div class="session-item" data-session="render-02">
-              <div class="session-icon"><i class="fas fa-cube"></i></div>
-              <div class="session-info">
-                <div class="session-name">Blender Render</div>
-                <div class="session-status paused">PAUSED</div>
-                <div class="session-resources">
-                  <div class="resource-bar cpu" style="width: 0%"></div>
-                  <div class="resource-bar gpu" style="width: 0%"></div>
-                  <div class="resource-bar ram" style="width: 45%"></div>
-                </div>
-                <div class="session-time">45m</div>
+            
+            <div class="sessions-stats">
+              <div class="stat-badge running">
+                <span class="count" id="runningCount">0</span>
+                <span class="label">Running</span>
               </div>
-              <div class="session-controls">
-                <button class="session-btn resume" title="Resume"><i class="fas fa-play"></i></button>
-                <button class="session-btn terminate" title="Terminate"><i class="fas fa-stop"></i></button>
+              <div class="stat-badge paused">
+                <span class="count" id="pausedCount">0</span>
+                <span class="label">Paused</span>
               </div>
+              <div class="stat-badge total">
+                <span class="count" id="totalCount">0</span>
+                <span class="label">Total</span>
+              </div>
+            </div>
+          </div>
+          
+          <div class="sessions-list" id="sessionsList">
+            <!-- Sessions will be dynamically populated -->
+            <div class="loading-sessions">
+              <i class="fas fa-spinner fa-spin"></i>
+              <span>Loading sessions...</span>
             </div>
           </div>
         </div>
-        <div class="session-details">
-          <div class="session-detail-header">
-            <h3 id="sessionName">Gaming Session 01</h3>
-            <span id="sessionId">Session ID: sess_001</span>
-            <div class="session-status-badge running">RUNNING</div>
-            <div class="session-actions">
-              <button class="btn-secondary">Pause</button>
-              <button class="btn-secondary">Snapshot</button>
-              <select title="Migrate">
-                <option>Migrate to...</option>
-                <option>Node-Alpha</option>
-                <option>Node-Beta</option>
-              </select>
-              <button class="btn-danger">Terminate</button>
+        
+        <!-- Right Panel: Session Inspector -->
+        <div class="sessions-right-panel">
+          <div class="session-inspector" id="sessionInspector">
+            <!-- Default view when no session is selected -->
+            <div class="no-session-selected" id="noSessionView">
+              <div class="empty-state">
+                <i class="fas fa-desktop fa-3x"></i>
+                <h3>No Session Selected</h3>
+                <p>Select a session from the left panel to view detailed information and controls.</p>
+                <button class="btn-primary" onclick="createNewSession()">
+                  <i class="fas fa-plus"></i> Create New Session
+                </button>
+              </div>
             </div>
-          </div>
-          <div class="session-tabs">
-            <button class="session-tab active">Overview</button>
-            <button class="session-tab">Performance</button>
-            <button class="session-tab">Logs</button>
-            <button class="session-tab">Settings</button>
-          </div>
-          <div class="session-tab-content">
-            <div class="session-overview">
-              <div class="session-info-grid">
-                <div class="info-section">
-                  <h4>Application</h4>
-                  <div class="app-info">
-                    <div class="app-icon"><i class="fas fa-gamepad"></i></div>
-                    <div class="app-details">
-                      <div class="app-name">Cyberpunk 2077</div>
-                      <div class="app-path">C:\Games\Cyberpunk2077\bin\x64\Cyberpunk2077.exe</div>
+            
+            <!-- Session Inspector Content -->
+            <div class="session-content" id="sessionContent" style="display: none;">
+              <!-- Session Header -->
+              <div class="session-detail-header">
+                <div class="session-title-section">
+                  <div class="session-icon-large" id="sessionIconLarge">
+                    <i class="fas fa-desktop"></i>
+                  </div>
+                  <div class="session-title-info">
+                    <h2 id="selectedSessionName">Session Name</h2>
+                    <div class="session-metadata">
+                      <span class="session-id" id="selectedSessionId">session-id</span>
+                      <span class="session-node" id="selectedSessionNode">node-id</span>
+                      <span class="session-uptime" id="selectedSessionUptime">00:00:00</span>
+                    </div>
+                  </div>
+                  <div class="session-status-section">
+                    <div class="session-status-badge" id="selectedSessionStatus">UNKNOWN</div>
+                    <div class="session-priority" id="selectedSessionPriority">Priority: Normal</div>
+                  </div>
+                </div>
+                
+                <div class="session-actions-bar">
+                  <button class="action-btn success" id="pauseResumeBtn" onclick="toggleSessionState()">
+                    <i class="fas fa-pause"></i>
+                    <span>Pause</span>
+                  </button>
+                  <button class="action-btn info" onclick="createSessionSnapshot()">
+                    <i class="fas fa-camera"></i>
+                    <span>Snapshot</span>
+                  </button>
+                  <div class="dropdown">
+                    <button class="action-btn warning dropdown-toggle" onclick="toggleMigrateDropdown()">
+                      <i class="fas fa-exchange-alt"></i>
+                      <span>Migrate</span>
+                    </button>
+                    <div class="dropdown-menu" id="migrateDropdown">
+                      <!-- Populated dynamically with available nodes -->
+                    </div>
+                  </div>
+                  <button class="action-btn danger" onclick="terminateSession()">
+                    <i class="fas fa-stop"></i>
+                    <span>Terminate</span>
+                  </button>
+                </div>
+              </div>
+              
+              <!-- Session Inspector Tabs -->
+              <div class="inspector-tabs">
+                <button class="inspector-tab active" data-tab="overview" onclick="switchInspectorTab('overview')">
+                  <i class="fas fa-info-circle"></i>
+                  <span>Overview</span>
+                </button>
+                <button class="inspector-tab" data-tab="performance" onclick="switchInspectorTab('performance')">
+                  <i class="fas fa-chart-line"></i>
+                  <span>Performance</span>
+                </button>
+                <button class="inspector-tab" data-tab="processes" onclick="switchInspectorTab('processes')">
+                  <i class="fas fa-tasks"></i>
+                  <span>Processes</span>
+                </button>
+                <button class="inspector-tab" data-tab="logs" onclick="switchInspectorTab('logs')">
+                  <i class="fas fa-file-alt"></i>
+                  <span>Logs</span>
+                </button>
+                <button class="inspector-tab" data-tab="settings" onclick="switchInspectorTab('settings')">
+                  <i class="fas fa-cog"></i>
+                  <span>Settings</span>
+                </button>
+                <button class="inspector-tab" data-tab="snapshots" onclick="switchInspectorTab('snapshots')">
+                  <i class="fas fa-layer-group"></i>
+                  <span>Snapshots</span>
+                </button>
+              </div>
+              
+              <!-- Inspector Tab Contents -->
+              <div class="inspector-content">
+                <!-- Overview Tab -->
+                <div class="inspector-tab-content active" id="overview-content">
+                  <div class="overview-grid">
+                    <div class="overview-section application-info">
+                      <h4><i class="fas fa-desktop"></i> Application Information</h4>
+                      <div class="info-grid">
+                        <div class="info-item">
+                          <span class="label">Application:</span>
+                          <span class="value" id="appName">-</span>
+                        </div>
+                        <div class="info-item">
+                          <span class="label">Command:</span>
+                          <span class="value command" id="appCommand">-</span>
+                        </div>
+                        <div class="info-item">
+                          <span class="label">Session Type:</span>
+                          <span class="value" id="sessionType">-</span>
+                        </div>
+                        <div class="info-item">
+                          <span class="label">User:</span>
+                          <span class="value" id="sessionUser">-</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div class="overview-section resource-allocation">
+                      <h4><i class="fas fa-microchip"></i> Resource Allocation</h4>
+                      <div class="resource-grid">
+                        <div class="resource-item">
+                          <div class="resource-icon cpu">
+                            <i class="fas fa-microchip"></i>
+                          </div>
+                          <div class="resource-details">
+                            <span class="resource-label">CPU Cores</span>
+                            <span class="resource-value" id="allocatedCPU">-</span>
+                          </div>
+                        </div>
+                        <div class="resource-item">
+                          <div class="resource-icon gpu">
+                            <i class="fas fa-tv"></i>
+                          </div>
+                          <div class="resource-details">
+                            <span class="resource-label">GPU Units</span>
+                            <span class="resource-value" id="allocatedGPU">-</span>
+                          </div>
+                        </div>
+                        <div class="resource-item">
+                          <div class="resource-icon memory">
+                            <i class="fas fa-memory"></i>
+                          </div>
+                          <div class="resource-details">
+                            <span class="resource-label">Memory</span>
+                            <span class="resource-value" id="allocatedRAM">-</span>
+                          </div>
+                        </div>
+                        <div class="resource-item">
+                          <div class="resource-icon storage">
+                            <i class="fas fa-hdd"></i>
+                          </div>
+                          <div class="resource-details">
+                            <span class="resource-label">Storage</span>
+                            <span class="resource-value" id="allocatedStorage">-</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div class="overview-section session-timeline">
+                      <h4><i class="fas fa-clock"></i> Session Timeline</h4>
+                      <div class="timeline-grid">
+                        <div class="timeline-item">
+                          <span class="label">Created:</span>
+                          <span class="value" id="sessionCreated">-</span>
+                        </div>
+                        <div class="timeline-item">
+                          <span class="label">Started:</span>
+                          <span class="value" id="sessionStarted">-</span>
+                        </div>
+                        <div class="timeline-item">
+                          <span class="label">Last Activity:</span>
+                          <span class="value" id="sessionActivity">-</span>
+                        </div>
+                        <div class="timeline-item">
+                          <span class="label">Uptime:</span>
+                          <span class="value" id="sessionUptimeDetail">-</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div class="overview-section session-tags">
+                      <h4><i class="fas fa-tags"></i> Tags & Labels</h4>
+                      <div class="tags-container" id="sessionTags">
+                        <!-- Tags populated dynamically -->
+                      </div>
                     </div>
                   </div>
                 </div>
-                <div class="info-section">
-                  <h4>Resource Allocation</h4>
-                  <div class="allocation-stats">
-                    <div class="stat-item">
-                      <span>CPU:</span>
-                      <span>16 cores (Workstation-Alpha)</span>
+                
+                <!-- Performance Tab -->
+                <div class="inspector-tab-content" id="performance-content">
+                  <div class="performance-grid">
+                    <div class="performance-section real-time-metrics">
+                      <h4><i class="fas fa-tachometer-alt"></i> Real-time Metrics</h4>
+                      <div class="metrics-grid">
+                        <div class="metric-card cpu">
+                          <div class="metric-header">
+                            <i class="fas fa-microchip"></i>
+                            <span>CPU Usage</span>
+                          </div>
+                          <div class="metric-value" id="metricCPU">0%</div>
+                          <div class="metric-chart">
+                            <canvas id="cpuChart" width="200" height="60"></canvas>
+                          </div>
+                        </div>
+                        
+                        <div class="metric-card memory">
+                          <div class="metric-header">
+                            <i class="fas fa-memory"></i>
+                            <span>Memory Usage</span>
+                          </div>
+                          <div class="metric-value" id="metricMemory">0 GB</div>
+                          <div class="metric-chart">
+                            <canvas id="memoryChart" width="200" height="60"></canvas>
+                          </div>
+                        </div>
+                        
+                        <div class="metric-card gpu">
+                          <div class="metric-header">
+                            <i class="fas fa-tv"></i>
+                            <span>GPU Usage</span>
+                          </div>
+                          <div class="metric-value" id="metricGPU">0%</div>
+                          <div class="metric-chart">
+                            <canvas id="gpuChart" width="200" height="60"></canvas>
+                          </div>
+                        </div>
+                        
+                        <div class="metric-card network">
+                          <div class="metric-header">
+                            <i class="fas fa-network-wired"></i>
+                            <span>Network I/O</span>
+                          </div>
+                          <div class="metric-value" id="metricNetwork">0 MB/s</div>
+                          <div class="metric-chart">
+                            <canvas id="networkChart" width="200" height="60"></canvas>
+                          </div>
+                        </div>
+                        
+                        <div class="metric-card disk">
+                          <div class="metric-header">
+                            <i class="fas fa-hdd"></i>
+                            <span>Disk I/O</span>
+                          </div>
+                          <div class="metric-value" id="metricDisk">0 MB/s</div>
+                          <div class="metric-chart">
+                            <canvas id="diskChart" width="200" height="60"></canvas>
+                          </div>
+                        </div>
+                        
+                        <div class="metric-card latency">
+                          <div class="metric-header">
+                            <i class="fas fa-clock"></i>
+                            <span>Latency</span>
+                          </div>
+                          <div class="metric-value" id="metricLatency">0 ms</div>
+                          <div class="metric-chart">
+                            <canvas id="latencyChart" width="200" height="60"></canvas>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                    <div class="stat-item">
-                      <span>GPU:</span>
-                      <span>RTX 5090 (Gaming-Rig-01)</span>
+                    
+                    <div class="performance-section resource-usage">
+                      <h4><i class="fas fa-chart-pie"></i> Resource Usage History</h4>
+                      <div class="usage-chart-container">
+                        <canvas id="resourceHistoryChart" width="800" height="300"></canvas>
+                      </div>
+                      <div class="chart-controls">
+                        <button class="chart-btn active" onclick="setChartTimeRange('1h')">1H</button>
+                        <button class="chart-btn" onclick="setChartTimeRange('6h')">6H</button>
+                        <button class="chart-btn" onclick="setChartTimeRange('24h')">24H</button>
+                        <button class="chart-btn" onclick="setChartTimeRange('7d')">7D</button>
+                      </div>
                     </div>
-                    <div class="stat-item">
-                      <span>RAM:</span>
-                      <span>32GB allocated</span>
+                  </div>
+                </div>
+                
+                <!-- Processes Tab -->
+                <div class="inspector-tab-content" id="processes-content">
+                  <div class="processes-section">
+                    <div class="processes-header">
+                      <h4><i class="fas fa-tasks"></i> Active Processes</h4>
+                      <div class="processes-controls">
+                        <button class="btn-secondary" onclick="refreshProcesses()">
+                          <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                        <select id="processSort" onchange="sortProcesses(this.value)">
+                          <option value="cpu">Sort by CPU</option>
+                          <option value="memory">Sort by Memory</option>
+                          <option value="name">Sort by Name</option>
+                          <option value="pid">Sort by PID</option>
+                        </select>
+                      </div>
                     </div>
-                    <div class="stat-item">
-                      <span>Storage:</span>
-                      <span>NVMe Pool (100GB)</span>
+                    
+                    <div class="processes-table-container">
+                      <table class="processes-table">
+                        <thead>
+                          <tr>
+                            <th>PID</th>
+                            <th>Process Name</th>
+                            <th>CPU %</th>
+                            <th>Memory %</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody id="processesTableBody">
+                          <!-- Processes populated dynamically -->
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+                
+                <!-- Logs Tab -->
+                <div class="inspector-tab-content" id="logs-content">
+                  <div class="logs-section">
+                    <div class="logs-header">
+                      <h4><i class="fas fa-file-alt"></i> Session Logs</h4>
+                      <div class="logs-controls">
+                        <select id="logLevel" onchange="filterLogLevel(this.value)">
+                          <option value="">All Levels</option>
+                          <option value="ERROR">Error</option>
+                          <option value="WARNING">Warning</option>
+                          <option value="INFO">Info</option>
+                          <option value="DEBUG">Debug</option>
+                        </select>
+                        <button class="btn-secondary" onclick="clearLogs()">
+                          <i class="fas fa-trash"></i> Clear
+                        </button>
+                        <button class="btn-secondary" onclick="exportLogs()">
+                          <i class="fas fa-download"></i> Export
+                        </button>
+                        <label class="auto-scroll-toggle">
+                          <input type="checkbox" id="autoScroll" checked>
+                          Auto-scroll
+                        </label>
+                      </div>
+                    </div>
+                    
+                    <div class="logs-container" id="logsContainer">
+                      <!-- Logs populated dynamically -->
+                    </div>
+                  </div>
+                </div>
+                
+                <!-- Settings Tab -->
+                <div class="inspector-tab-content" id="settings-content">
+                  <div class="settings-section">
+                    <h4><i class="fas fa-cog"></i> Session Settings</h4>
+                    
+                    <div class="settings-grid">
+                      <div class="setting-group">
+                        <h5>Resource Limits</h5>
+                        <div class="setting-item">
+                          <label>CPU Cores:</label>
+                          <input type="number" id="settingCPUCores" min="1" max="64">
+                        </div>
+                        <div class="setting-item">
+                          <label>Memory (GB):</label>
+                          <input type="number" id="settingMemory" min="1" max="256">
+                        </div>
+                        <div class="setting-item">
+                          <label>GPU Units:</label>
+                          <input type="number" id="settingGPU" min="0" max="8">
+                        </div>
+                      </div>
+                      
+                      <div class="setting-group">
+                        <h5>Priority & Scheduling</h5>
+                        <div class="setting-item">
+                          <label>Priority:</label>
+                          <select id="settingPriority">
+                            <option value="1">Low</option>
+                            <option value="2">Normal</option>
+                            <option value="3">High</option>
+                            <option value="4">Critical</option>
+                          </select>
+                        </div>
+                        <div class="setting-item">
+                          <label>Auto-restart:</label>
+                          <input type="checkbox" id="settingAutoRestart">
+                        </div>
+                      </div>
+                      
+                      <div class="setting-group">
+                        <h5>Advanced Options</h5>
+                        <div class="setting-item">
+                          <label>Environment Variables:</label>
+                          <textarea id="settingEnvVars" rows="4" placeholder="KEY=value"></textarea>
+                        </div>
+                        <div class="setting-item">
+                          <label>Working Directory:</label>
+                          <input type="text" id="settingWorkDir">
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div class="settings-actions">
+                      <button class="btn-primary" onclick="saveSessionSettings()">
+                        <i class="fas fa-save"></i> Save Settings
+                      </button>
+                      <button class="btn-secondary" onclick="resetSessionSettings()">
+                        <i class="fas fa-undo"></i> Reset
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                
+                <!-- Snapshots Tab -->
+                <div class="inspector-tab-content" id="snapshots-content">
+                  <div class="snapshots-section">
+                    <div class="snapshots-header">
+                      <h4><i class="fas fa-layer-group"></i> Session Snapshots</h4>
+                      <div class="snapshots-controls">
+                        <button class="btn-primary" onclick="createSessionSnapshot()">
+                          <i class="fas fa-camera"></i> Create Snapshot
+                        </button>
+                        <button class="btn-secondary" onclick="refreshSnapshots()">
+                          <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                      </div>
+                    </div>
+                    
+                    <div class="snapshots-grid" id="snapshotsGrid">
+                      <!-- Snapshots populated dynamically -->
                     </div>
                   </div>
                 </div>
