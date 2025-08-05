@@ -7,4 +7,4 @@ cryptography==44.0.1
 pysqlite3-binary==0.5.2
 psutil==5.9.6
 numpy==1.25.2
-python-multipart==0.0.6
+python-multipart==0.0.18
