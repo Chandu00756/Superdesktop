@@ -25,16 +25,321 @@ A revolutionary distributed computing system that aggregates CPU, GPU, RAM, stor
 
 ## [ARCHITECTURE] Architecture
 
+## SuperDesktop v2.0 - Advanced Distributed Desktop Environment
+
+**Professional distributed computing platform with AI-powered optimization, real-time monitoring, and heterogeneous hardware support.**
+
+![SuperDesktop v2.0](https://img.shields.io/badge/SuperDesktop-v2.0-blue?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-Production%20Ready-green?style=for-the-badge)
+![Contact](https://img.shields.io/badge/Contact-chandu%40portalvii.com-orange?style=for-the-badge)
+
+---
+
+## 🚀 **One-Click Development Setup**
+
+### **Prerequisites**
+
+- **Python 3.11+** (Required)
+- **Node.js 18+** (Optional, for enhanced features)
+- **Git** (For cloning)
+
+### **Quick Start**
+
+```bash
+# Clone repository
+git clone https://github.com/Chandu00756/Superdesktop.git
+cd Superdesktop
+
+# Start entire system (one command)
+chmod +x start_core_services_v2.sh
+./start_core_services_v2.sh
+```text
+
+**That's it!** The system will:
+
+- ✅ Auto-create Python virtual environment
+- ✅ Install all dependencies
+- ✅ Start all backend services
+- ✅ Launch desktop interface
+- ✅ Open in your browser automatically
+
+### **Stop System**
+
+```bash
+./stop-omega.sh
+```
+
+---
+
+## 🎯 **What You Get**
+
+### **🖥️ Desktop Interface**
+
+- **URL**: `control_node/desktop_app/omega-control-center.html`
+- **Features**: Real-time monitoring, node management, performance analytics
+- **Data**: 100% real backend integration (no simulation)
+
+### **🔧 Backend Services**
+
+- **API Server**: `http://127.0.0.1:8443` (encrypted endpoints)
+- **Control Node**: `http://127.0.0.1:7777` (orchestration)
+- **Metrics**: `http://127.0.0.1:8000/metrics` (Prometheus-compatible)
+
+### **📊 Key Features**
+
+- ✅ **Real-time Performance Monitoring**
+- ✅ **AI-Powered Resource Optimization**
+- ✅ **Fault-Tolerant Multi-Master Architecture**
+- ✅ **Heterogeneous Hardware Support** (CPU/GPU/NPU/FPGA)
+- ✅ **Tiered Storage Management**
+- ✅ **Secure Encrypted Communication**
+- ✅ **Hot-Swappable Components**
+- ✅ **Auto-Discovery & Self-Registration**
+
+---
+
+## 🏗️ **Architecture Overview**
+
+
+---
+
+## 📂 **Project Structure**
+
 ``
-├── control_node/       # Master coordinator and API hub
-├── compute_node/       # Distributed processing agents
-├── storage_node/       # Intelligent storage layer
-├── network/           # Inter-node communication protocols
-├── security/          # Authentication and encryption
-├── middleware/        # Service mesh and routing
-├── common/           # Shared models and utilities
-└── desktop_app/      # Electron desktop application
-``
+SuperDesktop/
+├── 🚀 start_core_services_v2.sh    # Main startup script
+├── 🛑 stop-omega.sh                # System shutdown script
+├── 📋 requirements.txt              # Python dependencies
+├── 📖 README.md                     # This file
+│
+├── 🔧 backend/                      # Backend API services
+│   ├── api_server.py               # Main API server
+│   ├── frontend_connector.py       # Frontend integration
+│   └── requirements.txt            # Backend dependencies
+│
+├── 🖥️ control_node/                # Control & orchestration
+│   ├── main.py                     # Control node manager
+│   └── desktop_app/                # Desktop interface
+│       ├── omega-control-center.html  # Main UI
+│       ├── package.json            # Node.js dependencies
+│       └── [CSS/JS assets]
+│
+├── 💾 storage_node/                # Storage management
+├── ⚡ compute_node/                # Compute resources
+├── 🧠 ai_engine/                   # AI optimization
+├── 🔗 network/                     # Network management
+└── 📊 [Additional services]        # Supporting components
+
+```
+
+---
+
+## 🛠️ **Development Workflow**
+
+### **1. Initial Setup**
+
+```bash
+# One-time setup
+git clone https://github.com/Chandu00756/Superdesktop.git
+cd Superdesktop
+chmod +x *.sh
+```
+
+### **2. Development Cycle**
+
+```bash
+# Start development environment
+./start_core_services_v2.sh
+
+# Code changes...
+# (System auto-restarts services on changes)
+
+# Stop when done
+./stop-omega.sh
+```
+
+### **3. Testing**
+
+```bash
+# Start system
+./start_core_services_v2.sh
+
+# Test endpoints
+curl http://127.0.0.1:8443/api/dashboard/metrics
+curl http://127.0.0.1:7777/health
+
+# Check desktop app
+open control_node/desktop_app/omega-control-center.html
+```
+
+---
+
+## 🔧 **Configuration**
+
+### **Environment Variables**
+
+```bash
+export OMEGA_LOG_LEVEL="DEBUG"          # Logging level
+export OMEGA_CLUSTER_NAME="dev-cluster" # Cluster name
+export OMEGA_TLS_ENABLED="false"        # TLS in development
+```
+
+### **Development Mode**
+
+The system automatically detects development mode when:
+
+- Running on `localhost` or `127.0.0.1`
+- Python environment is in project directory
+- Debug logging is enabled
+
+---
+
+## 🌐 **Network Ports**
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Backend API | 8443 | Main API server (encrypted) |
+| Control Node | 7777 | Orchestration & management |
+| WebSocket | 7778 | Real-time updates |
+| Metrics | 8000 | Prometheus metrics |
+| Storage | 8001 | Storage node API |
+| Compute | 8002 | Compute node API |
+
+---
+
+## 🔐 **Security Features**
+
+- ✅ **AES-256 Encryption** for all API communication
+- ✅ **HMAC Authentication** for message integrity
+- ✅ **SSL/TLS Support** for production deployments
+- ✅ **Role-Based Access Control** (RBAC)
+- ✅ **Secure Token Management**
+
+---
+
+## 📈 **Performance Monitoring**
+
+### **Built-in Dashboards**
+
+- **Real-time Metrics**: CPU, GPU, Memory, Network, Storage
+- **Node Health**: Status, temperature, power consumption
+- **Workload Analytics**: Task distribution, completion rates
+- **AI Predictions**: Resource optimization suggestions
+
+### **Metrics Export**
+
+- **Prometheus**: `http://127.0.0.1:8000/metrics`
+- **JSON API**: `http://127.0.0.1:8443/api/dashboard/metrics`
+- **WebSocket**: Real-time updates every 2 seconds
+
+---
+
+## 🔧 **Troubleshooting**
+
+### **Common Issues**
+
+**🐍 Python Environment Issues**
+
+```bash
+# Recreate environment
+rm -rf omega_env
+python3 -m venv omega_env
+source omega_env/bin/activate
+pip install -r requirements.txt
+```
+
+**🔌 Port Conflicts**
+
+```bash
+# Check what's using ports
+lsof -i :8443
+lsof -i :7777
+
+# Kill conflicting processes
+./stop-omega.sh
+```
+
+**📦 Missing Dependencies**
+
+```bash
+# Reinstall dependencies
+source omega_env/bin/activate
+pip install -r requirements.txt
+pip install -r backend/requirements.txt
+```
+
+**🌐 Browser Access Issues**
+
+```bash
+# Ensure services are running
+curl http://127.0.0.1:8443/api/dashboard/metrics
+
+# Open desktop app manually
+open control_node/desktop_app/omega-control-center.html
+```
+
+### **Log Files**
+
+```bash
+# Check service logs
+tail -f logs/*.log
+
+# Check startup logs
+./start_core_services_v2.sh | tee startup.log
+```
+
+---
+
+## 🚀 **Production Deployment**
+
+### **Docker Deployment**
+
+```bash
+# Build and run with Docker
+docker-compose up -d
+```
+
+### **Manual Production Setup**
+
+```bash
+# Production environment
+export OMEGA_TLS_ENABLED="true"
+export OMEGA_LOG_LEVEL="INFO"
+export OMEGA_CLUSTER_NAME="production"
+
+# Start with production settings
+./start_core_services_v2.sh
+```
+
+---
+
+## 📞 **Support & Contact**
+
+- **📧 Email**: <chandu@portalvii.com>
+- **🐙 Repository**: <https://github.com/Chandu00756/Superdesktop>
+- **📊 Issues**: <https://github.com/Chandu00756/Superdesktop/issues>
+- **📖 Documentation**: `/docs` directory
+
+---
+
+## 📄 **License**
+
+This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🙏 **Acknowledgments**
+
+- **Core Team**: Advanced distributed systems architecture
+- **AI Integration**: Machine learning optimization engines
+- **Security**: Enterprise-grade encryption implementation
+- **UI/UX**: Professional dashboard design
+
+---
+
+**SuperDesktop v2.0** - *Revolutionizing distributed computing with AI-powered optimization*
+
+**Contact**: <chandu@portalvii.com> | **Version**: 2.0 | **Status**: Production Ready
 
 ## [PACKAGE] Prerequisites
 

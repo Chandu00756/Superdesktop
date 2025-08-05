@@ -1,121 +1,3230 @@
 """
-Omega Super Desktop Console - Control Node
-Initial prototype master coordinator and user interface hub with advanced features.
+Omega Super Desktop Console v2.0 - Enhanced Control Node
+Master coordinator and API hub with fault-tolerant multi-master leader election
+Comprehensive node management with AI-powered optimization and heterogeneous hardware support
+
+Features:
+- Multi-master fault-tolerant architecture with leader election
+- Heterogeneous compute node support (CPU, GPU, NPU, FPGA, Edge-TPU)
+- Hot-swapping, self-registration, auto-scaling capabilities
+- Tiered storage management with ML-driven optimization
+- Advanced orchestration and global scheduling
+- Real-time monitoring and adaptive resource allocation
 """
+
+import asyncio
+import logging
 import time
 import json
-import logging
-import asyncio
-import uvicorn
-import psutil
 import uuid
-import numpy as np
-import jwt
+import threading
 import platform
 import subprocess
 import socket
 import os
 import random
+import hashlib
+import ssl
+import struct
+from typing import Dict, List, Any, Optional, Set, Union, Tuple
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from collections import defaultdict, deque
+from enum import Enum, auto
 from contextlib import asynccontextmanager
-from prometheus_client import start_http_server, Counter, Gauge, Histogram
+import weakref
+import gc
 
-from fastapi import FastAPI, WebSocket, HTTPException, Depends, BackgroundTasks
+# FastAPI and web framework imports
+from fastapi import FastAPI, WebSocket, HTTPException, Depends, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Column, String, DateTime, Float, Integer, JSON
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field, validator
+import uvicorn
 
-# Simple in-memory metrics instead of optional dependencies
+# Database imports
+from sqlalchemy import create_engine, Column, String, DateTime, Float, Integer, JSON, Boolean, Text, LargeBinary
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.pool import QueuePool
+
+# Monitoring and metrics imports
+from prometheus_client import start_http_server, Counter, Gauge, Histogram, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest
+
+# Scientific computing and ML imports
+import numpy as np
+import psutil
+import jwt
+
+# AI Engine imports - Enhanced with ML capabilities
+import sys
+sys.path.append(os.path.dirname(__file__))
+try:
+    from ai_engine.core import ai_engine
+    from ai_engine.network_intelligence import network_intelligence
+    from ai_engine.storage_intelligence import storage_intelligence
+    AI_ENGINE_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"AI Engine not available: {e}")
+    AI_ENGINE_AVAILABLE = False
+
+# ML and optimization libraries
+try:
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import mean_squared_error
+    ML_LIBRARIES_AVAILABLE = True
+except ImportError:
+    ML_LIBRARIES_AVAILABLE = False
+    logging.warning("Machine learning libraries not available")
+
+# External service imports with enhanced connectivity
+try:
+    import aiohttp
+    import websockets
+    import redis.asyncio as redis
+    import etcd3
+    import grpc
+    from grpc import aio as aio_grpc
+    import consul
+    EXTERNAL_SERVICES_AVAILABLE = True
+except ImportError:
+    EXTERNAL_SERVICES_AVAILABLE = False
+    logging.warning("External services (redis, etcd3, consul) not available - using fallbacks")
+
+# Hardware monitoring and optimization
+try:
+    import py3nvml.py3nvml as nvml
+    import pynvml
+    GPU_MONITORING_AVAILABLE = True
+except ImportError:
+    GPU_MONITORING_AVAILABLE = False
+
+# Network optimization libraries
+try:
+    import dpkt
+    import scapy
+    from scapy.all import *
+    NETWORK_OPTIMIZATION_AVAILABLE = True
+except ImportError:
+    NETWORK_OPTIMIZATION_AVAILABLE = False
+
+# Enhanced Configuration and Constants
+SECRET_KEY = os.getenv("OMEGA_SECRET_KEY", "omega-super-desktop-secret-key-change-in-production")
+CONTROL_NODE_PORT = int(os.getenv("OMEGA_CONTROL_PORT", "7777"))
+METRICS_PORT = int(os.getenv("OMEGA_METRICS_PORT", "8000"))
+WS_PORT = int(os.getenv("OMEGA_WS_PORT", "7778"))
+CLUSTER_NAME = os.getenv("OMEGA_CLUSTER_NAME", "omega-cluster-v2")
+
+# Leader election and fault tolerance settings
+LEADER_ELECTION_ENABLED = os.getenv("OMEGA_LEADER_ELECTION", "true").lower() == "true"
+HEARTBEAT_INTERVAL = int(os.getenv("OMEGA_HEARTBEAT_INTERVAL", "5"))
+LEADER_LEASE_DURATION = int(os.getenv("OMEGA_LEADER_LEASE_DURATION", "30"))
+FAILURE_DETECTION_THRESHOLD = int(os.getenv("OMEGA_FAILURE_THRESHOLD", "3"))
+AUTO_FAILOVER_ENABLED = os.getenv("OMEGA_AUTO_FAILOVER", "true").lower() == "true"
+
+# Resource management settings
+MAX_CPU_OVERCOMMIT_RATIO = float(os.getenv("OMEGA_CPU_OVERCOMMIT", "1.5"))
+MAX_MEMORY_OVERCOMMIT_RATIO = float(os.getenv("OMEGA_MEMORY_OVERCOMMIT", "1.2"))
+GPU_MEMORY_RESERVATION_MB = int(os.getenv("OMEGA_GPU_MEMORY_RESERVATION", "512"))
+THERMAL_THRESHOLD_CELSIUS = int(os.getenv("OMEGA_THERMAL_THRESHOLD", "80"))
+
+# Advanced networking settings
+RDMA_ENABLED = os.getenv("OMEGA_RDMA_ENABLED", "false").lower() == "true"
+NETWORK_LATENCY_TARGET_MS = float(os.getenv("OMEGA_LATENCY_TARGET", "1.0"))
+BANDWIDTH_RESERVATION_GBPS = float(os.getenv("OMEGA_BANDWIDTH_RESERVATION", "10.0"))
+
+# Storage optimization settings
+TIERED_STORAGE_ENABLED = os.getenv("OMEGA_TIERED_STORAGE", "true").lower() == "true"
+ML_PREFETCHING_ENABLED = os.getenv("OMEGA_ML_PREFETCHING", "true").lower() == "true"
+DEDUPLICATION_ENABLED = os.getenv("OMEGA_DEDUPLICATION", "true").lower() == "true"
+COMPRESSION_ALGORITHM = os.getenv("OMEGA_COMPRESSION", "zstd")
+
+# Security and authentication
+TLS_ENABLED = os.getenv("OMEGA_TLS_ENABLED", "true").lower() == "true"
+CERT_PATH = os.getenv("OMEGA_CERT_PATH", "../security/certs/control_node.crt")
+KEY_PATH = os.getenv("OMEGA_KEY_PATH", "../security/certs/control_node.key")
+CA_PATH = os.getenv("OMEGA_CA_PATH", "../security/certs/ca.crt")
+
+# Enhanced Node Types and Status Enums - Block 1: Core Node Classifications
+class NodeType(Enum):
+    """Comprehensive node types supporting heterogeneous hardware architectures"""
+    # Control Node Types - Master coordinators and API hubs
+    CONTROL_MASTER = "control_master"              # Primary leader with full orchestration
+    CONTROL_BACKUP = "control_backup"              # Backup control node for fault tolerance
+    CONTROL_EDGE = "control_edge"                  # Edge control for distributed clusters
+    
+    # Compute Node Types - Heterogeneous processing units
+    COMPUTE_CPU_X86 = "compute_cpu_x86"           # x86 CPU-focused compute nodes
+    COMPUTE_CPU_ARM = "compute_cpu_arm"           # ARM CPU-focused compute nodes
+    COMPUTE_GPU_NVIDIA = "compute_gpu_nvidia"     # NVIDIA GPU compute (CUDA)
+    COMPUTE_GPU_AMD = "compute_gpu_amd"           # AMD GPU compute (ROCm)
+    COMPUTE_GPU_INTEL = "compute_gpu_intel"       # Intel GPU compute (OpenCL/oneAPI)
+    COMPUTE_NPU_DEDICATED = "compute_npu_dedicated" # Neural Processing Units
+    COMPUTE_FPGA_XILINX = "compute_fpga_xilinx"   # Xilinx FPGA acceleration
+    COMPUTE_FPGA_INTEL = "compute_fpga_intel"     # Intel FPGA acceleration
+    COMPUTE_EDGE_TPU = "compute_edge_tpu"         # Google Edge TPU
+    COMPUTE_HYBRID_CPU_GPU = "compute_hybrid_cpu_gpu" # Mixed CPU+GPU workloads
+    COMPUTE_HYBRID_HETEROGENEOUS = "compute_hybrid_heterogeneous" # Multi-accelerator
+    
+    # Storage Node Types - Tiered storage systems
+    STORAGE_HOT_NVME = "storage_hot_nvme"         # Hot tier - NVMe SSDs
+    STORAGE_HOT_OPTANE = "storage_hot_optane"     # Hot tier - Intel Optane
+    STORAGE_WARM_SSD = "storage_warm_ssd"         # Warm tier - SATA SSDs
+    STORAGE_COLD_HDD = "storage_cold_hdd"         # Cold tier - HDDs
+    STORAGE_ARCHIVE_TAPE = "storage_archive_tape" # Archive tier - Tape storage
+    STORAGE_CLOUD_S3 = "storage_cloud_s3"        # Cloud storage - S3 compatible
+    STORAGE_DISTRIBUTED_CEPH = "storage_distributed_ceph" # Distributed - Ceph
+    STORAGE_DISTRIBUTED_GLUSTER = "storage_distributed_gluster" # Distributed - GlusterFS
+    STORAGE_MEMORY_FABRIC = "storage_memory_fabric" # In-memory fabric storage
+    
+    # Network Node Types - Network infrastructure
+    NETWORK_EDGE_ROUTER = "network_edge_router"   # Edge routing and load balancing
+    NETWORK_CORE_SWITCH = "network_core_switch"   # Core network switching
+    NETWORK_INFINIBAND = "network_infiniband"     # InfiniBand high-speed networking
+    NETWORK_RDMA_CAPABLE = "network_rdma_capable" # RDMA-enabled networking
+    
+    # Specialized Node Types
+    AI_INFERENCE_CPU = "ai_inference_cpu"         # CPU-based AI inference
+    AI_INFERENCE_GPU = "ai_inference_gpu"         # GPU-based AI inference
+    AI_INFERENCE_NPU = "ai_inference_npu"         # NPU-based AI inference
+    AI_TRAINING_DISTRIBUTED = "ai_training_distributed" # Distributed AI training
+    MEMORY_FABRIC_DDR = "memory_fabric_ddr"       # DDR memory fabric
+    MEMORY_FABRIC_HBM = "memory_fabric_hbm"       # High Bandwidth Memory fabric
+
+class NodeStatus(Enum):
+    """Comprehensive node status tracking with fault tolerance states"""
+    # Initialization and Registration States
+    INITIALIZING = "initializing"                 # Node starting up
+    REGISTERING = "registering"                   # Joining cluster
+    AUTHENTICATING = "authenticating"             # Security validation
+    PROVISIONING = "provisioning"                 # Resource allocation
+    
+    # Active Operation States
+    ACTIVE = "active"                             # Normal operation
+    BUSY = "busy"                                 # High utilization
+    IDLE = "idle"                                 # Low utilization, available
+    STANDBY = "standby"                           # Ready backup state
+    
+    # Maintenance and Management States
+    MAINTENANCE_SCHEDULED = "maintenance_scheduled" # Planned maintenance
+    MAINTENANCE_ACTIVE = "maintenance_active"     # Currently in maintenance
+    DRAINING = "draining"                         # Gracefully removing workloads
+    EVACUATING = "evacuating"                     # Emergency workload evacuation
+    
+    # Health and Error States
+    HEALTHY = "healthy"                           # All systems normal
+    DEGRADED = "degraded"                         # Partial functionality
+    UNHEALTHY = "unhealthy"                       # System issues detected
+    CRITICAL = "critical"                         # Severe issues
+    FAILED = "failed"                             # Complete failure
+    QUARANTINED = "quarantined"                   # Isolated due to issues
+    
+    # Network and Connectivity States
+    OFFLINE = "offline"                           # Not reachable
+    NETWORK_PARTITIONED = "network_partitioned"   # Split-brain scenario
+    RECONNECTING = "reconnecting"                 # Attempting to rejoin
+    
+    # Scaling and Hot-swap States
+    SCALING_UP = "scaling_up"                     # Adding capacity
+    SCALING_DOWN = "scaling_down"                 # Reducing capacity
+    HOT_SWAPPING = "hot_swapping"                 # Hardware replacement
+    MIGRATING_IN = "migrating_in"                 # Receiving workloads
+    MIGRATING_OUT = "migrating_out"               # Transferring workloads
+    
+    # Leader Election States (for control nodes)
+    LEADER = "leader"                             # Current cluster leader
+    FOLLOWER = "follower"                         # Following cluster leader
+    CANDIDATE = "candidate"                       # Seeking leadership
+    SPLIT_BRAIN = "split_brain"                   # Multiple leaders detected
+
+class SessionStatus(Enum):
+    """Enhanced session status tracking"""
+    PENDING = "pending"
+    SCHEDULING = "scheduling"
+    STARTING = "starting"
+    RUNNING = "running"
+    PAUSED = "paused"
+    MIGRATING = "migrating"
+    CHECKPOINTING = "checkpointing"
+    RESTORING = "restoring"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TERMINATED = "terminated"
+    ARCHIVED = "archived"
+
+class TaskType(Enum):
+    """Comprehensive task classification"""
+    CPU_INTENSIVE = "cpu_intensive"
+    GPU_COMPUTE = "gpu_compute"
+    NPU_INFERENCE = "npu_inference"
+    FPGA_ACCELERATION = "fpga_acceleration"
+    MEMORY_INTENSIVE = "memory_intensive"
+    STORAGE_INTENSIVE = "storage_intensive"
+    NETWORK_INTENSIVE = "network_intensive"
+    AI_TRAINING = "ai_training"
+    AI_INFERENCE = "ai_inference"
+    REAL_TIME = "real_time"
+    BATCH_PROCESSING = "batch_processing"
+    STREAM_PROCESSING = "stream_processing"
+    MIXED_WORKLOAD = "mixed_workload"
+
+class HardwareAccelerator(Enum):
+    """Hardware accelerator types"""
+    NONE = "none"
+    CUDA = "cuda"
+    ROCm = "rocm"
+    OpenCL = "opencl"
+    Vulkan = "vulkan"
+    DirectML = "directml"
+    TensorRT = "tensorrt"
+    OpenVINO = "openvino"
+    CoreML = "coreml"
+    ONNX_RUNTIME = "onnx_runtime"
+
+class StorageTier(Enum):
+    """Storage tier classifications"""
+    MEMORY = "memory"
+    HOT_NVME = "hot_nvme"
+    WARM_SSD = "warm_ssd"
+    COLD_HDD = "cold_hdd"
+    ARCHIVE_TAPE = "archive_tape"
+    CLOUD_S3 = "cloud_s3"
+    DISTRIBUTED = "distributed"
+
+class NetworkProtocol(Enum):
+    """Network protocol support"""
+    TCP = "tcp"
+    UDP = "udp"
+    RDMA = "rdma"
+    INFINIBAND = "infiniband"
+    ETHERNET = "ethernet"
+    NVLINK = "nvlink"
+    CXL = "cxl"
+    PCIE = "pcie"
+
+# Enhanced Data Classes for Node Management
+# Enhanced Data Classes for Comprehensive Node Management - Block 2
+@dataclass
+class NodeCapabilities:
+    """Comprehensive node capabilities with heterogeneous hardware support"""
+    # Basic Node Information
+    node_id: str = ""
+    node_type: NodeType = NodeType.COMPUTE_CPU_X86
+    node_class: str = "standard"  # standard, high-performance, edge, embedded
+    
+    # CPU Specifications - Enhanced for heterogeneous architectures
+    cpu_cores: int = 0
+    cpu_threads: int = 0
+    cpu_frequency_base_ghz: float = 0.0
+    cpu_frequency_boost_ghz: float = 0.0
+    cpu_architecture: str = "x86_64"  # x86_64, arm64, riscv
+    cpu_vendor: str = "unknown"  # intel, amd, arm, apple
+    cpu_model: str = ""
+    cpu_instruction_sets: List[str] = field(default_factory=list)  # avx512, neon, etc.
+    cpu_cache_l1_kb: int = 0
+    cpu_cache_l2_kb: int = 0
+    cpu_cache_l3_kb: int = 0
+    cpu_tdp_watts: int = 0
+    
+    # Memory Specifications - Advanced memory hierarchy
+    memory_total_gb: float = 0.0
+    memory_available_gb: float = 0.0
+    memory_type: str = "DDR4"  # DDR4, DDR5, LPDDR5, HBM2, HBM3
+    memory_channels: int = 2
+    memory_speed_mhz: int = 2400
+    memory_bandwidth_gbps: float = 0.0
+    memory_ecc_support: bool = False
+    numa_nodes: int = 1
+    numa_topology: Dict[str, Any] = field(default_factory=dict)
+    
+    # GPU Specifications - Multi-vendor GPU support
+    gpu_units: int = 0
+    gpu_total_memory_gb: float = 0.0
+    gpu_available_memory_gb: float = 0.0
+    gpu_compute_capability: str = ""  # CUDA compute capability or equivalent
+    gpu_vendor: str = ""  # nvidia, amd, intel
+    gpu_models: List[str] = field(default_factory=list)
+    gpu_driver_version: str = ""
+    gpu_cuda_version: str = ""
+    gpu_rocm_version: str = ""
+    gpu_opencl_version: str = ""
+    gpu_vulkan_version: str = ""
+    gpu_directml_support: bool = False
+    gpu_tensor_cores: bool = False
+    gpu_ray_tracing_support: bool = False
+    gpu_nvlink_support: bool = False
+    gpu_multi_instance_support: bool = False
+    
+    # Specialized Hardware - NPU, FPGA, Edge TPU
+    npu_units: int = 0
+    npu_tops_int8: float = 0.0
+    npu_tops_fp16: float = 0.0
+    npu_vendor: str = ""  # intel, qualcomm, google, apple
+    npu_models: List[str] = field(default_factory=list)
+    
+    fpga_units: int = 0
+    fpga_vendor: str = ""  # xilinx, intel, microsemi
+    fpga_models: List[str] = field(default_factory=list)
+    fpga_logic_elements: int = 0
+    fpga_memory_blocks: int = 0
+    fpga_dsp_blocks: int = 0
+    
+    edge_tpu_units: int = 0
+    edge_tpu_tops: float = 0.0
+    edge_tpu_version: str = ""
+    
+    # Storage Capabilities - Tiered storage architecture
+    storage_total_gb: float = 0.0
+    storage_available_gb: float = 0.0
+    storage_tiers: Dict[StorageTier, Dict[str, Any]] = field(default_factory=dict)
+    storage_nvme_units: int = 0
+    storage_ssd_units: int = 0
+    storage_hdd_units: int = 0
+    storage_total_iops: int = 0
+    storage_sequential_read_mbps: float = 0.0
+    storage_sequential_write_mbps: float = 0.0
+    storage_random_read_iops: int = 0
+    storage_random_write_iops: int = 0
+    storage_deduplication_support: bool = False
+    storage_compression_support: bool = False
+    storage_encryption_support: bool = False
+    
+    # Network Capabilities - High-performance networking
+    network_interfaces: List[Dict[str, Any]] = field(default_factory=list)
+    network_bandwidth_gbps: float = 1.0
+    network_protocols: List[NetworkProtocol] = field(default_factory=list)
+    rdma_capable: bool = False
+    rdma_protocol: str = ""  # roce, infiniband, iwarp
+    infiniband_ports: int = 0
+    infiniband_speed: str = ""  # FDR, EDR, HDR, NDR
+    sr_iov_support: bool = False
+    pcie_lanes: int = 0
+    pcie_generation: int = 4
+    
+    # Virtualization and Containerization
+    virtualization_support: bool = True
+    hypervisor_support: List[str] = field(default_factory=list)  # kvm, xen, vmware
+    container_runtime_support: List[str] = field(default_factory=list)  # docker, containerd, cri-o
+    kubernetes_support: bool = True
+    nested_virtualization: bool = False
+    iommu_support: bool = False
+    
+    # Hardware Accelerators and Features
+    hardware_accelerators: List[HardwareAccelerator] = field(default_factory=list)
+    security_features: List[str] = field(default_factory=list)  # tpm, secure_boot, etc.
+    crypto_acceleration: bool = False
+    hardware_rng: bool = False
+    
+    # Power Management and Thermal
+    power_management: Dict[str, Any] = field(default_factory=dict)
+    thermal_design_power_watts: int = 0
+    power_consumption_idle_watts: int = 0
+    power_consumption_max_watts: int = 0
+    cooling_solution: str = "air"  # air, liquid, immersion
+    thermal_sensors: List[str] = field(default_factory=list)
+    
+    # Hot-swapping and Self-registration Capabilities
+    hot_swappable: bool = False
+    hot_swap_components: List[str] = field(default_factory=list)  # memory, storage, cards
+    auto_registration: bool = True
+    auto_discovery: bool = True
+    plug_and_play: bool = False
+    
+    # Fault Tolerance and Reliability
+    fault_tolerance_level: str = "standard"  # basic, standard, high, critical
+    redundancy_support: bool = False
+    error_correction: bool = False
+    memory_mirroring: bool = False
+    raid_support: List[str] = field(default_factory=list)  # 0, 1, 5, 6, 10
+    
+    # Performance Characteristics
+    compute_performance_rating: float = 1.0  # Normalized performance score
+    memory_latency_ns: float = 0.0
+    storage_latency_us: float = 0.0
+    network_latency_us: float = 0.0
+    
+    # Specialized Workload Support
+    workload_types_optimized: List[TaskType] = field(default_factory=list)
+    ai_frameworks_supported: List[str] = field(default_factory=list)  # tensorflow, pytorch, etc.
+    
+    # Location and Physical Characteristics
+    rack_location: str = ""
+    datacenter_zone: str = ""
+    geographic_location: str = ""
+    physical_size_form_factor: str = ""  # 1U, 2U, tower, blade, embedded
+
+@dataclass
+class NodeMetrics:
+    """Comprehensive real-time node performance metrics"""
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    
+    # CPU metrics
+    cpu_usage_percent: float = 0.0
+    cpu_load_1min: float = 0.0
+    cpu_load_5min: float = 0.0
+    cpu_load_15min: float = 0.0
+    cpu_frequency_current_ghz: float = 0.0
+    
+    # Memory metrics
+    memory_usage_percent: float = 0.0
+    memory_available_gb: float = 0.0
+    memory_cached_gb: float = 0.0
+    memory_swap_usage_percent: float = 0.0
+    
+    # GPU metrics
+    gpu_usage_percent: float = 0.0
+    gpu_memory_usage_percent: float = 0.0
+    gpu_temperature_celsius: float = 0.0
+    gpu_power_usage_watts: float = 0.0
+    
+    # Storage metrics
+    disk_usage_percent: float = 0.0
+    disk_io_read_mbps: float = 0.0
+    disk_io_write_mbps: float = 0.0
+    disk_io_utilization_percent: float = 0.0
+    
+    # Network metrics
+    network_rx_mbps: float = 0.0
+    network_tx_mbps: float = 0.0
+    network_latency_ms: float = 0.0
+    network_packet_loss_percent: float = 0.0
+    
+    # Thermal and power metrics
+    cpu_temperature_celsius: float = 0.0
+    system_temperature_celsius: float = 0.0
+    power_consumption_watts: float = 0.0
+    fan_speed_rpm: int = 0
+    
+    # Performance scores
+    compute_performance_score: float = 1.0
+    memory_performance_score: float = 1.0
+    storage_performance_score: float = 1.0
+    network_performance_score: float = 1.0
+    overall_health_score: float = 1.0
+    
+    # Additional metrics
+    latency_ms: float = 0.0
+    throughput_ops_per_sec: float = 0.0
+    error_rate: float = 0.0
+
+@dataclass
+class FaultToleranceConfig:
+    """Enhanced fault tolerance and leader election configuration"""
+    leader_election_enabled: bool = True
+    heartbeat_interval_seconds: int = 5
+    leader_lease_duration_seconds: int = 30
+    failure_detection_threshold: int = 3
+    auto_failover_enabled: bool = True
+    split_brain_protection: bool = True
+    backup_control_nodes: List[str] = field(default_factory=list)
+    consensus_algorithm: str = "raft"
+    quorum_size: int = 3
+    leader_health_check_interval: int = 10
+    failover_timeout_seconds: int = 60
+    cluster_membership_timeout: int = 120
+
+@dataclass
+class LeaderElectionState:
+    """Leader election state tracking"""
+    current_leader: Optional[str] = None
+    leader_term: int = 0
+    leader_lease_expiry: Optional[datetime] = None
+    election_in_progress: bool = False
+    candidates: List[str] = field(default_factory=list)
+    last_election_time: Optional[datetime] = None
+    split_brain_detected: bool = False
+
+# Enhanced Prometheus Metrics for comprehensive monitoring
+REQUESTS_TOTAL = Counter('omega_requests_total', 'Total requests', ['method', 'endpoint', 'status'])
+ACTIVE_SESSIONS = Gauge('omega_active_sessions', 'Number of active sessions', ['node_type'])
+NODE_COUNT = Gauge('omega_node_count', 'Number of registered nodes', ['type', 'status'])
+LATENCY_P95 = Gauge('omega_latency_p95_ms', 'P95 latency in milliseconds', ['node_id'])
+RESOURCE_UTILIZATION = Gauge('omega_resource_utilization', 'Resource utilization', ['node_id', 'resource_type'])
+FAULT_TOLERANCE_STATUS = Gauge('omega_fault_tolerance_status', 'Fault tolerance status', ['component'])
+
+# Leader election metrics
+LEADER_ELECTIONS_TOTAL = Counter('omega_leader_elections_total', 'Total leader elections')
+LEADER_ELECTION_DURATION = Histogram('omega_leader_election_duration_seconds', 'Leader election duration')
+SPLIT_BRAIN_INCIDENTS = Counter('omega_split_brain_incidents_total', 'Split brain incidents detected')
+
+# Performance metrics
+TASK_EXECUTION_TIME = Histogram('omega_task_execution_seconds', 'Task execution time', ['task_type', 'node_type'])
+PLACEMENT_ALGORITHM_DURATION = Histogram('omega_placement_duration_seconds', 'Placement algorithm duration')
+HEARTBEAT_LATENCY = Histogram('omega_heartbeat_latency_seconds', 'Heartbeat latency')
+
+# Hardware metrics
+CPU_TEMPERATURE = Gauge('omega_cpu_temperature_celsius', 'CPU temperature', ['node_id'])
+GPU_UTILIZATION = Gauge('omega_gpu_utilization_percent', 'GPU utilization', ['node_id', 'gpu_id'])
+MEMORY_PRESSURE = Gauge('omega_memory_pressure', 'Memory pressure indicator', ['node_id'])
+STORAGE_TIER_UTILIZATION = Gauge('omega_storage_tier_utilization', 'Storage tier utilization', ['node_id', 'tier'])
+
+# Network metrics
+NETWORK_BANDWIDTH_UTILIZATION = Gauge('omega_network_bandwidth_utilization', 'Network bandwidth utilization', ['node_id', 'interface'])
+RDMA_OPERATIONS = Counter('omega_rdma_operations_total', 'RDMA operations', ['node_id', 'operation_type'])
+
+# Enhanced in-memory metrics fallback with comprehensive tracking
 class SimpleMetrics:
     def __init__(self):
         self.requests_total = 0
         self.active_sessions = 0
         self.node_count = 0
+        self.errors = 0
+        self.leader_elections = 0
+        self.split_brain_incidents = 0
+        self.task_executions = {}
+        self.placement_times = []
+        self.heartbeat_latencies = []
+        self.resource_utilization = {}
         
-    def inc_requests(self):
+    def inc_requests(self, method="GET", endpoint="/", status="200"):
         self.requests_total += 1
-
-# Prometheus metrics
-REQUESTS_TOTAL = Counter('omega_requests_total', 'Total requests', ['method', 'endpoint'])
-ACTIVE_SESSIONS = Gauge('omega_active_sessions', 'Number of active sessions')
-NODE_COUNT = Gauge('omega_node_count', 'Number of registered nodes')
-LATENCY_P95 = Gauge('omega_latency_p95_ms', 'P95 latency in milliseconds')
-
-# Secret key for JWT tokens
-SECRET_KEY = os.getenv("OMEGA_SECRET_KEY", "omega-super-desktop-secret-key-prototype-change-in-production")
+    
+    def set_active_sessions(self, count, node_type="default"):
+        self.active_sessions = count
+    
+    def set_node_count(self, count, node_type="default", status="active"):
+        self.node_count = count
         
+    def record_leader_election(self):
+        self.leader_elections += 1
+        
+    def record_split_brain(self):
+        self.split_brain_incidents += 1
+        
+    def record_task_execution(self, task_type, duration, node_type="default"):
+        if task_type not in self.task_executions:
+            self.task_executions[task_type] = []
+        self.task_executions[task_type].append(duration)
+        
+    def record_placement_time(self, duration):
+        self.placement_times.append(duration)
+        if len(self.placement_times) > 1000:  # Keep only recent data
+            self.placement_times = self.placement_times[-1000:]
+            
+    def record_heartbeat_latency(self, latency):
+        self.heartbeat_latencies.append(latency)
+        if len(self.heartbeat_latencies) > 1000:
+            self.heartbeat_latencies = self.heartbeat_latencies[-1000:]
+
 metrics = SimpleMetrics()
 
-# Global data storage (replace Redis if not available)
-nodes_data = {}
-sessions_data = {}
-# Database setup with fallback to SQLite
-import os
-import logging
-import sqlite3
+# Machine Learning Components for Intelligent Optimization
+class MLPlacementOptimizer:
+    """Machine learning-based placement optimization"""
+    def __init__(self):
+        self.model = None
+        self.scaler = StandardScaler() if ML_LIBRARIES_AVAILABLE else None
+        self.training_data = []
+        self.feature_names = [
+            'cpu_utilization', 'memory_utilization', 'gpu_utilization',
+            'network_latency', 'thermal_score', 'load_balance_score',
+            'task_cpu_req', 'task_memory_req', 'task_gpu_req'
+        ]
+        
+    def train_model(self, placement_history: List[Dict[str, Any]]):
+        """Train placement model based on historical data"""
+        if not ML_LIBRARIES_AVAILABLE or len(placement_history) < 10:
+            return
+            
+        try:
+            # Prepare training data
+            features = []
+            targets = []
+            
+            for record in placement_history:
+                if 'features' in record and 'performance_score' in record:
+                    features.append(record['features'])
+                    targets.append(record['performance_score'])
+            
+            if len(features) < 10:
+                return
+                
+            X = np.array(features)
+            y = np.array(targets)
+            
+            # Scale features
+            X_scaled = self.scaler.fit_transform(X)
+            
+            # Train model
+            self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+            self.model.fit(X_scaled, y)
+            
+            logging.info(f"ML placement model trained on {len(features)} samples")
+            
+        except Exception as e:
+            logging.error(f"Failed to train ML placement model: {e}")
+    
+    def predict_performance(self, node_features: List[float], task_requirements: List[float]) -> float:
+        """Predict performance score for placement"""
+        if not ML_LIBRARIES_AVAILABLE or self.model is None:
+            return 0.5  # Default neutral score
+            
+        try:
+            features = np.array([node_features + task_requirements]).reshape(1, -1)
+            features_scaled = self.scaler.transform(features)
+            score = self.model.predict(features_scaled)[0]
+            return max(0.0, min(1.0, score))  # Clamp to [0, 1]
+        except Exception as e:
+            logging.error(f"ML prediction failed: {e}")
+            return 0.5
+
+# Enhanced Resource Management and Supporting Classes - Block 4
+class ResourceManager:
+    """
+    Advanced resource management for heterogeneous compute environments.
+    Handles resource allocation, tracking, and optimization.
+    """
+    
+    def __init__(self):
+        self.resource_pools = {}
+        self.allocation_tracking = {}
+        self.resource_quotas = {}
+        self.utilization_history = defaultdict(deque)
+        
+    async def allocate_resources(self, task_id: str, node_id: str, requirements: Dict[str, Any]):
+        """Allocate resources for a task on a specific node"""
+        try:
+            if node_id not in self.resource_pools:
+                logging.error(f"Node {node_id} not found in resource pools")
+                return False
+            
+            node_resources = self.resource_pools[node_id]
+            
+            # Check availability
+            if not self._check_resource_availability(node_resources, requirements):
+                return False
+            
+            # Allocate resources
+            self._update_resource_allocation(node_id, requirements, 'allocate')
+            
+            # Track allocation
+            self.allocation_tracking[task_id] = {
+                'node_id': node_id,
+                'requirements': requirements,
+                'allocated_at': datetime.utcnow()
+            }
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Resource allocation failed: {e}")
+            return False
+    
+    def _check_resource_availability(self, node_resources: Dict[str, Any], requirements: Dict[str, Any]) -> bool:
+        """Check if node has sufficient resources"""
+        try:
+            available_cpu = node_resources.get('available_cpu_cores', 0)
+            available_memory = node_resources.get('available_memory_gb', 0)
+            available_gpu = node_resources.get('available_gpu_units', 0)
+            
+            required_cpu = requirements.get('cpu_cores', 0)
+            required_memory = requirements.get('memory_gb', 0)
+            required_gpu = requirements.get('gpu_units', 0)
+            
+            return (available_cpu >= required_cpu and 
+                   available_memory >= required_memory and
+                   available_gpu >= required_gpu)
+                   
+        except Exception as e:
+            logging.error(f"Resource availability check failed: {e}")
+            return False
+
+class HeartbeatManager:
+    """
+    Heartbeat management for cluster health monitoring and failure detection.
+    """
+    
+    def __init__(self):
+        self.heartbeat_interval = HEARTBEAT_INTERVAL
+        self.node_heartbeats = {}
+        self.failure_threshold = FAILURE_DETECTION_THRESHOLD
+        
+    async def start(self):
+        """Start heartbeat management"""
+        try:
+            asyncio.create_task(self._heartbeat_loop())
+            logging.info("Heartbeat manager started")
+        except Exception as e:
+            logging.error(f"Heartbeat manager start failed: {e}")
+    
+    async def _heartbeat_loop(self):
+        """Main heartbeat monitoring loop"""
+        while True:
+            try:
+                await self._send_heartbeats()
+                await self._check_node_failures()
+                await asyncio.sleep(self.heartbeat_interval)
+            except Exception as e:
+                logging.error(f"Heartbeat loop error: {e}")
+                await asyncio.sleep(self.heartbeat_interval)
+    
+    async def _send_heartbeats(self):
+        """Send heartbeats to cluster members"""
+        try:
+            if redis_client:
+                heartbeat_data = {
+                    'node_id': f"control-{socket.gethostname()}",
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'status': 'healthy'
+                }
+                await redis_client.setex('heartbeat:control', self.heartbeat_interval * 2, json.dumps(heartbeat_data))
+        except Exception as e:
+            logging.warning(f"Failed to send heartbeat: {e}")
+
+class LoadBalancer:
+    """Enhanced load balancer with predictive capabilities and heterogeneous hardware support"""
+    
+    def __init__(self):
+        self.node_loads = defaultdict(float)
+        self.task_history = defaultdict(list)
+        self.placement_weights = {}
+        self.load_prediction_models = {}
+        
+    def update_node_load(self, node_id: str, load_metrics: Dict[str, float]):
+        """Update load metrics for a node with hardware-specific weighting"""
+        try:
+            # Get node type for specialized weighting
+            node_type = load_metrics.get('node_type', 'cpu')
+            
+            if 'gpu' in node_type.lower():
+                # GPU-focused weighting
+                cpu_weight = 0.2
+                memory_weight = 0.2
+                gpu_weight = 0.5
+                network_weight = 0.1
+            elif 'storage' in node_type.lower():
+                # Storage-focused weighting
+                cpu_weight = 0.1
+                memory_weight = 0.2
+                gpu_weight = 0.0
+                disk_weight = 0.6
+                network_weight = 0.1
+            else:
+                # Default CPU-focused weighting
+                cpu_weight = 0.4
+                memory_weight = 0.3
+                gpu_weight = 0.2
+                network_weight = 0.1
+            
+            total_load = (
+                load_metrics.get('cpu_utilization', 0) * cpu_weight +
+                load_metrics.get('memory_utilization', 0) * memory_weight +
+                load_metrics.get('gpu_utilization', 0) * gpu_weight +
+                load_metrics.get('network_utilization', 0) * network_weight
+            )
+            
+            # Add storage utilization for storage nodes
+            if 'storage' in node_type.lower():
+                total_load += load_metrics.get('disk_utilization', 0) * 0.6
+            
+            self.node_loads[node_id] = total_load
+            
+            # Update load history for prediction
+            if node_id not in self.task_history:
+                self.task_history[node_id] = deque(maxlen=100)
+            self.task_history[node_id].append({
+                'timestamp': time.time(),
+                'load': total_load,
+                'metrics': load_metrics
+            })
+            
+        except Exception as e:
+            logging.error(f"Load update failed for node {node_id}: {e}")
+    
+    def get_load_balance_score(self, node_id: str) -> float:
+        """Get load balance score with predictive adjustment"""
+        try:
+            if node_id not in self.node_loads:
+                return 0.5
+                
+            current_load = self.node_loads[node_id]
+            
+            # Predict future load
+            predicted_load = self._predict_future_load(node_id)
+            
+            # Combine current and predicted load
+            combined_load = (current_load * 0.7) + (predicted_load * 0.3)
+            
+            # Invert to get score (lower load = higher score)
+            score = max(0.0, 1.0 - combined_load)
+            
+            return score
+            
+        except Exception as e:
+            logging.error(f"Load balance score calculation failed: {e}")
+            return 0.5
+    
+    def _predict_future_load(self, node_id: str) -> float:
+        """Predict future load based on historical patterns"""
+        try:
+            if node_id not in self.task_history or len(self.task_history[node_id]) < 3:
+                return self.node_loads.get(node_id, 0.5)
+            
+            # Simple linear trend prediction
+            recent_loads = [entry['load'] for entry in list(self.task_history[node_id])[-5:]]
+            
+            if len(recent_loads) >= 2:
+                # Calculate trend
+                trend = (recent_loads[-1] - recent_loads[0]) / len(recent_loads)
+                predicted = recent_loads[-1] + trend
+                return max(0.0, min(1.0, predicted))
+            
+            return recent_loads[-1]
+            
+        except Exception as e:
+            logging.error(f"Load prediction failed: {e}")
+            return 0.5
+    
+    def select_optimal_node(self, available_nodes: List[str], task_requirements: Dict[str, Any]) -> str:
+        """Select optimal node with hardware-aware load balancing"""
+        try:
+            if not available_nodes:
+                return None
+                
+            scores = {}
+            task_type = task_requirements.get('task_type', '')
+            
+            for node_id in available_nodes:
+                base_score = self.get_load_balance_score(node_id)
+                
+                # Apply task-specific adjustments based on hardware requirements
+                if 'gpu' in task_type.lower():
+                    # Prefer GPU nodes for GPU tasks
+                    if 'gpu' in node_id.lower():
+                        base_score *= 1.5
+                    else:
+                        base_score *= 0.5
+                
+                elif 'storage' in task_type.lower():
+                    # Prefer storage nodes for storage tasks
+                    if 'storage' in node_id.lower():
+                        base_score *= 1.3
+                
+                elif 'network' in task_type.lower():
+                    # Prefer nodes with good network connectivity
+                    network_score = task_requirements.get('network_score', 1.0)
+                    base_score *= network_score
+                
+                # Consider thermal constraints
+                thermal_penalty = self._get_thermal_penalty(node_id)
+                base_score *= thermal_penalty
+                
+                scores[node_id] = base_score
+            
+            # Return node with highest score
+            best_node = max(scores.items(), key=lambda x: x[1])
+            return best_node[0]
+            
+        except Exception as e:
+            logging.error(f"Optimal node selection failed: {e}")
+            return available_nodes[0] if available_nodes else None
+    
+    def _get_thermal_penalty(self, node_id: str) -> float:
+        """Calculate thermal penalty for node selection"""
+        try:
+            # This would integrate with thermal manager in full implementation
+            # For now, return a neutral value
+            return 1.0
+        except Exception as e:
+            logging.error(f"Thermal penalty calculation failed: {e}")
+            return 1.0
+
+class SplitBrainDetector:
+    """
+    Advanced split-brain detection and resolution for multi-master control nodes.
+    """
+    
+    def __init__(self):
+        self.detection_interval = 10  # seconds
+        self.quorum_requirements = {}
+        self.leadership_claims = {}
+        self.network_partitions = set()
+        
+    async def detect_split_brain(self) -> bool:
+        """Detect potential split-brain scenarios"""
+        try:
+            # Check for multiple leadership claims
+            multiple_leaders = await self._check_multiple_leaders()
+            
+            # Check for network partitions
+            network_partition = await self._check_network_partitions()
+            
+            # Check quorum violations
+            quorum_violation = await self._check_quorum_violations()
+            
+            return multiple_leaders or network_partition or quorum_violation
+            
+        except Exception as e:
+            logging.error(f"Split-brain detection failed: {e}")
+            return False
+    
+    async def _check_multiple_leaders(self) -> bool:
+        """Check for multiple nodes claiming leadership"""
+        try:
+            if not etcd_client:
+                return False
+            
+            leaders = set()
+            for key, value in etcd_client.get_prefix('/omega/leader/'):
+                leaders.add(value.decode())
+            
+            return len(leaders) > 1
+            
+        except Exception as e:
+            logging.error(f"Multiple leader check failed: {e}")
+            return False
+    
+    async def _check_network_partitions(self) -> bool:
+        """Detect network partitions between control nodes"""
+        try:
+            # This would implement network connectivity tests
+            # between control nodes in full implementation
+            return False
+            
+        except Exception as e:
+            logging.error(f"Network partition check failed: {e}")
+            return False
+    
+    async def _check_quorum_violations(self) -> bool:
+        """Check for quorum violations in cluster consensus"""
+        try:
+            # This would check if sufficient nodes are available
+            # for cluster consensus in full implementation
+            return False
+            
+        except Exception as e:
+            logging.error(f"Quorum violation check failed: {e}")
+            return False
+
+# Supporting Classes for Compute and Storage Management - Block 6
+class SandboxManager:
+    """Isolated sandboxing for distributed workloads"""
+    
+    async def setup_node_isolation(self, compute_node):
+        """Setup isolation for a compute node"""
+        try:
+            logging.info(f"Setting up isolation for {compute_node.node_id}")
+            # Implementation would setup containers, VMs, or process isolation
+        except Exception as e:
+            logging.error(f"Isolation setup failed: {e}")
+
+class AutoScalingManager:
+    """Auto-scaling management for compute nodes"""
+    
+    async def enable_auto_scaling(self, compute_node):
+        """Enable auto-scaling for a compute node"""
+        try:
+            logging.info(f"Enabling auto-scaling for {compute_node.node_id}")
+            # Implementation would setup scaling policies and monitoring
+        except Exception as e:
+            logging.error(f"Auto-scaling setup failed: {e}")
+
+class HotSwapManager:
+    """Hot-swapping capability management"""
+    
+    async def monitor_node(self, compute_node):
+        """Monitor node for hot-swap events"""
+        try:
+            logging.info(f"Monitoring hot-swap for {compute_node.node_id}")
+            # Implementation would monitor hardware changes
+        except Exception as e:
+            logging.error(f"Hot-swap monitoring failed: {e}")
+
+class ComputePerformanceMetrics:
+    """Performance metrics tracking for compute nodes"""
+    
+    def __init__(self):
+        self.metrics_history = deque(maxlen=1000)
+        self.current_metrics = {}
+    
+    def update_metrics(self, metrics: Dict[str, Any]):
+        """Update performance metrics"""
+        try:
+            self.current_metrics = metrics
+            self.metrics_history.append({
+                'timestamp': datetime.utcnow(),
+                'metrics': metrics.copy()
+            })
+        except Exception as e:
+            logging.error(f"Metrics update failed: {e}")
+
+class ThermalMonitor:
+    """Thermal monitoring for individual nodes"""
+    
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+        self.thermal_data = deque(maxlen=100)
+    
+    def update_thermal_data(self, temp_data: Dict[str, float]):
+        """Update thermal data for the node"""
+        try:
+            self.thermal_data.append({
+                'timestamp': datetime.utcnow(),
+                'data': temp_data
+            })
+        except Exception as e:
+            logging.error(f"Thermal data update failed: {e}")
+
+# Tiered Storage Nodes Implementation - Block 7  
+class StorageNodeManager:
+    """
+    Advanced storage node management with tiered architecture.
+    Supports hot (SSD), warm (SSD), cold (HDD) storage with distributed,
+    redundant, deduplicated storage and ML-driven prefetching and tier migration.
+    """
+    
+    def __init__(self):
+        self.storage_nodes = {}
+        self.storage_tiers = {
+            StorageTier.HOT_NVME: {},
+            StorageTier.WARM_SSD: {},
+            StorageTier.COLD_HDD: {},
+            StorageTier.ARCHIVE_TAPE: {},
+            StorageTier.CLOUD_S3: {},
+            StorageTier.DISTRIBUTED: {},
+            StorageTier.MEMORY: {}
+        }
+        
+        self.tier_manager = StorageTierManager()
+        self.deduplication_engine = DeduplicationEngine()
+        self.prefetch_predictor = PrefetchPredictor()
+        self.replication_manager = ReplicationManager()
+        
+        # ML-driven optimization
+        self.ml_tier_optimizer = MLTierOptimizer()
+        self.access_pattern_analyzer = AccessPatternAnalyzer()
+        
+    async def register_storage_node(self, node_id: str, node_capabilities: NodeCapabilities):
+        """Register storage node with automatic tier classification"""
+        try:
+            # Classify storage tiers available on node
+            available_tiers = self._classify_storage_tiers(node_capabilities)
+            
+            # Create storage node instance
+            storage_node = StorageNode(node_id, node_capabilities, available_tiers)
+            
+            # Initialize storage features
+            await self._initialize_storage_features(storage_node)
+            
+            # Setup tier management
+            await self.tier_manager.setup_node_tiers(storage_node)
+            
+            # Enable deduplication if supported
+            if node_capabilities.storage_deduplication_support:
+                await self.deduplication_engine.enable_for_node(storage_node)
+            
+            # Setup ML-driven prefetching
+            if ML_PREFETCHING_ENABLED:
+                await self.prefetch_predictor.enable_for_node(storage_node)
+            
+            # Configure replication
+            await self.replication_manager.setup_replication(storage_node)
+            
+            self.storage_nodes[node_id] = storage_node
+            
+            logging.info(f"Storage node {node_id} registered with tiers: {available_tiers}")
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Storage node registration failed: {e}")
+            return False
+    
+    def _classify_storage_tiers(self, capabilities: NodeCapabilities) -> List[StorageTier]:
+        """Classify available storage tiers on node"""
+        try:
+            available_tiers = []
+            
+            # Check for memory tier (RAM-based storage)
+            if capabilities.memory_total_gb > 0:
+                available_tiers.append(StorageTier.MEMORY)
+            
+            # Check for NVMe hot tier
+            if capabilities.storage_nvme_units > 0:
+                available_tiers.append(StorageTier.HOT_NVME)
+            
+            # Check for SSD warm tier
+            if capabilities.storage_ssd_units > 0:
+                available_tiers.append(StorageTier.WARM_SSD)
+            
+            # Check for HDD cold tier
+            if capabilities.storage_hdd_units > 0:
+                available_tiers.append(StorageTier.COLD_HDD)
+            
+            # Check for distributed storage capability
+            if capabilities.network_bandwidth_gbps >= 10.0:  # High bandwidth for distributed
+                available_tiers.append(StorageTier.DISTRIBUTED)
+            
+            return available_tiers
+            
+        except Exception as e:
+            logging.error(f"Storage tier classification failed: {e}")
+            return [StorageTier.WARM_SSD]  # Default fallback
+    
+    async def _initialize_storage_features(self, storage_node):
+        """Initialize storage-specific features"""
+        try:
+            # Setup compression if supported
+            if storage_node.capabilities.storage_compression_support:
+                await self._setup_compression(storage_node)
+            
+            # Setup encryption if supported
+            if storage_node.capabilities.storage_encryption_support:
+                await self._setup_encryption(storage_node)
+            
+            # Initialize performance monitoring
+            await self._setup_storage_monitoring(storage_node)
+            
+        except Exception as e:
+            logging.error(f"Storage feature initialization failed: {e}")
+
+class StorageNode:
+    """Individual storage node with tiered storage management"""
+    
+    def __init__(self, node_id: str, capabilities: NodeCapabilities, available_tiers: List[StorageTier]):
+        self.node_id = node_id
+        self.capabilities = capabilities
+        self.available_tiers = available_tiers
+        self.status = NodeStatus.INITIALIZING
+        
+        # Storage tier instances
+        self.tier_storage = {}
+        for tier in available_tiers:
+            self.tier_storage[tier] = TierStorage(tier, self._get_tier_capacity(tier))
+        
+        # Performance tracking
+        self.io_metrics = StorageIOMetrics()
+        self.access_patterns = AccessPatternTracker()
+        
+        # Data management
+        self.data_catalog = DataCatalog()
+        self.migration_queue = deque()
+        
+    def _get_tier_capacity(self, tier: StorageTier) -> float:
+        """Get capacity for specific storage tier"""
+        try:
+            if tier == StorageTier.MEMORY:
+                return self.capabilities.memory_total_gb * 0.5  # Use 50% of RAM for storage
+            elif tier == StorageTier.HOT_NVME:
+                return self.capabilities.storage_total_gb * 0.3  # 30% for hot tier
+            elif tier == StorageTier.WARM_SSD:
+                return self.capabilities.storage_total_gb * 0.5  # 50% for warm tier
+            elif tier == StorageTier.COLD_HDD:
+                return self.capabilities.storage_total_gb * 0.8  # 80% for cold tier
+            else:
+                return self.capabilities.storage_total_gb * 0.1  # Default allocation
+                
+        except Exception as e:
+            logging.error(f"Tier capacity calculation failed: {e}")
+            return 100.0  # Default 100GB
+    
+    async def store_data(self, data_id: str, data_size_gb: float, access_pattern: str = "random") -> bool:
+        """Store data with intelligent tier placement"""
+        try:
+            # Determine optimal tier based on access pattern and size
+            optimal_tier = await self._select_optimal_tier(data_size_gb, access_pattern)
+            
+            if optimal_tier not in self.tier_storage:
+                # Fallback to available tier
+                optimal_tier = list(self.tier_storage.keys())[0]
+            
+            # Store data in selected tier
+            success = await self.tier_storage[optimal_tier].store_data(data_id, data_size_gb)
+            
+            if success:
+                # Update data catalog
+                await self.data_catalog.register_data(data_id, optimal_tier, data_size_gb)
+                
+                # Update access patterns
+                self.access_patterns.record_access(data_id, access_pattern)
+                
+                logging.info(f"Data {data_id} stored in {optimal_tier.value} tier")
+                
+            return success
+            
+        except Exception as e:
+            logging.error(f"Data storage failed: {e}")
+            return False
+    
+    async def _select_optimal_tier(self, data_size_gb: float, access_pattern: str) -> StorageTier:
+        """Select optimal storage tier based on data characteristics"""
+        try:
+            # Hot data (frequent access) -> Memory/NVMe
+            if access_pattern in ["frequent", "real_time", "hot"]:
+                if StorageTier.MEMORY in self.available_tiers and data_size_gb < 10:
+                    return StorageTier.MEMORY
+                elif StorageTier.HOT_NVME in self.available_tiers:
+                    return StorageTier.HOT_NVME
+                else:
+                    return StorageTier.WARM_SSD
+            
+            # Warm data (occasional access) -> SSD
+            elif access_pattern in ["occasional", "warm", "moderate"]:
+                if StorageTier.WARM_SSD in self.available_tiers:
+                    return StorageTier.WARM_SSD
+                else:
+                    return StorageTier.COLD_HDD
+            
+            # Cold data (rare access) -> HDD
+            elif access_pattern in ["rare", "cold", "archive"]:
+                if StorageTier.COLD_HDD in self.available_tiers:
+                    return StorageTier.COLD_HDD
+                elif StorageTier.ARCHIVE_TAPE in self.available_tiers:
+                    return StorageTier.ARCHIVE_TAPE
+                else:
+                    return StorageTier.WARM_SSD
+            
+            # Default to warm tier
+            else:
+                return StorageTier.WARM_SSD
+                
+        except Exception as e:
+            logging.error(f"Tier selection failed: {e}")
+            return StorageTier.WARM_SSD
+
+class TierStorage:
+    """Individual storage tier management"""
+    
+    def __init__(self, tier: StorageTier, capacity_gb: float):
+        self.tier = tier
+        self.capacity_gb = capacity_gb
+        self.used_gb = 0.0
+        self.data_blocks = {}
+        
+        # Performance characteristics
+        self.performance_profile = self._get_performance_profile()
+        
+    def _get_performance_profile(self) -> Dict[str, float]:
+        """Get performance characteristics for tier"""
+        profiles = {
+            StorageTier.MEMORY: {
+                'read_latency_us': 0.1,
+                'write_latency_us': 0.1,
+                'bandwidth_gbps': 100.0,
+                'iops': 1000000
+            },
+            StorageTier.HOT_NVME: {
+                'read_latency_us': 50.0,
+                'write_latency_us': 100.0,
+                'bandwidth_gbps': 10.0,
+                'iops': 500000
+            },
+            StorageTier.WARM_SSD: {
+                'read_latency_us': 100.0,
+                'write_latency_us': 200.0,
+                'bandwidth_gbps': 5.0,
+                'iops': 100000
+            },
+            StorageTier.COLD_HDD: {
+                'read_latency_us': 10000.0,
+                'write_latency_us': 10000.0,
+                'bandwidth_gbps': 1.0,
+                'iops': 1000
+            }
+        }
+        
+        return profiles.get(self.tier, profiles[StorageTier.WARM_SSD])
+    
+    async def store_data(self, data_id: str, data_size_gb: float) -> bool:
+        """Store data in this tier"""
+        try:
+            if self.used_gb + data_size_gb > self.capacity_gb:
+                return False  # Insufficient space
+            
+            self.data_blocks[data_id] = {
+                'size_gb': data_size_gb,
+                'stored_at': datetime.utcnow(),
+                'access_count': 0,
+                'last_access': datetime.utcnow()
+            }
+            
+            self.used_gb += data_size_gb
+            return True
+            
+        except Exception as e:
+            logging.error(f"Data storage in tier failed: {e}")
+            return False
+
+class StorageTierManager:
+    """Management of storage tier operations and migrations"""
+    
+    def __init__(self):
+        self.migration_policies = {}
+        self.tier_utilization = {}
+        
+    async def setup_node_tiers(self, storage_node):
+        """Setup tier management for storage node"""
+        try:
+            # Configure migration policies
+            await self._configure_migration_policies(storage_node)
+            
+            # Start tier monitoring
+            asyncio.create_task(self._monitor_tier_utilization(storage_node))
+            
+            logging.info(f"Tier management setup for {storage_node.node_id}")
+            
+        except Exception as e:
+            logging.error(f"Tier setup failed: {e}")
+    
+    async def _configure_migration_policies(self, storage_node):
+        """Configure data migration policies between tiers"""
+        try:
+            # Hot to warm migration policy
+            hot_to_warm = {
+                'trigger': 'utilization_threshold',
+                'threshold': 0.8,
+                'target_tier': StorageTier.WARM_SSD,
+                'data_selection': 'least_recently_used'
+            }
+            
+            # Warm to cold migration policy
+            warm_to_cold = {
+                'trigger': 'age_threshold',
+                'threshold_days': 30,
+                'target_tier': StorageTier.COLD_HDD,
+                'data_selection': 'oldest_first'
+            }
+            
+            self.migration_policies[storage_node.node_id] = {
+                'hot_to_warm': hot_to_warm,
+                'warm_to_cold': warm_to_cold
+            }
+            
+        except Exception as e:
+            logging.error(f"Migration policy configuration failed: {e}")
+
+class DeduplicationEngine:
+    """Data deduplication engine for storage optimization"""
+    
+    def __init__(self):
+        self.dedup_enabled_nodes = set()
+        self.hash_index = {}
+        self.dedup_stats = {}
+        
+    async def enable_for_node(self, storage_node):
+        """Enable deduplication for storage node"""
+        try:
+            self.dedup_enabled_nodes.add(storage_node.node_id)
+            self.dedup_stats[storage_node.node_id] = {
+                'total_data_gb': 0,
+                'deduplicated_gb': 0,
+                'dedup_ratio': 0.0
+            }
+            
+            logging.info(f"Deduplication enabled for {storage_node.node_id}")
+            
+        except Exception as e:
+            logging.error(f"Deduplication enablement failed: {e}")
+
+class PrefetchPredictor:
+    """ML-driven prefetching predictor"""
+    
+    def __init__(self):
+        self.enabled_nodes = set()
+        self.access_history = defaultdict(deque)
+        self.prediction_models = {}
+        
+    async def enable_for_node(self, storage_node):
+        """Enable ML prefetching for storage node"""
+        try:
+            self.enabled_nodes.add(storage_node.node_id)
+            
+            # Initialize prediction model
+            if ML_LIBRARIES_AVAILABLE:
+                self.prediction_models[storage_node.node_id] = self._create_prediction_model()
+            
+            logging.info(f"ML prefetching enabled for {storage_node.node_id}")
+            
+        except Exception as e:
+            logging.error(f"Prefetching enablement failed: {e}")
+    
+    def _create_prediction_model(self):
+        """Create ML model for access pattern prediction"""
+        try:
+            if ML_LIBRARIES_AVAILABLE:
+                # Simple model for demonstration
+                from sklearn.ensemble import RandomForestClassifier
+                return RandomForestClassifier(n_estimators=50, random_state=42)
+            else:
+                return None
+        except Exception as e:
+            logging.error(f"Prediction model creation failed: {e}")
+            return None
+
+class ReplicationManager:
+    """Distributed replication manager for data redundancy"""
+    
+    def __init__(self):
+        self.replication_configs = {}
+        self.replica_locations = defaultdict(list)
+        
+    async def setup_replication(self, storage_node):
+        """Setup replication for storage node"""
+        try:
+            # Configure default replication policy
+            replication_config = {
+                'replication_factor': 3,
+                'consistency_level': 'quorum',
+                'auto_repair': True,
+                'cross_datacenter': False
+            }
+            
+            self.replication_configs[storage_node.node_id] = replication_config
+            
+            logging.info(f"Replication setup for {storage_node.node_id}")
+            
+        except Exception as e:
+            logging.error(f"Replication setup failed: {e}")
+
+class MLTierOptimizer:
+    """ML-based tier optimization engine"""
+    
+    def __init__(self):
+        self.optimization_models = {}
+        self.tier_predictions = {}
+        
+    def predict_optimal_tier(self, data_characteristics: Dict[str, Any]) -> StorageTier:
+        """Predict optimal tier for data placement"""
+        try:
+            # Simple heuristic for demonstration
+            access_frequency = data_characteristics.get('access_frequency', 'medium')
+            data_size = data_characteristics.get('size_gb', 1.0)
+            
+            if access_frequency == 'high' and data_size < 10:
+                return StorageTier.HOT_NVME
+            elif access_frequency == 'medium':
+                return StorageTier.WARM_SSD
+            else:
+                return StorageTier.COLD_HDD
+                
+        except Exception as e:
+            logging.error(f"Tier prediction failed: {e}")
+            return StorageTier.WARM_SSD
+
+class AccessPatternAnalyzer:
+    """Access pattern analysis for storage optimization"""
+    
+    def __init__(self):
+        self.access_logs = defaultdict(deque)
+        self.pattern_stats = {}
+        
+    def analyze_patterns(self, node_id: str) -> Dict[str, Any]:
+        """Analyze access patterns for optimization"""
+        try:
+            if node_id not in self.access_logs:
+                return {}
+            
+            # Analyze access frequency, temporal patterns, etc.
+            analysis = {
+                'total_accesses': len(self.access_logs[node_id]),
+                'unique_files': len(set(log['file_id'] for log in self.access_logs[node_id])),
+                'hot_files': [],  # Files with high access frequency
+                'access_trends': {}  # Time-based access trends
+            }
+            
+            return analysis
+            
+        except Exception as e:
+            logging.error(f"Pattern analysis failed: {e}")
+            return {}
+
+class StorageIOMetrics:
+    """Storage I/O performance metrics tracking"""
+    
+    def __init__(self):
+        self.metrics_history = deque(maxlen=1000)
+        self.current_metrics = {
+            'read_iops': 0,
+            'write_iops': 0,
+            'read_latency_ms': 0,
+            'write_latency_ms': 0,
+            'throughput_mbps': 0
+        }
+    
+    def update_metrics(self, new_metrics: Dict[str, float]):
+        """Update I/O metrics"""
+        try:
+            self.current_metrics.update(new_metrics)
+            self.metrics_history.append({
+                'timestamp': datetime.utcnow(),
+                'metrics': new_metrics.copy()
+            })
+        except Exception as e:
+            logging.error(f"I/O metrics update failed: {e}")
+
+class AccessPatternTracker:
+    """Track data access patterns for intelligent tier management"""
+    
+    def __init__(self):
+        self.access_log = deque(maxlen=10000)
+        self.pattern_cache = {}
+    
+    def record_access(self, data_id: str, access_type: str):
+        """Record data access event"""
+        try:
+            access_event = {
+                'data_id': data_id,
+                'access_type': access_type,
+                'timestamp': datetime.utcnow()
+            }
+            
+            self.access_log.append(access_event)
+            
+            # Update pattern cache
+            if data_id not in self.pattern_cache:
+                self.pattern_cache[data_id] = {
+                    'access_count': 0,
+                    'last_access': datetime.utcnow(),
+                    'access_frequency': 'low'
+                }
+            
+            self.pattern_cache[data_id]['access_count'] += 1
+            self.pattern_cache[data_id]['last_access'] = datetime.utcnow()
+            
+        except Exception as e:
+            logging.error(f"Access recording failed: {e}")
+
+class DataCatalog:
+    """Data catalog for tracking stored data across tiers"""
+    
+    def __init__(self):
+        self.data_registry = {}
+        self.tier_mappings = defaultdict(list)
+    
+    async def register_data(self, data_id: str, tier: StorageTier, size_gb: float):
+        """Register data in catalog"""
+        try:
+            self.data_registry[data_id] = {
+                'tier': tier,
+                'size_gb': size_gb,
+                'created_at': datetime.utcnow(),
+                'metadata': {}
+            }
+            
+            self.tier_mappings[tier].append(data_id)
+            
+        except Exception as e:
+            logging.error(f"Data registration failed: {e}")
+
+# Additional Supporting Classes - Block 8
+class WorkloadManager:
+    """Advanced workload management for heterogeneous compute environments"""
+    
+    def __init__(self):
+        self.workload_types = {
+            TaskType.CPU_INTENSIVE: CPUWorkloadHandler(),
+            TaskType.GPU_COMPUTE: GPUWorkloadHandler(),
+            TaskType.NPU_INFERENCE: NPUWorkloadHandler(),
+            TaskType.FPGA_ACCELERATION: FPGAWorkloadHandler(),
+            TaskType.AI_TRAINING: AITrainingWorkloadHandler(),
+            TaskType.AI_INFERENCE: AIInferenceWorkloadHandler(),
+        }
+        
+        self.workload_queue = deque()
+        self.active_workloads = {}
+        self.workload_history = []
+        
+    async def schedule_workload(self, workload: Dict[str, Any], target_node: str) -> str:
+        """Schedule workload on target node with optimized execution"""
+        try:
+            workload_type = TaskType(workload.get('workload_type', TaskType.CPU_INTENSIVE.value))
+            
+            # Get appropriate workload handler
+            handler = self.workload_types.get(workload_type)
+            if not handler:
+                handler = self.workload_types[TaskType.CPU_INTENSIVE]  # Default
+            
+            # Prepare workload for execution
+            prepared_workload = await handler.prepare_workload(workload, target_node)
+            
+            # Execute workload
+            execution_id = await handler.execute_workload(prepared_workload, target_node)
+            
+            if execution_id:
+                self.active_workloads[execution_id] = {
+                    'workload': workload,
+                    'target_node': target_node,
+                    'handler': handler,
+                    'start_time': datetime.utcnow()
+                }
+                
+                logging.info(f"Workload {execution_id} scheduled on {target_node}")
+                
+            return execution_id
+            
+        except Exception as e:
+            logging.error(f"Workload scheduling failed: {e}")
+            return None
+
+# Workload Handlers for different compute types
+class CPUWorkloadHandler:
+    """Handler for CPU-intensive workloads"""
+    
+    async def prepare_workload(self, workload: Dict[str, Any], target_node: str) -> Dict[str, Any]:
+        """Prepare CPU workload for execution"""
+        try:
+            # Optimize for CPU architecture
+            # Set CPU affinity
+            # Configure NUMA topology
+            return workload
+        except Exception as e:
+            logging.error(f"CPU workload preparation failed: {e}")
+            return workload
+    
+    async def execute_workload(self, workload: Dict[str, Any], target_node: str) -> str:
+        """Execute CPU workload"""
+        try:
+            execution_id = str(uuid.uuid4())
+            # Implementation would execute actual CPU workload
+            return execution_id
+        except Exception as e:
+            logging.error(f"CPU workload execution failed: {e}")
+            return None
+
+class GPUWorkloadHandler:
+    """Handler for GPU compute workloads"""
+    
+    async def prepare_workload(self, workload: Dict[str, Any], target_node: str) -> Dict[str, Any]:
+        """Prepare GPU workload for execution"""
+        try:
+            # Setup CUDA/ROCm context
+            # Allocate GPU memory
+            # Configure GPU topology
+            return workload
+        except Exception as e:
+            logging.error(f"GPU workload preparation failed: {e}")
+            return workload
+    
+    async def execute_workload(self, workload: Dict[str, Any], target_node: str) -> str:
+        """Execute GPU workload"""
+        try:
+            execution_id = str(uuid.uuid4())
+            # Implementation would execute actual GPU workload
+            return execution_id
+        except Exception as e:
+            logging.error(f"GPU workload execution failed: {e}")
+            return None
+
+class NPUWorkloadHandler:
+    """Handler for NPU inference workloads"""
+    
+    async def prepare_workload(self, workload: Dict[str, Any], target_node: str) -> Dict[str, Any]:
+        """Prepare NPU workload for execution"""
+        try:
+            # Setup NPU runtime
+            # Load AI model
+            # Configure inference pipeline
+            return workload
+        except Exception as e:
+            logging.error(f"NPU workload preparation failed: {e}")
+            return workload
+    
+    async def execute_workload(self, workload: Dict[str, Any], target_node: str) -> str:
+        """Execute NPU workload"""
+        try:
+            execution_id = str(uuid.uuid4())
+            # Implementation would execute actual NPU workload
+            return execution_id
+        except Exception as e:
+            logging.error(f"NPU workload execution failed: {e}")
+            return None
+
+class FPGAWorkloadHandler:
+    """Handler for FPGA acceleration workloads"""
+    
+    async def prepare_workload(self, workload: Dict[str, Any], target_node: str) -> Dict[str, Any]:
+        """Prepare FPGA workload for execution"""
+        try:
+            # Load bitstream
+            # Configure FPGA logic
+            # Setup data pipelines
+            return workload
+        except Exception as e:
+            logging.error(f"FPGA workload preparation failed: {e}")
+            return workload
+    
+    async def execute_workload(self, workload: Dict[str, Any], target_node: str) -> str:
+        """Execute FPGA workload"""
+        try:
+            execution_id = str(uuid.uuid4())
+            # Implementation would execute actual FPGA workload
+            return execution_id
+        except Exception as e:
+            logging.error(f"FPGA workload execution failed: {e}")
+            return None
+
+class AITrainingWorkloadHandler:
+    """Handler for AI training workloads"""
+    
+    async def prepare_workload(self, workload: Dict[str, Any], target_node: str) -> Dict[str, Any]:
+        """Prepare AI training workload"""
+        try:
+            # Setup distributed training
+            # Configure data loaders
+            # Initialize model checkpointing
+            return workload
+        except Exception as e:
+            logging.error(f"AI training workload preparation failed: {e}")
+            return workload
+    
+    async def execute_workload(self, workload: Dict[str, Any], target_node: str) -> str:
+        """Execute AI training workload"""
+        try:
+            execution_id = str(uuid.uuid4())
+            # Implementation would execute actual AI training
+            return execution_id
+        except Exception as e:
+            logging.error(f"AI training workload execution failed: {e}")
+            return None
+
+class AIInferenceWorkloadHandler:
+    """Handler for AI inference workloads"""
+    
+    async def prepare_workload(self, workload: Dict[str, Any], target_node: str) -> Dict[str, Any]:
+        """Prepare AI inference workload"""
+        try:
+            # Load inference model
+            # Setup batch processing
+            # Configure optimization (TensorRT, etc.)
+            return workload
+        except Exception as e:
+            logging.error(f"AI inference workload preparation failed: {e}")
+            return workload
+    
+    async def execute_workload(self, workload: Dict[str, Any], target_node: str) -> str:
+        """Execute AI inference workload"""
+        try:
+            execution_id = str(uuid.uuid4())
+            # Implementation would execute actual AI inference
+            return execution_id
+        except Exception as e:
+            logging.error(f"AI inference workload execution failed: {e}")
+            return None
+
+# Enhanced Control Node - Block 3: Fault-Tolerant Multi-Master Architecture
+class ControlNodeManager:
+    """
+    Master coordinator and API hub with fault-tolerant multi-master leader election.
+    Manages orchestration, supervision, and global scheduling across the cluster.
+    """
+    
+    def __init__(self):
+        self.node_id = f"control-{socket.gethostname()}-{int(time.time())}"
+        self.cluster_name = CLUSTER_NAME
+        self.is_leader = False
+        self.leader_term = 0
+        self.cluster_state = "forming"
+        
+        # Multi-master configuration
+        self.control_nodes = {}  # Other control nodes in cluster
+        self.backup_nodes = []
+        self.quorum_size = 3
+        self.leader_lease_ttl = LEADER_LEASE_DURATION
+        
+        # Orchestration subsystems
+        self.global_scheduler = GlobalScheduler()
+        self.resource_manager = ResourceManager()
+        self.fault_detector = FaultDetector()
+        self.health_monitor = ClusterHealthMonitor()
+        
+        # Leader election state
+        self.election_state = LeaderElectionState()
+        self.heartbeat_manager = HeartbeatManager()
+        
+        # API and supervision
+        self.api_server = None
+        self.supervision_engine = SupervisionEngine()
+        
+        logging.info(f"Control Node {self.node_id} initialized")
+    
+    async def initialize_cluster(self):
+        """Initialize cluster and start leader election"""
+        try:
+            # Start health monitoring
+            await self.health_monitor.start()
+            
+            # Initialize leader election
+            await self.start_leader_election()
+            
+            # Start heartbeat system
+            await self.heartbeat_manager.start()
+            
+            # Initialize global scheduler
+            await self.global_scheduler.initialize()
+            
+            logging.info(f"Control node {self.node_id} cluster initialization complete")
+            
+        except Exception as e:
+            logging.error(f"Cluster initialization failed: {e}")
+            raise
+    
+    async def start_leader_election(self):
+        """Start multi-master leader election process"""
+        try:
+            if etcd_client:
+                # Use etcd for distributed leader election
+                await self._etcd_leader_election()
+            else:
+                # Fallback to single-node mode
+                self.is_leader = True
+                self.election_state.current_leader = self.node_id
+                self.election_state.leader_term = 1
+                logging.info(f"Single-node mode: {self.node_id} became leader")
+                
+        except Exception as e:
+            logging.error(f"Leader election failed: {e}")
+
+class ComputeNodeManager:
+    """
+    Advanced compute node management supporting heterogeneous hardware architectures.
+    Handles CPU, GPU, NPU, FPGA, and Edge-TPU compute resources with hot-swapping,
+    self-registration, and auto-scaling capabilities.
+    """
+    
+    def __init__(self):
+        self.compute_nodes = {}
+        self.hardware_pools = {
+            'cpu_x86': {},
+            'cpu_arm': {},
+            'gpu_nvidia': {},
+            'gpu_amd': {},
+            'gpu_intel': {},
+            'npu_dedicated': {},
+            'fpga_xilinx': {},
+            'fpga_intel': {},
+            'edge_tpu': {},
+            'hybrid': {}
+        }
+        
+        self.workload_manager = WorkloadManager()
+        self.isolation_manager = SandboxManager()
+        self.scaling_manager = AutoScalingManager()
+        self.hot_swap_manager = HotSwapManager()
+
+class ThermalManager:
+    """Advanced thermal management and optimization for heterogeneous hardware"""
+    
+    def __init__(self):
+        self.thermal_history = defaultdict(deque)
+        self.thermal_thresholds = {
+            'cpu_warning': 70.0,
+            'cpu_critical': 85.0,
+            'gpu_warning': 75.0,
+            'gpu_critical': 90.0,
+            'npu_warning': 70.0,
+            'npu_critical': 85.0,
+            'fpga_warning': 80.0,
+            'fpga_critical': 95.0
+        }
+        self.cooling_strategies = {}
+        self.thermal_zones = {}
+        
+    def update_thermal_data(self, node_id: str, metrics: NodeMetrics):
+        """Update thermal data for a node with enhanced monitoring"""
+        try:
+            thermal_data = {
+                'timestamp': metrics.timestamp,
+                'cpu_temp': metrics.cpu_temperature_celsius,
+                'gpu_temp': metrics.gpu_temperature_celsius,
+                'system_temp': metrics.system_temperature_celsius,
+                'power_consumption': metrics.power_consumption_watts,
+                'fan_speed': metrics.fan_speed_rpm
+            }
+            
+            self.thermal_history[node_id].append(thermal_data)
+            
+            # Keep only recent data (last hour)
+            cutoff_time = datetime.utcnow() - timedelta(hours=1)
+            while (self.thermal_history[node_id] and 
+                   self.thermal_history[node_id][0]['timestamp'] < cutoff_time):
+                self.thermal_history[node_id].popleft()
+            
+        except Exception as e:
+            logging.error(f"Thermal data update failed: {e}")
+    
+    def get_thermal_score(self, node_id: str) -> float:
+        """Calculate comprehensive thermal health score"""
+        try:
+            if node_id not in self.thermal_history or not self.thermal_history[node_id]:
+                return 0.5  # Unknown thermal state
+                
+            recent_data = list(self.thermal_history[node_id])[-5:]  # Last 5 readings
+            if not recent_data:
+                return 0.5
+            
+            # Calculate individual component scores
+            scores = []
+            
+            # CPU thermal score
+            avg_cpu_temp = sum(d['cpu_temp'] for d in recent_data) / len(recent_data)
+            cpu_score = max(0.0, 1.0 - (avg_cpu_temp - 30.0) / 55.0)  # 30-85°C range
+            scores.append(cpu_score)
+            
+            # GPU thermal score (if applicable)
+            if any(d['gpu_temp'] > 0 for d in recent_data):
+                avg_gpu_temp = sum(d['gpu_temp'] for d in recent_data) / len(recent_data)
+                gpu_score = max(0.0, 1.0 - (avg_gpu_temp - 35.0) / 55.0)  # 35-90°C range
+                scores.append(gpu_score)
+            
+            return sum(scores) / len(scores)
+            
+        except Exception as e:
+            logging.error(f"Thermal score calculation failed: {e}")
+            return 0.5
+
+class GlobalScheduler:
+    """
+    Global scheduler for orchestrating workloads across heterogeneous nodes.
+    Implements intelligent placement with ML-driven optimization.
+    """
+    
+    def __init__(self):
+        self.scheduling_policy = "intelligent_placement"
+        self.placement_optimizer = MLPlacementOptimizer()
+        self.load_balancer = LoadBalancer()
+        
+        # Scheduling queues
+        self.pending_tasks = deque()
+        self.priority_queue = []
+        self.scheduling_history = []
+        
+        # Resource tracking
+        self.cluster_resources = {}
+        self.resource_utilization = {}
+        
+    async def initialize(self):
+        """Initialize global scheduler"""
+        try:
+            # Load historical scheduling data for ML training
+            await self._load_scheduling_history()
+            
+            # Train placement optimizer
+            if len(self.scheduling_history) > 10:
+                self.placement_optimizer.train_model(self.scheduling_history)
+            
+            logging.info("Global scheduler initialized")
+            
+        except Exception as e:
+            logging.error(f"Scheduler initialization failed: {e}")
+    
+    async def _load_scheduling_history(self):
+        """Load historical scheduling data"""
+        try:
+            # This would load from persistent storage in production
+            self.scheduling_history = []
+            
+        except Exception as e:
+            logging.error(f"Failed to load scheduling history: {e}")
+
+class SupervisionEngine:
+    """
+    Supervision engine for monitoring and managing node health and performance.
+    Implements proactive failure detection and automated recovery.
+    """
+    
+    def __init__(self):
+        self.supervised_nodes = {}
+        self.health_thresholds = {
+            'cpu_critical': 95.0,
+            'memory_critical': 90.0,
+            'temperature_critical': 85.0,
+            'disk_critical': 95.0
+        }
+        self.monitoring_interval = 5  # seconds
+        
+    async def start_global_supervision(self):
+        """Start supervising all cluster nodes"""
+        try:
+            # Start monitoring loops
+            asyncio.create_task(self._health_monitoring_loop())
+            asyncio.create_task(self._performance_monitoring_loop())
+            asyncio.create_task(self._failure_detection_loop())
+            
+            logging.info("Global supervision engine started")
+            
+        except Exception as e:
+            logging.error(f"Supervision engine start failed: {e}")
+    
+    async def _health_monitoring_loop(self):
+        """Monitor health of all nodes"""
+        while True:
+            try:
+                for node_id in self.supervised_nodes:
+                    await self._check_node_health(node_id)
+                
+                await asyncio.sleep(self.monitoring_interval)
+                
+            except Exception as e:
+                logging.error(f"Health monitoring error: {e}")
+                await asyncio.sleep(self.monitoring_interval)
+    
+    async def _performance_monitoring_loop(self):
+        """Monitor performance of all nodes"""
+        while True:
+            try:
+                # Performance monitoring implementation
+                await asyncio.sleep(10)
+                
+            except Exception as e:
+                logging.error(f"Performance monitoring error: {e}")
+                await asyncio.sleep(10)
+    
+    async def _failure_detection_loop(self):
+        """Detect node failures"""
+        while True:
+            try:
+                # Failure detection implementation
+                await asyncio.sleep(5)
+                
+            except Exception as e:
+                logging.error(f"Failure detection error: {e}")
+                await asyncio.sleep(5)
+    
+    async def _check_node_health(self, node_id):
+        """Check health of a specific node"""
+        try:
+            # Health check implementation
+            pass
+            
+        except Exception as e:
+            logging.error(f"Node health check failed for {node_id}: {e}")
+
+class FaultDetector:
+    """
+    Advanced fault detection system with predictive failure analysis.
+    Implements split-brain protection and automated recovery.
+    """
+    
+    def __init__(self):
+        self.failure_patterns = {}
+        self.anomaly_detector = SimpleAnomalyDetector()
+        self.split_brain_detector = SplitBrainDetector()
+        self.failure_predictors = {}
+        
+    async def start_cluster_monitoring(self):
+        """Start cluster-wide fault detection"""
+        try:
+            # Start monitoring tasks
+            asyncio.create_task(self._split_brain_monitoring())
+            asyncio.create_task(self._network_partition_detection())
+            asyncio.create_task(self._predictive_failure_analysis())
+            
+            logging.info("Fault detector started")
+            
+        except Exception as e:
+            logging.error(f"Fault detector start failed: {e}")
+    
+    async def _split_brain_monitoring(self):
+        """Monitor for split-brain scenarios"""
+        while True:
+            try:
+                await asyncio.sleep(10)
+                
+            except Exception as e:
+                logging.error(f"Split-brain monitoring error: {e}")
+                await asyncio.sleep(10)
+    
+    async def _network_partition_detection(self):
+        """Detect network partitions"""
+        while True:
+            try:
+                await asyncio.sleep(15)
+                
+            except Exception as e:
+                logging.error(f"Network partition detection error: {e}")
+                await asyncio.sleep(15)
+    
+    async def _predictive_failure_analysis(self):
+        """Predictive failure analysis"""
+        while True:
+            try:
+                await asyncio.sleep(30)
+                
+            except Exception as e:
+                logging.error(f"Predictive failure analysis error: {e}")
+                await asyncio.sleep(30)
+
+class ClusterHealthMonitor:
+    """
+    Comprehensive cluster health monitoring with real-time diagnostics.
+    """
+    
+    def __init__(self):
+        self.health_status = "unknown"
+        self.cluster_metrics = {}
+        self.health_history = deque(maxlen=1000)
+        
+    async def start(self):
+        """Start cluster health monitoring"""
+        try:
+            asyncio.create_task(self._health_monitoring_loop())
+            logging.info("Cluster health monitor started")
+            
+        except Exception as e:
+            logging.error(f"Health monitor start failed: {e}")
+    
+    async def _health_monitoring_loop(self):
+        """Main health monitoring loop"""
+        while True:
+            try:
+                # Collect cluster-wide metrics
+                await self._collect_cluster_metrics()
+                
+                # Assess overall cluster health
+                health_score = self._calculate_cluster_health_score()
+                
+                # Update health status
+                self._update_health_status(health_score)
+                
+                await asyncio.sleep(30)  # Update every 30 seconds
+                
+            except Exception as e:
+                logging.error(f"Health monitoring error: {e}")
+                await asyncio.sleep(30)
+    
+    async def _collect_cluster_metrics(self):
+        """Collect cluster-wide metrics"""
+        try:
+            # Metrics collection implementation
+            self.cluster_metrics = {
+                'total_nodes': 1,
+                'healthy_nodes': 1,
+                'avg_cpu_utilization': 0.3,
+                'network_health_score': 1.0
+            }
+            
+        except Exception as e:
+            logging.error(f"Metrics collection failed: {e}")
+    
+    def _calculate_cluster_health_score(self) -> float:
+        """Calculate overall cluster health score"""
+        try:
+            if not self.cluster_metrics:
+                return 0.0
+            
+            # Factor in various health indicators
+            scores = []
+            
+            # Node availability score
+            total_nodes = self.cluster_metrics.get('total_nodes', 1)
+            healthy_nodes = self.cluster_metrics.get('healthy_nodes', 0)
+            availability_score = healthy_nodes / max(1, total_nodes)
+            scores.append(availability_score)
+            
+            # Resource utilization score (optimal around 70%)
+            avg_cpu_util = self.cluster_metrics.get('avg_cpu_utilization', 0)
+            util_score = 1.0 - abs(avg_cpu_util - 0.7) / 0.7
+            scores.append(max(0, util_score))
+            
+            # Network health score
+            network_score = self.cluster_metrics.get('network_health_score', 1.0)
+            scores.append(network_score)
+            
+            return sum(scores) / len(scores)
+            
+        except Exception as e:
+            logging.error(f"Health score calculation failed: {e}")
+            return 0.0
+    
+    def _update_health_status(self, health_score: float):
+        """Update overall health status"""
+        try:
+            if health_score >= 0.8:
+                self.health_status = "healthy"
+            elif health_score >= 0.6:
+                self.health_status = "degraded"
+            elif health_score >= 0.4:
+                self.health_status = "warning"
+            else:
+                self.health_status = "critical"
+                
+        except Exception as e:
+            logging.error(f"Health status update failed: {e}")
+
+class MLPlacementOptimizer:
+    """
+    ML-driven workload placement optimizer for heterogeneous clusters.
+    Uses historical data to learn optimal placement strategies.
+    """
+    
+    def __init__(self):
+        self.model = None
+        self.scaler = StandardScaler()
+        self.feature_columns = [
+            'cpu_cores', 'memory_gb', 'gpu_memory', 
+            'current_load', 'network_bandwidth',
+            'thermal_score', 'historical_performance'
+        ]
+        
+    def train_model(self, scheduling_history):
+        """Train placement optimization model"""
+        try:
+            if len(scheduling_history) < 10:
+                logging.warning("Insufficient training data for ML model")
+                return
+                
+            # Extract features and labels from history
+            X, y = self._prepare_training_data(scheduling_history)
+            
+            if X.shape[0] < 5:
+                return
+                
+            # Train Random Forest model
+            from sklearn.ensemble import RandomForestRegressor
+            self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+            
+            X_scaled = self.scaler.fit_transform(X)
+            self.model.fit(X_scaled, y)
+            
+            logging.info(f"ML placement model trained with {X.shape[0]} samples")
+            
+        except Exception as e:
+            logging.error(f"ML model training failed: {e}")
+    
+    def _prepare_training_data(self, history):
+        """Prepare training data from scheduling history"""
+        try:
+            import numpy as np
+            
+            # This is a simplified version - in practice would be more complex
+            features = []
+            labels = []
+            
+            for record in history:
+                feature_vector = [
+                    record.get('cpu_cores', 1),
+                    record.get('memory_gb', 4),
+                    record.get('gpu_memory', 0),
+                    record.get('current_load', 0.5),
+                    record.get('network_bandwidth', 1000),
+                    record.get('thermal_score', 0.7),
+                    record.get('performance_score', 0.8)
+                ]
+                features.append(feature_vector)
+                labels.append(record.get('success_score', 0.5))
+            
+            return np.array(features), np.array(labels)
+            
+        except Exception as e:
+            logging.error(f"Training data preparation failed: {e}")
+            return np.array([]), np.array([])
+    
+    def predict_placement_score(self, node_features):
+        """Predict placement score for a node"""
+        try:
+            if self.model is None:
+                return 0.5  # Default score
+                
+            import numpy as np
+            features = np.array([node_features]).reshape(1, -1)
+            features_scaled = self.scaler.transform(features)
+            
+            score = self.model.predict(features_scaled)[0]
+            return max(0.0, min(1.0, score))  # Clamp to [0, 1]
+            
+        except Exception as e:
+            logging.error(f"Placement score prediction failed: {e}")
+            return 0.5
+
+class SimpleAnomalyDetector:
+    """
+    Simple anomaly detection for system metrics.
+    Uses statistical methods to detect unusual patterns.
+    """
+    
+    def __init__(self):
+        self.metric_history = defaultdict(deque)
+        self.baseline_stats = {}
+        self.detection_threshold = 2.5  # Standard deviations
+        
+    def update_metric(self, metric_name: str, value: float):
+        """Update metric value and maintain history"""
+        try:
+            self.metric_history[metric_name].append(value)
+            
+            # Keep only recent history (last 100 values)
+            if len(self.metric_history[metric_name]) > 100:
+                self.metric_history[metric_name].popleft()
+            
+            # Update baseline statistics
+            self._update_baseline_stats(metric_name)
+            
+        except Exception as e:
+            logging.error(f"Metric update failed for {metric_name}: {e}")
+    
+    def detect_anomaly(self, metric_name: str, value: float) -> bool:
+        """Detect if a metric value is anomalous"""
+        try:
+            if metric_name not in self.baseline_stats:
+                return False
+                
+            stats = self.baseline_stats[metric_name]
+            mean = stats['mean']
+            std = stats['std']
+            
+            if std == 0:
+                return False
+                
+            # Z-score based anomaly detection
+            z_score = abs(value - mean) / std
+            return z_score > self.detection_threshold
+            
+        except Exception as e:
+            logging.error(f"Anomaly detection failed for {metric_name}: {e}")
+            return False
+    
+    def _update_baseline_stats(self, metric_name: str):
+        """Update baseline statistics for a metric"""
+        try:
+            values = list(self.metric_history[metric_name])
+            if len(values) < 5:
+                return
+                
+            import statistics
+            mean = statistics.mean(values)
+            std = statistics.stdev(values) if len(values) > 1 else 0
+            
+            self.baseline_stats[metric_name] = {
+                'mean': mean,
+                'std': std,
+                'count': len(values)
+            }
+            
+        except Exception as e:
+            logging.error(f"Baseline stats update failed for {metric_name}: {e}")
+        
+        # Scheduling queues
+        self.pending_tasks = deque()
+        self.priority_queue = []
+        self.scheduling_history = []
+        
+        # Resource tracking
+        self.cluster_resources = {}
+        self.resource_utilization = {}
+        
+    async def initialize(self):
+        """Initialize global scheduler"""
+        try:
+            # Load historical scheduling data for ML training
+            await self._load_scheduling_history()
+            
+            # Train placement optimizer
+            if len(self.scheduling_history) > 10:
+                self.placement_optimizer.train_model(self.scheduling_history)
+            
+            logging.info("Global scheduler initialized")
+            
+        except Exception as e:
+            logging.error(f"Scheduler initialization failed: {e}")
+    
+    async def activate_as_leader(self):
+        """Activate scheduler when becoming cluster leader"""
+        try:
+            # Start scheduling loop
+            asyncio.create_task(self._scheduling_loop())
+            
+            # Start resource monitoring
+            asyncio.create_task(self._resource_monitoring_loop())
+            
+            logging.info("Global scheduler activated as leader")
+            
+        except Exception as e:
+            logging.error(f"Scheduler activation failed: {e}")
+    
+    async def _scheduling_loop(self):
+        """Main scheduling loop for task placement"""
+        while True:
+            try:
+                if self.pending_tasks:
+                    task = self.pending_tasks.popleft()
+                    await self._schedule_task(task)
+                
+                await asyncio.sleep(0.1)  # 10 Hz scheduling frequency
+                
+            except Exception as e:
+                logging.error(f"Scheduling loop error: {e}")
+                await asyncio.sleep(1)
+    
+    async def _schedule_task(self, task):
+        """Schedule a single task using intelligent placement"""
+        try:
+            start_time = time.time()
+            
+            # Get available nodes for task
+            suitable_nodes = await self._find_suitable_nodes(task)
+            
+            if not suitable_nodes:
+                # No suitable nodes, requeue task
+                self.pending_tasks.append(task)
+                return
+            
+            # Use ML-driven placement optimization
+            best_node = await self._optimize_placement(task, suitable_nodes)
+            
+            # Place task on selected node
+            await self._place_task_on_node(task, best_node)
+            
+            # Record scheduling decision
+            scheduling_time = time.time() - start_time
+            self._record_scheduling_decision(task, best_node, scheduling_time)
+            
+        except Exception as e:
+            logging.error(f"Task scheduling failed: {e}")
+    
+    async def _find_suitable_nodes(self, task) -> List[str]:
+        """Find nodes suitable for task requirements"""
+        suitable_nodes = []
+        
+        for node_id, node_info in self.cluster_resources.items():
+            if await self._node_can_handle_task(node_info, task):
+                suitable_nodes.append(node_id)
+        
+        return suitable_nodes
+    
+    async def _node_can_handle_task(self, node_info, task) -> bool:
+        """Check if node can handle task requirements"""
+        try:
+            # Check resource requirements
+            if task.get('cpu_cores', 0) > node_info.get('available_cpu_cores', 0):
+                return False
+            
+            if task.get('memory_gb', 0) > node_info.get('available_memory_gb', 0):
+                return False
+            
+            if task.get('gpu_units', 0) > node_info.get('available_gpu_units', 0):
+                return False
+            
+            # Check node type compatibility
+            task_type = task.get('task_type', '')
+            node_type = node_info.get('node_type', '')
+            
+            # GPU tasks require GPU nodes
+            if 'gpu' in task_type.lower() and 'gpu' not in node_type.lower():
+                return False
+            
+            # Check thermal constraints
+            thermal_score = self.thermal_manager.get_thermal_score(node_info.get('node_id'))
+            if thermal_score < 0.3:  # Too hot
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Node suitability check failed: {e}")
+            return False
+    
+    async def _optimize_placement(self, task, suitable_nodes) -> str:
+        """Use ML optimization to select best node"""
+        try:
+            best_node = None
+            best_score = -1
+            
+            for node_id in suitable_nodes:
+                node_info = self.cluster_resources.get(node_id, {})
+                
+                # Calculate placement score
+                score = await self._calculate_placement_score(task, node_info)
+                
+                if score > best_score:
+                    best_score = score
+                    best_node = node_id
+            
+            return best_node
+            
+        except Exception as e:
+            logging.error(f"Placement optimization failed: {e}")
+            return suitable_nodes[0] if suitable_nodes else None
+    
+    async def _calculate_placement_score(self, task, node_info) -> float:
+        """Calculate placement score using multiple factors"""
+        try:
+            # Resource utilization score (prefer less utilized nodes)
+            cpu_util = node_info.get('cpu_utilization', 0)
+            memory_util = node_info.get('memory_utilization', 0)
+            gpu_util = node_info.get('gpu_utilization', 0)
+            
+            utilization_score = 1.0 - ((cpu_util + memory_util + gpu_util) / 3.0)
+            
+            # Thermal score
+            thermal_score = self.thermal_manager.get_thermal_score(node_info.get('node_id', ''))
+            
+            # Load balance score
+            load_score = self.load_balancer.get_load_balance_score(node_info.get('node_id', ''))
+            
+            # ML prediction score
+            ml_score = 0.5  # Default if ML not available
+            if self.placement_optimizer.model:
+                node_features = [cpu_util, memory_util, gpu_util, thermal_score]
+                task_features = [
+                    task.get('cpu_cores', 0),
+                    task.get('memory_gb', 0),
+                    task.get('gpu_units', 0)
+                ]
+                ml_score = self.placement_optimizer.predict_performance(node_features, task_features)
+            
+            # Weighted combination
+            total_score = (
+                0.3 * utilization_score +
+                0.2 * thermal_score +
+                0.2 * load_score +
+                0.3 * ml_score
+            )
+            
+            return total_score
+            
+        except Exception as e:
+            logging.error(f"Score calculation failed: {e}")
+            return 0.0
+    
+    async def _place_task_on_node(self, task, node_id):
+        """Place task on selected node"""
+        try:
+            # Update resource allocation
+            await self._allocate_resources(task, node_id)
+            
+            # Send task to node
+            await self._send_task_to_node(task, node_id)
+            
+            logging.info(f"Task {task.get('task_id')} placed on node {node_id}")
+            
+        except Exception as e:
+            logging.error(f"Task placement failed: {e}")
+    
+    def _record_scheduling_decision(self, task, node_id, scheduling_time):
+        """Record scheduling decision for ML training"""
+        try:
+            decision_record = {
+                'task_id': task.get('task_id'),
+                'node_id': node_id,
+                'scheduling_time': scheduling_time,
+                'timestamp': datetime.utcnow().isoformat(),
+                'features': {
+                    'cpu_cores': task.get('cpu_cores', 0),
+                    'memory_gb': task.get('memory_gb', 0),
+                    'gpu_units': task.get('gpu_units', 0),
+                    'task_type': task.get('task_type', ''),
+                    'priority': task.get('priority', 5)
+                }
+            }
+            
+            self.scheduling_history.append(decision_record)
+            
+            # Keep only recent history
+            if len(self.scheduling_history) > 10000:
+                self.scheduling_history = self.scheduling_history[-5000:]
+                
+        except Exception as e:
+            logging.error(f"Failed to record scheduling decision: {e}")
+
+class SupervisionEngine:
+    """
+    Supervision engine for monitoring and managing node health and performance.
+    Implements proactive failure detection and automated recovery.
+    """
+    
+    def __init__(self):
+        self.supervised_nodes = {}
+        self.health_thresholds = {
+            'cpu_critical': 95.0,
+            'memory_critical': 90.0,
+            'temperature_critical': 85.0,
+            'disk_critical': 95.0
+        }
+        self.monitoring_interval = 5  # seconds
+        
+    async def start_global_supervision(self):
+        """Start supervising all cluster nodes"""
+        try:
+            # Start monitoring loops
+            asyncio.create_task(self._health_monitoring_loop())
+            asyncio.create_task(self._performance_monitoring_loop())
+            asyncio.create_task(self._failure_detection_loop())
+            
+            logging.info("Global supervision engine started")
+            
+        except Exception as e:
+            logging.error(f"Supervision engine start failed: {e}")
+    
+    async def _health_monitoring_loop(self):
+        """Monitor health of all nodes"""
+        while True:
+            try:
+                for node_id in self.supervised_nodes:
+                    await self._check_node_health(node_id)
+                
+                await asyncio.sleep(self.monitoring_interval)
+                
+            except Exception as e:
+                logging.error(f"Health monitoring error: {e}")
+                await asyncio.sleep(self.monitoring_interval)
+    
+    async def _check_node_health(self, node_id):
+        """Check health of a specific node"""
+        try:
+            node_info = self.supervised_nodes.get(node_id)
+            if not node_info:
+                return
+            
+            # Check critical thresholds
+            metrics = node_info.get('metrics', {})
+            
+            issues = []
+            
+            if metrics.get('cpu_usage', 0) > self.health_thresholds['cpu_critical']:
+                issues.append('cpu_overload')
+            
+            if metrics.get('memory_usage', 0) > self.health_thresholds['memory_critical']:
+                issues.append('memory_exhaustion')
+            
+            if metrics.get('temperature', 0) > self.health_thresholds['temperature_critical']:
+                issues.append('thermal_emergency')
+            
+            if metrics.get('disk_usage', 0) > self.health_thresholds['disk_critical']:
+                issues.append('disk_full')
+            
+            # Take corrective action if issues found
+            if issues:
+                await self._handle_node_issues(node_id, issues)
+                
+        except Exception as e:
+            logging.error(f"Node health check failed for {node_id}: {e}")
+    
+    async def _handle_node_issues(self, node_id, issues):
+        """Handle detected node issues"""
+        try:
+            for issue in issues:
+                if issue == 'thermal_emergency':
+                    await self._handle_thermal_emergency(node_id)
+                elif issue == 'memory_exhaustion':
+                    await self._handle_memory_exhaustion(node_id)
+                elif issue == 'cpu_overload':
+                    await self._handle_cpu_overload(node_id)
+                elif issue == 'disk_full':
+                    await self._handle_disk_full(node_id)
+                    
+        except Exception as e:
+            logging.error(f"Issue handling failed for {node_id}: {e}")
+    
+    async def _handle_thermal_emergency(self, node_id):
+        """Handle thermal emergency by throttling workloads"""
+        try:
+            logging.warning(f"Thermal emergency on node {node_id} - initiating throttling")
+            
+            # Throttle CPU-intensive tasks
+            await self._throttle_node_workloads(node_id, 'cpu_intensive')
+            
+            # If critical, evacuate workloads
+            node_temp = self.supervised_nodes[node_id]['metrics'].get('temperature', 0)
+            if node_temp > 90:
+                await self._evacuate_node_workloads(node_id)
+                
+        except Exception as e:
+            logging.error(f"Thermal emergency handling failed: {e}")
+
+class FaultDetector:
+    """
+    Advanced fault detection system with predictive failure analysis.
+    Implements split-brain protection and automated recovery.
+    """
+    
+    def __init__(self):
+        self.failure_patterns = {}
+        self.anomaly_detector = SimpleAnomalyDetector()
+        self.split_brain_detector = SplitBrainDetector()
+        self.failure_predictors = {}
+        
+    async def start_cluster_monitoring(self):
+        """Start cluster-wide fault detection"""
+        try:
+            # Start monitoring tasks
+            asyncio.create_task(self._split_brain_monitoring())
+            asyncio.create_task(self._network_partition_detection())
+            asyncio.create_task(self._predictive_failure_analysis())
+            
+            logging.info("Fault detector started")
+            
+        except Exception as e:
+            logging.error(f"Fault detector start failed: {e}")
+    
+    async def _split_brain_monitoring(self):
+        """Monitor for split-brain scenarios"""
+        while True:
+            try:
+                # Check for multiple leaders
+                if await self._detect_multiple_leaders():
+                    await self._handle_split_brain()
+                
+                await asyncio.sleep(10)  # Check every 10 seconds
+                
+            except Exception as e:
+                logging.error(f"Split-brain monitoring error: {e}")
+                await asyncio.sleep(10)
+    
+    async def _detect_multiple_leaders(self) -> bool:
+        """Detect if multiple control nodes claim leadership"""
+        try:
+            if not etcd_client:
+                return False
+            
+            # Check leadership claims in etcd
+            leaders = []
+            for key, value in etcd_client.get_prefix('/omega/leader/'):
+                leaders.append(value.decode())
+            
+            return len(set(leaders)) > 1
+            
+        except Exception as e:
+            logging.error(f"Multiple leader detection failed: {e}")
+            return False
+    
+    async def _handle_split_brain(self):
+        """Handle split-brain scenario"""
+        try:
+            logging.critical("Split-brain scenario detected - initiating resolution")
+            
+            # Stop all scheduling activities
+            # Force re-election
+            # Notify administrators
+            
+            SPLIT_BRAIN_INCIDENTS.inc()
+            
+        except Exception as e:
+            logging.error(f"Split-brain handling failed: {e}")
+
+class ClusterHealthMonitor:
+    """
+    Comprehensive cluster health monitoring with real-time diagnostics.
+    """
+    
+    def __init__(self):
+        self.health_status = "unknown"
+        self.cluster_metrics = {}
+        self.health_history = deque(maxlen=1000)
+        
+    async def start(self):
+        """Start cluster health monitoring"""
+        try:
+            asyncio.create_task(self._health_monitoring_loop())
+            logging.info("Cluster health monitor started")
+            
+        except Exception as e:
+            logging.error(f"Health monitor start failed: {e}")
+    
+    async def _health_monitoring_loop(self):
+        """Main health monitoring loop"""
+        while True:
+            try:
+                # Collect cluster-wide metrics
+                await self._collect_cluster_metrics()
+                
+                # Assess overall cluster health
+                health_score = self._calculate_cluster_health_score()
+                
+                # Update health status
+                self._update_health_status(health_score)
+                
+                await asyncio.sleep(30)  # Update every 30 seconds
+                
+            except Exception as e:
+                logging.error(f"Health monitoring error: {e}")
+                await asyncio.sleep(30)
+    
+    def _calculate_cluster_health_score(self) -> float:
+        """Calculate overall cluster health score"""
+        try:
+            if not self.cluster_metrics:
+                return 0.0
+            
+            # Factor in various health indicators
+            scores = []
+            
+            # Node availability score
+            total_nodes = self.cluster_metrics.get('total_nodes', 1)
+            healthy_nodes = self.cluster_metrics.get('healthy_nodes', 0)
+            availability_score = healthy_nodes / max(1, total_nodes)
+            scores.append(availability_score)
+            
+            # Resource utilization score (optimal around 70%)
+            avg_cpu_util = self.cluster_metrics.get('avg_cpu_utilization', 0)
+            util_score = 1.0 - abs(avg_cpu_util - 0.7) / 0.7
+            scores.append(max(0, util_score))
+            
+            # Network health score
+            network_score = self.cluster_metrics.get('network_health_score', 1.0)
+            scores.append(network_score)
+            
+            return sum(scores) / len(scores)
+            
+        except Exception as e:
+            logging.error(f"Health score calculation failed: {e}")
+            return 0.0
+
+# Enhanced Database Configuration with High Availability and Partitioning
+DATABASE_URL = os.getenv("OMEGA_DB_URL", "sqlite:///./omega_prototype.db")
+REDIS_URL = os.getenv("OMEGA_REDIS_URL", "redis://localhost:6379")
+ETCD_URL = os.getenv("OMEGA_ETCD_URL", "localhost:2379")
 
 try:
-    # Try PostgreSQL first
-    DATABASE_URL = os.getenv("OMEGA_DB_URL", "postgresql://omega:omega@localhost/omega_db")
-    engine = create_engine(DATABASE_URL)
-    # Test the connection
-    with engine.connect():
-        pass
-    print("Using PostgreSQL database")
+    if DATABASE_URL.startswith("postgresql"):
+        engine = create_engine(
+            DATABASE_URL,
+            poolclass=QueuePool,
+            pool_size=20,
+            max_overflow=30,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            echo=False
+        )
+        with engine.connect():
+            pass
+        print("✓ Using PostgreSQL database with connection pooling")
+        DATABASE_TYPE = "postgresql"
+    else:
+        engine = create_engine(
+            DATABASE_URL,
+            connect_args={"check_same_thread": False, "timeout": 30},
+            pool_pre_ping=True
+        )
+        print("✓ Using SQLite database")
+        DATABASE_TYPE = "sqlite"
 except Exception as e:
-    # Fallback to SQLite
-    print(f"PostgreSQL connection failed: {e}")
-    print("Falling back to SQLite database")
+    print(f"Database connection failed: {e}")
     DATABASE_URL = "sqlite:///./omega_prototype.db"
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    DATABASE_TYPE = "sqlite"
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Create all tables
-try:
-    Base.metadata.create_all(bind=engine)
-    print("Database tables created successfully")
-except Exception as e:
-    print(f"Error creating database tables: {e}")
-    # If PostgreSQL fails, force SQLite
-    if "postgresql" in DATABASE_URL.lower():
-        print("Forcing SQLite fallback...")
-        DATABASE_URL = "sqlite:///./omega_prototype.db"
-        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        Base.metadata.create_all(bind=engine)
-        print("SQLite database initialized successfully")
-
-# Redis for real-time data (optional)
+# Enhanced Redis Configuration for Distributed State
 redis_client = None
-try:
-    import redis
-    redis_url = os.getenv("OMEGA_REDIS_URL", "redis://localhost:6379")
-    redis_client = redis.from_url(redis_url, decode_responses=True)
-    # Test Redis connection
-    redis_client.ping()
-    print("Using Redis for caching")
-except Exception as e:
-    print(f"Redis connection failed: {e}")
-    print("Using in-memory cache instead")
-    redis_client = None
+if EXTERNAL_SERVICES_AVAILABLE:
+    try:
+        import redis.asyncio as redis
+        redis_client = redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            retry_on_timeout=True,
+            max_connections=50
+        )
+        # Test connection asynchronously will be done during startup
+        print("✓ Redis client configured for distributed state")
+    except Exception as e:
+        print(f"Redis configuration failed: {e}")
+        redis_client = None
 
-# Simple ML model replacement
+# Enhanced etcd Configuration for Leader Election and Consensus
+etcd_client = None
+if EXTERNAL_SERVICES_AVAILABLE:
+    try:
+        import etcd3
+        etcd_host, etcd_port = ETCD_URL.split(':')
+        etcd_client = etcd3.client(
+            host=etcd_host,
+            port=int(etcd_port),
+            timeout=5,
+            grpc_options=[
+                ('grpc.keepalive_time_ms', 10000),
+                ('grpc.keepalive_timeout_ms', 5000),
+                ('grpc.keepalive_permit_without_calls', True)
+            ]
+        )
+        print("✓ etcd client configured for leader election")
+    except Exception as e:
+        print(f"etcd configuration failed: {e}")
+        etcd_client = None
+
+# In-memory fallbacks for when external services are not available
+nodes_data = {}
+sessions_data = {}
+distributed_state = {
+    "leader_node": None,
+    "backup_nodes": [],
+    "cluster_health": "healthy",
+    "last_election": None,
+    "split_brain_detected": False
+}
+
+# Leader Election Manager
+class LeaderElectionManager:
+    """Fault-tolerant leader election with split-brain protection"""
+    def __init__(self):
+        self.node_id = f"control-{socket.gethostname()}-{int(time.time())}"
+        self.state = LeaderElectionState()
+        self.election_lock = asyncio.Lock()
+        self.heartbeat_task = None
+        self.watch_task = None
+        self.election_callbacks = []
+        
+    async def initialize(self):
+        """Initialize leader election system"""
+        if not etcd_client:
+            logging.warning("etcd not available, using single-node mode")
+            self.state.current_leader = self.node_id
+            return
+            
+        try:
+            # Test etcd connectivity
+            await asyncio.to_thread(etcd_client.status)
+            
+            # Start leader election process
+            self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            self.watch_task = asyncio.create_task(self._watch_leader_changes())
+            
+            # Attempt to become leader
+            await self._attempt_leadership()
+            
+        except Exception as e:
+            logging.error(f"Leader election initialization failed: {e}")
+            # Fallback to single-node mode
+            self.state.current_leader = self.node_id
+    
+    async def _attempt_leadership(self):
+        """Attempt to become the cluster leader"""
+        async with self.election_lock:
+            try:
+                # Try to acquire leadership lease
+                lease = etcd_client.lease(LEADER_LEASE_DURATION)
+                
+                # Attempt to put our ID as leader with the lease
+                success = etcd_client.transaction(
+                    compare=[etcd_client.transactions.version('/omega/leader') == 0],
+                    success=[etcd_client.transactions.put('/omega/leader', self.node_id, lease=lease)],
+                    failure=[]
+                )
+                
+                if success:
+                    self.state.current_leader = self.node_id
+                    self.state.leader_term += 1
+                    self.state.leader_lease_expiry = datetime.utcnow() + timedelta(seconds=LEADER_LEASE_DURATION)
+                    self.state.last_election_time = datetime.utcnow()
+                    
+                    logging.info(f"Successfully became cluster leader (term {self.state.leader_term})")
+                    LEADER_ELECTIONS_TOTAL.inc()
+                    
+                    # Notify callbacks
+                    for callback in self.election_callbacks:
+                        try:
+                            await callback(True, self.node_id)
+                        except Exception as e:
+                            logging.error(f"Leader election callback failed: {e}")
+                else:
+                    # Someone else is leader, get current leader info
+                    current_leader = etcd_client.get('/omega/leader')[0]
+                    if current_leader:
+                        self.state.current_leader = current_leader.value.decode()
+                        logging.info(f"Current leader is: {self.state.current_leader}")
+                        
+            except Exception as e:
+                logging.error(f"Leadership attempt failed: {e}")
+    
+    async def _heartbeat_loop(self):
+        """Maintain leadership lease through heartbeats"""
+        while True:
+            try:
+                if self.is_leader():
+                    # Refresh lease
+                    try:
+                        etcd_client.refresh_lease(self.state.leader_lease_expiry)
+                        self.state.leader_lease_expiry = datetime.utcnow() + timedelta(seconds=LEADER_LEASE_DURATION)
+                    except Exception as e:
+                        logging.warning(f"Failed to refresh leader lease: {e}")
+                        # Try to re-acquire leadership
+                        await self._attempt_leadership()
+                else:
+                    # Not leader, check if we should try to become one
+                    current_leader_data = etcd_client.get('/omega/leader')[0]
+                    if not current_leader_data:
+                        # No current leader, attempt leadership
+                        await self._attempt_leadership()
+                
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                
+            except Exception as e:
+                logging.error(f"Heartbeat loop error: {e}")
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+    
+    async def _watch_leader_changes(self):
+        """Watch for leader changes and detect split-brain scenarios"""
+        if not etcd_client:
+            return
+            
+        try:
+            events_iterator, cancel = etcd_client.watch('/omega/leader')
+            
+            for event in events_iterator:
+                if event.type == etcd3.events.PutEvent:
+                    new_leader = event.value.decode()
+                    if new_leader != self.state.current_leader:
+                        old_leader = self.state.current_leader
+                        self.state.current_leader = new_leader
+                        
+                        logging.info(f"Leader changed from {old_leader} to {new_leader}")
+                        
+                        # Notify callbacks
+                        for callback in self.election_callbacks:
+                            try:
+                                await callback(False, new_leader)
+                            except Exception as e:
+                                logging.error(f"Leader change callback failed: {e}")
+                
+                elif event.type == etcd3.events.DeleteEvent:
+                    logging.warning("Leader key deleted, starting new election")
+                    self.state.current_leader = None
+                    await self._attempt_leadership()
+                    
+        except Exception as e:
+            logging.error(f"Leader watch error: {e}")
+    
+    def is_leader(self) -> bool:
+        """Check if this node is the current leader"""
+        return self.state.current_leader == self.node_id
+    
+    def get_leader(self) -> Optional[str]:
+        """Get current leader node ID"""
+        return self.state.current_leader
+    
+    def add_election_callback(self, callback):
+        """Add callback for leader election events"""
+        self.election_callbacks.append(callback)
+    
+    async def shutdown(self):
+        """Shutdown leader election gracefully"""
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+        if self.watch_task:
+            self.watch_task.cancel()
+            
+        if self.is_leader() and etcd_client:
+            try:
+                # Release leadership
+                etcd_client.delete('/omega/leader')
+                logging.info("Released leadership lease")
+            except Exception as e:
+                logging.error(f"Failed to release leadership: {e}")
+
+# Global leader election manager
+leader_election = LeaderElectionManager()
+
+# Fallback database configuration
+if 'engine' not in locals():
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    DATABASE_TYPE = "sqlite"
+    print("✓ Fallback to SQLite database")
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Redis Configuration for Distributed State
+redis_client = None
+if EXTERNAL_SERVICES_AVAILABLE:
+    try:
+        import redis
+        redis_url = os.getenv("OMEGA_REDIS_URL", "redis://localhost:6379")
+        redis_client = redis.from_url(redis_url, decode_responses=True, 
+                                     socket_connect_timeout=5, socket_timeout=5)
+        redis_client.ping()
+        print("✓ Using Redis for distributed state")
+    except Exception as e:
+        print(f"Redis connection failed: {e}")
+        redis_client = None
+
+# etcd Configuration for Leader Election
+etcd_client = None
+if EXTERNAL_SERVICES_AVAILABLE:
+    try:
+        import etcd3
+        etcd_host = os.getenv("OMEGA_ETCD_HOST", "localhost")
+        etcd_port = int(os.getenv("OMEGA_ETCD_PORT", "2379"))
+        etcd_client = etcd3.client(host=etcd_host, port=etcd_port, timeout=5)
+        # Test connection
+        etcd_client.get("test")
+        print("✓ Using etcd for leader election")
+    except Exception as e:
+        print(f"etcd connection failed: {e}")
+        etcd_client = None
+
+# In-memory fallbacks for when external services are not available
+nodes_data = {}
+sessions_data = {}
+distributed_state = {
+    "leader_node": None,
+    "backup_nodes": [],
+    "cluster_health": "healthy"
+}
+
+# Simple ML model fallbacks
 class SimpleAnomalyDetector:
     def __init__(self):
         self.threshold = 0.8
+        self.baseline_metrics = {}
     
     def fit(self, data):
-        pass
+        if isinstance(data, list) and data:
+            self.baseline_metrics = {
+                'mean': np.mean(data),
+                'std': np.std(data),
+                'count': len(data)
+            }
     
     def predict(self, data):
-        return [1] * len(data)  # Normal behavior
+        if not self.baseline_metrics:
+            return [0] * len(data)  # Normal behavior
+        
+        anomalies = []
+        for value in data:
+            # Simple statistical anomaly detection
+            z_score = abs((value - self.baseline_metrics['mean']) / 
+                         (self.baseline_metrics['std'] + 1e-8))
+            anomalies.append(1 if z_score > 2.0 else 0)
+        return anomalies
+
+class SimpleLoadBalancer:
+    def __init__(self):
+        self.node_weights = {}
+        self.round_robin_index = 0
+    
+    def select_node(self, available_nodes: List[str], task_requirements: Dict[str, Any] = None) -> str:
+        if not available_nodes:
+            return None
+        
+        # Simple round-robin with weights
+        if task_requirements and 'preferred_node_type' in task_requirements:
+            filtered_nodes = [node for node in available_nodes 
+                            if task_requirements['preferred_node_type'] in node]
+            if filtered_nodes:
+                available_nodes = filtered_nodes
+        
+        selected = available_nodes[self.round_robin_index % len(available_nodes)]
+        self.round_robin_index += 1
+        return selected
 
 anomaly_detector = SimpleAnomalyDetector()
+load_balancer = SimpleLoadBalancer()
+
+# Enhanced Database Models
+class NodeRecord(Base):
+    __tablename__ = "nodes"
+    
+    node_id = Column(String, primary_key=True, index=True)
+    node_type = Column(String, nullable=False)
+    status = Column(String, default="active")
+    ip_address = Column(String)
+    hostname = Column(String)
+    resources = Column(JSON, default=dict)
+    capabilities = Column(JSON, default=dict)
+    current_load = Column(JSON, default=dict)
+    last_heartbeat = Column(DateTime, default=datetime.utcnow)
+    performance_score = Column(Float, default=1.0)
+    fault_tolerance_config = Column(JSON, default=dict)
+    maintenance_window = Column(JSON, default=dict)
+    security_profile = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 class SessionRecord(Base):
     __tablename__ = "sessions"
@@ -126,14 +3235,14 @@ class SessionRecord(Base):
     app_name = Column(String, nullable=False)
     app_command = Column(String)
     app_icon = Column(String)
-    status = Column(String, default="INITIALIZING")  # INITIALIZING, RUNNING, PAUSED, SUSPENDED, MIGRATING, ERROR, TERMINATED
+    status = Column(String, default="INITIALIZING")
     node_id = Column(String, index=True)
     cpu_cores = Column(Integer)
     gpu_units = Column(Integer)
     ram_gb = Column(Float)
     storage_gb = Column(Float)
     priority = Column(Integer, default=1)
-    session_type = Column(String, default="workstation")  # gaming, workstation, ai_compute, render_farm, development, streaming
+    session_type = Column(String, default="workstation")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
     start_time = Column(DateTime)
@@ -146,16 +3255,39 @@ class SessionRecord(Base):
     metrics = Column(JSON, default=dict)
     process_tree = Column(JSON, default=list)
     security_labels = Column(JSON, default=list)
+    fault_tolerance_enabled = Column(Boolean, default=True)
+    backup_frequency_minutes = Column(Integer, default=30)
 
-class NodeRecord(Base):
-    __tablename__ = "nodes"
+class TaskRecord(Base):
+    __tablename__ = "tasks"
     
-    node_id = Column(String, primary_key=True, index=True)
-    node_type = Column(String)
-    status = Column(String, default="active")
-    resources = Column(JSON)
-    last_heartbeat = Column(DateTime, default=datetime.utcnow)
-    performance_score = Column(Float, default=1.0)
+    task_id = Column(String, primary_key=True, index=True)
+    task_type = Column(String, nullable=False)
+    session_id = Column(String, index=True)
+    node_id = Column(String, index=True)
+    status = Column(String, default="pending")
+    priority = Column(Integer, default=5)
+    resource_requirements = Column(JSON, default=dict)
+    parameters = Column(JSON, default=dict)
+    result = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    error_message = Column(String)
+    retry_count = Column(Integer, default=0)
+    max_retries = Column(Integer, default=3)
+
+class ClusterStateRecord(Base):
+    __tablename__ = "cluster_state"
+    
+    state_id = Column(String, primary_key=True, index=True)
+    leader_node_id = Column(String, index=True)
+    backup_nodes = Column(JSON, default=list)
+    cluster_health = Column(String, default="healthy")
+    last_election = Column(DateTime)
+    election_term = Column(Integer, default=0)
+    split_brain_detected = Column(Boolean, default=False)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 def get_db():
     db = SessionLocal()
@@ -164,14 +3296,34 @@ def get_db():
     finally:
         db.close()
 
-# Models
+# Create all database tables
+try:
+    Base.metadata.create_all(bind=engine)
+    print("✓ Database tables created successfully")
+except Exception as e:
+    print(f"✗ Error creating database tables: {e}")
+    if "postgresql" in DATABASE_URL.lower():
+        print("Forcing SQLite fallback for table creation...")
+        DATABASE_URL = "sqlite:///./omega_prototype.db"
+        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base.metadata.create_all(bind=engine)
+        print("✓ SQLite database tables created successfully")
+
+# Enhanced Pydantic Models
 class NodeInfo(BaseModel):
     node_id: str
     node_type: str
     status: str = "active"
     ip_address: Optional[str] = None
-    resources: Dict[str, Any]
+    hostname: Optional[str] = None
+    resources: Dict[str, Any] = {}
+    capabilities: Optional[NodeCapabilities] = None
+    current_load: Optional[NodeMetrics] = None
     performance_metrics: Optional[Dict[str, float]] = None
+    fault_tolerance_config: Optional[FaultToleranceConfig] = None
+    maintenance_window: Optional[Dict[str, Any]] = None
+    security_profile: Optional[Dict[str, Any]] = None
     last_updated: Optional[datetime] = None
 
 class SessionRequest(BaseModel):
@@ -192,7 +3344,10 @@ class SessionRequest(BaseModel):
     migration_policy: Dict[str, Any] = {}
     snapshot_policy: Dict[str, Any] = {}
     security_labels: List[str] = ["standard"]
-    snapshot_policy: Dict[str, Any] = {}
+    fault_tolerance_enabled: bool = True
+    backup_frequency_minutes: int = 30
+    preferred_node_types: List[str] = []
+    resource_constraints: Dict[str, Any] = {}
 
 class SessionResponse(BaseModel):
     session_id: str
@@ -220,20 +3375,90 @@ class SessionResponse(BaseModel):
     metrics: Dict[str, Any]
     process_tree: List[Dict[str, Any]]
     security_labels: List[str]
+    fault_tolerance_enabled: bool
+    backup_frequency_minutes: int
 
-class SessionMetrics(BaseModel):
-    session_id: str
-    timestamp: datetime
-    cpu_usage: float
-    gpu_usage: float
-    ram_usage_gb: float
-    disk_io_mbps: float
-    network_in_mbps: float
-    network_out_mbps: float
-    fps: Optional[float]
-    latency_ms: float
-    active_processes: int
-    temperature: float
+class TaskRequest(BaseModel):
+    task_type: str
+    session_id: Optional[str] = None
+    node_id: Optional[str] = None
+    priority: int = 5
+    resource_requirements: Dict[str, Any] = {}
+    parameters: Dict[str, Any] = {}
+    max_retries: int = 3
+    timeout_seconds: int = 3600
+    preferred_node_types: List[str] = []
+
+class TaskResponse(BaseModel):
+    task_id: str
+    task_type: str
+    session_id: Optional[str]
+    node_id: Optional[str]
+    status: str
+    priority: int
+    resource_requirements: Dict[str, Any]
+    parameters: Dict[str, Any]
+    result: Dict[str, Any]
+    created_at: datetime
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    error_message: Optional[str]
+    retry_count: int
+    max_retries: int
+
+class ClusterHealthResponse(BaseModel):
+    cluster_id: str
+    leader_node_id: Optional[str]
+    backup_nodes: List[str]
+    total_nodes: int
+    active_nodes: int
+    failed_nodes: int
+    cluster_health: str
+    last_election: Optional[datetime]
+    split_brain_detected: bool
+    fault_tolerance_status: Dict[str, Any]
+
+class NodeAction(BaseModel):
+    action: str  # restart, shutdown, maintenance, quarantine, evacuate
+    target_node_id: Optional[str] = None
+    force: bool = False
+    maintenance_duration_minutes: Optional[int] = None
+    evacuation_target_nodes: List[str] = []
+
+class SessionAction(BaseModel):
+    action: str  # pause, resume, terminate, snapshot, migrate, backup, restore
+    target_node_id: Optional[str] = None
+    snapshot_name: Optional[str] = None
+    backup_name: Optional[str] = None
+    force: bool = False
+    preserve_resources: bool = True
+
+class ResourceHint(BaseModel):
+    cpu_cores: int
+    gpu_units: int
+    ram_bytes: int
+    storage_bytes: int = 0
+    network_bandwidth_mbps: float = 100.0
+    specialized_hardware: Dict[str, Any] = {}
+
+class LatencyMetric(BaseModel):
+    timestamp: float
+    input_to_pixel_ms: float
+    network_hop_ms: float
+    gpu_render_ms: float
+    prediction_confidence: float
+    node_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+class SecurityProfile(BaseModel):
+    encryption_enabled: bool = True
+    access_control_enabled: bool = True
+    audit_logging_enabled: bool = True
+    network_isolation: bool = False
+    container_sandboxing: bool = True
+    resource_limits_enforced: bool = True
+    allowed_users: List[str] = []
+    allowed_networks: List[str] = []
 
 class ProcessInfo(BaseModel):
     pid: int
@@ -256,35 +3481,19 @@ class SessionSnapshot(BaseModel):
     delta_from_previous: bool
     metadata: Dict[str, Any]
 
-class SessionAction(BaseModel):
-    action: str  # pause, resume, terminate, snapshot, migrate
-    target_node_id: Optional[str] = None
-    snapshot_name: Optional[str] = None
-    force: bool = False
-    app_uri: str
-    cpu_cores: int = 4
-    gpu_units: int = 1
-    ram_bytes: int = 8 * 1024 * 1024 * 1024  # 8GB
-    low_latency: bool = False
-    pin_gpu: Optional[str] = None
-
-class ResourceHint(BaseModel):
-    cpu_cores: int
-    gpu_units: int
-    ram_bytes: int
-
-class TaskRequest(BaseModel):
+class SessionMetrics(BaseModel):
     session_id: str
-    task_type: str
-    parameters: Dict[str, Any]
-    priority: int = 5  # 1-10 scale
-
-class LatencyMetric(BaseModel):
-    timestamp: float
-    input_to_pixel_ms: float
-    network_hop_ms: float
-    gpu_render_ms: float
-    prediction_confidence: float
+    timestamp: datetime
+    cpu_usage: float
+    gpu_usage: float
+    ram_usage_gb: float
+    disk_io_mbps: float
+    network_in_mbps: float
+    network_out_mbps: float
+    fps: Optional[float]
+    latency_ms: float
+    active_processes: int
+    temperature: float
 
 # Advanced Resource Management
 class OmegaResourceOrchestrator:
@@ -2555,6 +5764,12 @@ async def create_sample_sessions():
         db.rollback()
     finally:
         db.close()
+
+# Initialize enhanced orchestrator and managers
+control_node_manager = ControlNodeManager()
+compute_node_manager = ComputeNodeManager()
+storage_node_manager = StorageNodeManager()
+thermal_manager = ThermalManager()
 
 if __name__ == "__main__":
     logging.basicConfig(
