@@ -375,7 +375,7 @@ export OMEGA_CLUSTER_NAME="production"
 
 ---
 
-## 📞 **Support & Contact**
+## **Support & Contact**
 
 - **📧 Email**: <chandu@portalvii.com>
 - **🐙 Repository**: <https://github.com/Chandu00756/Superdesktop>
@@ -390,7 +390,7 @@ This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) 
 
 ---
 
-## 🙏 **Acknowledgments**
+## **Acknowledgments**
 
 - **Core Team**: Advanced distributed systems architecture
 - **AI Integration**: Machine learning optimization engines
