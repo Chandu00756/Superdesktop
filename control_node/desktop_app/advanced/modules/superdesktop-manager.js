@@ -521,7 +521,8 @@ class SuperdesktopManager extends EventTarget {
         const resultsContainer = document.getElementById('searchResults') || 
                                document.getElementById('nlpSearchResults');
         if (resultsContainer) {
-            resultsContainer.innerHTML = results;
+            // Sanitize results to prevent XSS
+            resultsContainer.textContent = results; // Use textContent instead of innerHTML
             resultsContainer.style.display = 'block';
         }
     }

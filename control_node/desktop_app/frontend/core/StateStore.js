@@ -76,11 +76,21 @@ class StateStore {
         let current = updates;
         
         for (let i = 0; i < keys.length - 1; i++) {
-            current[keys[i]] = {};
-            current = current[keys[i]];
+            const key = keys[i];
+            // Prevent prototype pollution
+            if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+                throw new Error('Invalid property name for security reasons');
+            }
+            current[key] = {};
+            current = current[key];
         }
         
-        current[keys[keys.length - 1]] = value;
+        const finalKey = keys[keys.length - 1];
+        // Prevent prototype pollution
+        if (finalKey === '__proto__' || finalKey === 'constructor' || finalKey === 'prototype') {
+            throw new Error('Invalid property name for security reasons');
+        }
+        current[finalKey] = value;
         this.setState(this.deepMerge(this.state, updates), actionType);
     }
 

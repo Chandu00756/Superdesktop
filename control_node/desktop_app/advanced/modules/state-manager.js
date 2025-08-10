@@ -237,8 +237,12 @@ class StateManager extends EventTarget {
         const mergeRecursive = (target, source) => {
             for (const key in source) {
                 if (source.hasOwnProperty(key)) {
+                    // Prevent prototype pollution
+                    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+                        continue; // Skip dangerous keys
+                    }
                     if (typeof source[key] === 'object' && !Array.isArray(source[key]) && source[key] !== null) {
-                        if (!target[key]) target[key] = {};
+                        if (!target.hasOwnProperty(key)) target[key] = {};
                         mergeRecursive(target[key], source[key]);
                     } else {
                         target[key] = source[key];

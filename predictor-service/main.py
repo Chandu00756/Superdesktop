@@ -1197,7 +1197,7 @@ async def predict_performance(request: Dict[str, Any]) -> Dict[str, Any]:
         
     except Exception as e:
         logger.error("Prediction request failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/insights/{session_id}")
 async def get_performance_insights(session_id: str) -> Dict[str, Any]:

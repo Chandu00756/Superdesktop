@@ -1077,7 +1077,7 @@ async def allocate_memory(request: Dict[str, Any]) -> Dict[str, Any]:
         
     except Exception as e:
         logger.error("Memory allocation request failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.delete("/allocate/{allocation_id}")
 async def deallocate_memory(allocation_id: str):
@@ -1104,7 +1104,7 @@ async def migrate_allocation(allocation_id: str, request: Dict[str, Any]):
         
     except Exception as e:
         logger.error("Migration request failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/status")
 async def get_fabric_status() -> Dict[str, Any]:

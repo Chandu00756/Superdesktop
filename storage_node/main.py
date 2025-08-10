@@ -2112,7 +2112,7 @@ class FastAPIOrchestrator:
                 return {"error": "Failure detection service not available"}
             except Exception as e:
                 logger.error(f"Failure detection health check failed: {e}")
-                return {"error": str(e)}
+                return {"error": "Internal server error"}
         
         @self.app.get("/api/v2/failure-detection/anomalies")
         async def get_recent_anomalies(limit: int = 100):
@@ -2140,7 +2140,7 @@ class FastAPIOrchestrator:
                 return {"error": "Failure detection service not available"}
             except Exception as e:
                 logger.error(f"Anomalies retrieval failed: {e}")
-                return {"error": str(e)}
+                return {"error": "Internal server error"}
         
         @self.app.get("/api/v2/failure-detection/failures")
         async def get_active_failures():
@@ -2170,7 +2170,7 @@ class FastAPIOrchestrator:
                 return {"error": "Failure detection service not available"}
             except Exception as e:
                 logger.error(f"Active failures retrieval failed: {e}")
-                return {"error": str(e)}
+                return {"error": "Internal server error"}
         
         @self.app.post("/api/v2/failure-detection/trigger-recovery")
         async def trigger_manual_recovery(request: Dict[str, Any]):
@@ -2219,7 +2219,7 @@ class FastAPIOrchestrator:
                 
             except Exception as e:
                 logger.error(f"Manual recovery trigger failed: {e}")
-                return {"error": str(e)}
+                return {"error": "Internal server error"}
         
         @self.app.get("/api/v2/failure-detection/recovery-history")
         async def get_recovery_history(limit: int = 50):
@@ -2247,7 +2247,7 @@ class FastAPIOrchestrator:
                 return {"error": "Failure detection service not available"}
             except Exception as e:
                 logger.error(f"Recovery history retrieval failed: {e}")
-                return {"error": str(e)}
+                return {"error": "Internal server error"}
         
         @self.app.get("/api/v2/failure-detection/metrics")
         async def get_failure_detection_metrics():
@@ -4945,17 +4945,39 @@ class EncryptionManager:
             
             # Generate or load JWT secret
             if os.path.exists(self.config.jwt_secret_path):
-                with open(self.config.jwt_secret_path, 'r') as f:
-                    self.jwt_secret = f.read().strip()
+                try:
+                    # Try to read encrypted secret
+                    with open(self.config.jwt_secret_path, 'rb') as f:
+                        encrypted_secret = f.read()
+                    
+                    with open(self.config.jwt_secret_path + '.key', 'rb') as f:
+                        key = f.read()
+                    
+                    cipher_suite = Fernet(key)
+                    self.jwt_secret = cipher_suite.decrypt(encrypted_secret).decode()
+                except:
+                    # Fallback to plain text for backward compatibility
+                    with open(self.config.jwt_secret_path, 'r') as f:
+                        self.jwt_secret = f.read().strip()
             else:
                 # Generate a new secret
                 self.jwt_secret = secrets.token_hex(32)
                 
-                # Save secret if path is writable
+                # Save encrypted secret if path is writable
                 try:
                     os.makedirs(os.path.dirname(self.config.jwt_secret_path), exist_ok=True)
-                    with open(self.config.jwt_secret_path, 'w') as f:
-                        f.write(self.jwt_secret)
+                    # Use Fernet encryption for storing sensitive data
+                    key = Fernet.generate_key()
+                    cipher_suite = Fernet(key)
+                    encrypted_secret = cipher_suite.encrypt(self.jwt_secret.encode())
+                    
+                    with open(self.config.jwt_secret_path, 'wb') as f:
+                        f.write(encrypted_secret)
+                    
+                    # Store key separately (in production, use proper key management)
+                    with open(self.config.jwt_secret_path + '.key', 'wb') as f:
+                        f.write(key)
+                        
                 except:
                     logger.warning("Could not save JWT secret, using in-memory only")
             

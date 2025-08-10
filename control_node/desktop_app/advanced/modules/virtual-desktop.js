@@ -130,8 +130,10 @@ class VirtualDesktopManager extends EventTarget {
 
     async createSession(config) {
         try {
-            // Generate unique session ID
-            const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            // Generate cryptographically secure session ID
+            const randomValues = new Uint32Array(2);
+            crypto.getRandomValues(randomValues);
+            const sessionId = `session_${Date.now()}_${randomValues[0].toString(36)}${randomValues[1].toString(36)}`;
             
             // Get template if specified
             const template = config.templateId ? this.sessionTemplates.get(config.templateId) : null;
