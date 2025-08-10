@@ -1,10 +1,10 @@
-# Omega Super Desktop Console v2.0
+# Omega Super Desktop Console Prototype v2.0 
 
 ## Initial prototype Distributed Computing Platform
 
 A revolutionary distributed computing system that aggregates CPU, GPU, RAM, storage and network of multiple commodity PCs into one low-latency "super desktop" that runs unmodified Windows/Linux/Mac workloads.
 
-## [LAUNCH] Features
+## Features
 
 ### Core Platform
 
@@ -23,7 +23,7 @@ A revolutionary distributed computing system that aggregates CPU, GPU, RAM, stor
 - **Node Monitoring**: Visual node status and resource utilization
 - **Performance Analytics**: Historical performance data and trend analysis
 
-## [ARCHITECTURE] Architecture
+## Architecture
 
 ## SuperDesktop v2.0 - Distributed Desktop Environment
 
