@@ -1,4 +1,4 @@
-# Omega Super Desktop Console v1.0
+# Omega Super Desktop Console v2.0
 
 ## Initial prototype Distributed Computing Platform
 
@@ -30,7 +30,7 @@ A revolutionary distributed computing system that aggregates CPU, GPU, RAM, stor
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: Production Ready](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)]()
+[![Status: Production Ready](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)](https://github.com/Chandu00756/Superdesktop)
 
 > **🚀 Latest Update**: Complete system v2.0 with unified architecture, modular frontend system, and enterprise-grade security!
 
@@ -63,6 +63,7 @@ cd Superdesktop
 ```
 
 The startup script will automatically:
+
 - ✅ Check system requirements (Python 3.11+, Node.js 18+)
 - ✅ Create and activate virtual environment
 - ✅ Install all dependencies automatically
@@ -141,7 +142,6 @@ After startup, access the system through:
 ---
 
 ## 🏗️ **Architecture Overview**
-
 
 ---
 
@@ -300,7 +300,7 @@ The system automatically detects development mode when:
 
 ### **Common Issues**
 
-**🐍 Python Environment Issues**
+### Python Environment Issues
 
 ```bash
 # Recreate environment
@@ -310,7 +310,7 @@ source omega_env/bin/activate
 pip install -r requirements.txt
 ```
 
-**🔌 Port Conflicts**
+### Port Conflicts
 
 ```bash
 # Check what's using ports
@@ -321,7 +321,7 @@ lsof -i :7777
 ./stop-omega.sh
 ```
 
-**📦 Missing Dependencies**
+### Missing Dependencies**
 
 ```bash
 # Reinstall dependencies
@@ -330,7 +330,7 @@ pip install -r requirements.txt
 pip install -r backend/requirements.txt
 ```
 
-**🌐 Browser Access Issues**
+### Browser Access Issues**
 
 ```bash
 # Ensure services are running
