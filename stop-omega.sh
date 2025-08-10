@@ -142,7 +142,7 @@ echo ""
 echo "🔌 Checking for services on known ports..."
 
 # List of ports used by SuperDesktop
-PORTS=(8443 7777 7778 8000 8001 8002 8003 8004 8005)
+PORTS=(8443 8081 7777 7778 8000 8001 8002 8003 8004 8005)
 
 killed_by_port=0
 

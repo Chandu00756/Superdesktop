@@ -1,0 +1,826 @@
+/* Modular Component Styles for Omega SuperDesktop V2 */
+
+/* Desktop Canvas Styles */
+.desktop-canvas {
+    border: none;
+    background: #000;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+}
+
+.desktop-hud {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(0, 0, 0, 0.8);
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 10px;
+    font-size: 12px;
+    color: #fff;
+    z-index: 100;
+    transition: opacity 0.3s;
+    backdrop-filter: blur(10px);
+    display: flex;
+    gap: 15px;
+}
+
+.hud-section {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.hud-stats {
+    border-right: 1px solid #333;
+    padding-right: 15px;
+}
+
+.stat-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.stat-label {
+    color: #ccc;
+}
+
+.stat-value {
+    color: #00ffff;
+    font-weight: bold;
+}
+
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.status-indicator i {
+    font-size: 8px;
+}
+
+.status-indicator.status-connected i {
+    color: #00ff00;
+}
+
+.status-indicator.status-connecting i {
+    color: #ffff00;
+}
+
+.status-indicator.status-error i {
+    color: #ff0000;
+}
+
+.status-indicator.status-locked i {
+    color: #ffff00;
+}
+
+.status-indicator.status-free i {
+    color: #00ffff;
+}
+
+.hud-controls {
+    display: flex;
+    gap: 5px;
+}
+
+.hud-btn {
+    background: transparent;
+    border: 1px solid #333;
+    color: #fff;
+    padding: 5px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: all 0.3s;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hud-btn:hover {
+    border-color: #00ffff;
+    color: #00ffff;
+}
+
+/* Desktop Controls Panel */
+.desktop-controls {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    background: rgba(0, 0, 0, 0.9);
+    border: 1px solid #333;
+    border-radius: 4px;
+    width: 300px;
+    max-height: 400px;
+    z-index: 100;
+    backdrop-filter: blur(10px);
+    transform: translateY(100%);
+    transition: transform 0.3s;
+    display: none;
+}
+
+.desktop-controls.visible {
+    transform: translateY(0);
+    display: block;
+}
+
+.controls-header {
+    padding: 10px;
+    border-bottom: 1px solid #333;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #1a1a1a;
+}
+
+.controls-header h4 {
+    margin: 0;
+    font-size: 14px;
+    color: #00ffff;
+}
+
+.btn-close {
+    background: transparent;
+    border: none;
+    color: #ccc;
+    cursor: pointer;
+    padding: 5px;
+    border-radius: 2px;
+    transition: color 0.3s;
+}
+
+.btn-close:hover {
+    color: #ff0000;
+}
+
+.controls-content {
+    padding: 15px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.control-section {
+    margin-bottom: 20px;
+}
+
+.control-section h5 {
+    margin: 0 0 10px 0;
+    font-size: 14px;
+    color: #00ffff;
+    border-bottom: 1px solid #444;
+    padding-bottom: 5px;
+}
+
+.quality-controls,
+.display-controls,
+.input-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.quality-controls label,
+.display-controls label {
+    font-size: 12px;
+    color: #ccc;
+    margin-bottom: 5px;
+}
+
+.quality-controls input[type="range"] {
+    width: 100%;
+    margin: 5px 0;
+}
+
+.quality-controls select,
+.display-controls select {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: #fff;
+    padding: 5px;
+    border-radius: 2px;
+}
+
+.input-controls label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: #ccc;
+    cursor: pointer;
+}
+
+.input-controls input[type="checkbox"] {
+    accent-color: #00ffff;
+}
+
+/* Plugin Marketplace Styles */
+.marketplace-header {
+    padding: 15px;
+    border-bottom: 1px solid #333;
+}
+
+.marketplace-header h3 {
+    margin: 0 0 15px 0;
+    color: #00ffff;
+}
+
+.marketplace-search {
+    display: flex;
+    gap: 15px;
+}
+
+.marketplace-search input {
+    flex: 1;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: #fff;
+    padding: 10px;
+    border-radius: 2px;
+}
+
+.marketplace-search select {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: #fff;
+    padding: 10px;
+    border-radius: 2px;
+    min-width: 150px;
+}
+
+.plugin-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 15px;
+    padding: 15px;
+    max-height: 500px;
+    overflow-y: auto;
+}
+
+.plugin-card {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 15px;
+    transition: all 0.3s;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+}
+
+.plugin-card:hover {
+    border-color: #00ffff;
+    transform: translateY(-2px);
+    box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+}
+
+.plugin-card .plugin-icon {
+    font-size: 32px;
+    color: #00ffff;
+    margin-bottom: 10px;
+    text-align: center;
+}
+
+.plugin-card h4 {
+    margin: 0 0 10px 0;
+    font-size: 16px;
+    color: #fff;
+}
+
+.plugin-description {
+    font-size: 14px;
+    color: #ccc;
+    line-height: 1.4;
+    margin-bottom: 15px;
+    flex: 1;
+}
+
+.plugin-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    font-size: 12px;
+}
+
+.plugin-price {
+    color: #00ff00;
+    font-weight: bold;
+}
+
+.plugin-price.free {
+    color: #ccc;
+}
+
+.plugin-rating {
+    color: #ffff00;
+}
+
+.plugin-downloads {
+    color: #ccc;
+}
+
+.plugin-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.plugin-actions button {
+    flex: 1;
+}
+
+/* Session Management Styles */
+.session-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 2px;
+    margin-bottom: 10px;
+    transition: all 0.3s;
+}
+
+.session-item:hover {
+    border-color: #00ffff;
+    box-shadow: 0 0 10px rgba(0, 255, 255, 0.1);
+}
+
+.session-status {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.session-status.connected {
+    background: #00ff00;
+}
+
+.session-status.connecting {
+    background: #ffff00;
+}
+
+.session-status.error {
+    background: #ff0000;
+}
+
+.session-status.paused {
+    background: #ccc;
+}
+
+.session-info {
+    flex: 1;
+}
+
+.session-name {
+    font-weight: bold;
+    font-size: 14px;
+    color: #fff;
+    margin-bottom: 5px;
+}
+
+.session-type {
+    font-size: 12px;
+    color: #ccc;
+    margin-bottom: 5px;
+}
+
+.session-metrics {
+    font-size: 12px;
+    color: #00ffff;
+}
+
+.session-actions {
+    display: flex;
+    gap: 5px;
+}
+
+.session-actions button {
+    font-size: 12px;
+    padding: 5px 10px;
+}
+
+/* Desktop Tabs Styles */
+.desktop-tabs {
+    display: flex;
+    background: #111;
+    border-bottom: 1px solid #333;
+    overflow-x: auto;
+    min-height: 40px;
+}
+
+.desktop-tab {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 15px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    transition: all 0.3s;
+    background: #1a1a1a;
+    border-right: 1px solid #444;
+    font-size: 14px;
+    min-width: 120px;
+}
+
+.desktop-tab.active {
+    background: #000;
+    border-bottom-color: #00ffff;
+    color: #00ffff;
+}
+
+.desktop-tab:hover {
+    background: #333;
+}
+
+.desktop-tab i {
+    font-size: 14px;
+}
+
+.tab-close {
+    opacity: 0.6;
+    transition: all 0.3s;
+    margin-left: 5px;
+    padding: 2px;
+    border-radius: 2px;
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+}
+
+.tab-close:hover {
+    opacity: 1;
+    color: #ff0000;
+    background: rgba(255, 68, 68, 0.1);
+}
+
+/* Virtual Desktop Content */
+.desktop-content {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+    background: #000;
+}
+
+.virtual-desktop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    opacity: 0;
+    transition: opacity 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #000, #1a1a1a);
+}
+
+.virtual-desktop.active {
+    opacity: 1;
+}
+
+/* Empty State Styles */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    text-align: center;
+    color: #ccc;
+    min-height: 200px;
+}
+
+.empty-state i {
+    font-size: 48px;
+    color: #333;
+    margin-bottom: 20px;
+}
+
+.empty-state p {
+    margin-bottom: 20px;
+    font-size: 14px;
+}
+
+/* AI Recommendations Styles */
+.recommendation-item {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-left: 3px solid #ffff00;
+    border-radius: 0 2px 2px 0;
+    padding: 10px;
+    margin-bottom: 10px;
+    transition: all 0.3s;
+}
+
+.recommendation-item:hover {
+    border-left-color: #00ffff;
+    box-shadow: 0 0 10px rgba(0, 255, 255, 0.1);
+}
+
+.recommendation-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.recommendation-priority {
+    font-size: 10px;
+    text-transform: uppercase;
+    font-weight: bold;
+    padding: 2px 5px;
+    border-radius: 2px;
+}
+
+.recommendation-priority.high {
+    background: #ff0000;
+    color: #fff;
+}
+
+.recommendation-priority.medium {
+    background: #ffff00;
+    color: #000;
+}
+
+.recommendation-priority.low {
+    background: #00ffff;
+    color: #000;
+}
+
+.recommendation-header h5 {
+    margin: 0;
+    font-size: 14px;
+    color: #fff;
+}
+
+.recommendation-item p {
+    margin: 0 0 10px 0;
+    font-size: 12px;
+    color: #ccc;
+    line-height: 1.4;
+}
+
+.recommendation-actions {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.recommendation-actions button {
+    font-size: 12px;
+    padding: 5px 10px;
+}
+
+/* Network Topology Placeholder */
+.topology-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    text-align: center;
+    color: #ccc;
+    min-height: 300px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 4px;
+}
+
+.topology-placeholder i {
+    font-size: 64px;
+    color: #333;
+    margin-bottom: 20px;
+}
+
+/* Plugin Item in Sidebar */
+.plugin-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    background: #222;
+    border: 1px solid #444;
+    border-radius: 2px;
+    margin-bottom: 5px;
+    transition: all 0.3s;
+    cursor: pointer;
+}
+
+.plugin-item:hover {
+    border-color: #00ffff;
+    box-shadow: 0 0 10px rgba(0, 255, 255, 0.1);
+}
+
+.plugin-item .plugin-icon {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #00ffff;
+    flex-shrink: 0;
+}
+
+.plugin-item .plugin-info {
+    flex: 1;
+}
+
+.plugin-item .plugin-name {
+    font-size: 14px;
+    font-weight: bold;
+    color: #fff;
+    margin-bottom: 2px;
+}
+
+.plugin-item .plugin-status {
+    font-size: 12px;
+    color: #ccc;
+}
+
+.plugin-item .plugin-status.running {
+    color: #00ff00;
+}
+
+.plugin-item .plugin-status.stopped {
+    color: #ccc;
+}
+
+.plugin-item .plugin-actions {
+    display: flex;
+    gap: 5px;
+}
+
+/* Error Screen */
+.error-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    background: #000;
+    color: #fff;
+    text-align: center;
+    padding: 40px;
+}
+
+.error-screen h1 {
+    color: #ff0000;
+    margin-bottom: 20px;
+}
+
+.error-screen pre {
+    background: #1a1a1a;
+    padding: 15px;
+    border-radius: 4px;
+    margin: 20px 0;
+    text-align: left;
+    max-width: 600px;
+    overflow-x: auto;
+}
+
+.error-screen button {
+    background: #00ffff;
+    color: #000;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: all 0.3s;
+}
+
+.error-screen button:hover {
+    background: #0080ff;
+    transform: translateY(-1px);
+}
+
+/* Loading States */
+.loading-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid #333;
+    border-top: 3px solid #00ffff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Mobile Responsive Adjustments */
+@media (max-width: 768px) {
+    .desktop-hud {
+        position: fixed;
+        top: 50px;
+        right: 10px;
+        left: 10px;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .hud-section {
+        flex-direction: row;
+        justify-content: space-between;
+    }
+
+    .hud-stats {
+        border-right: none;
+        border-bottom: 1px solid #333;
+        padding-right: 0;
+        padding-bottom: 10px;
+    }
+
+    .desktop-controls {
+        left: 5px;
+        right: 5px;
+        width: auto;
+    }
+
+    .plugin-grid {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+
+    .marketplace-search {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .session-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+
+    .session-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+
+    .desktop-tabs {
+        font-size: 12px;
+    }
+
+    .desktop-tab {
+        min-width: 100px;
+        padding: 10px;
+    }
+}
+
+/* Accessibility Improvements */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Focus styles for keyboard navigation */
+button:focus,
+.desktop-tab:focus,
+.session-item:focus,
+.plugin-card:focus,
+.hud-btn:focus {
+    outline: 2px solid #00ffff;
+    outline-offset: 2px;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+    :root {
+        --omega-black: #000000;
+        --omega-white: #ffffff;
+        --omega-gray-1: #666666;
+        --omega-cyan: #00ffff;
+    }
+}

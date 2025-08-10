@@ -8,7 +8,7 @@
 # Contact: chandu@portalvii.com
 # =============================================================================
 
-echo "🚀 SUPERDESKTOP v2.0 - UNIFIED SYSTEM STARTUP"
+echo "SUPERDESKTOP v2.0 - UNIFIED SYSTEM STARTUP"
 echo "=============================================="
 echo "Starting complete distributed desktop environment"
 echo "Features:"
@@ -170,7 +170,7 @@ echo ""
 # =============================================================================
 # SERVICE STARTUP
 # =============================================================================
-echo "🚀 Starting SuperDesktop services..."
+echo " Starting SuperDesktop services..."
 
 # Array to track service PIDs
 declare -a SERVICE_PIDS
@@ -211,22 +211,27 @@ start_service "Backend API Server" \
     "python backend/api_server.py" \
     ""
 
-# 2. Start Control Node
+# 2. Start Frontend HTTP Server
+start_service "Frontend HTTP Server" \
+    "python -m http.server 8081 --directory control_node/desktop_app" \
+    ""
+
+# 3. Start Control Node
 start_service "Control Node Manager" \
     "python control_node/main.py" \
     ""
 
-# 3. Start Storage Node
+# 4. Start Storage Node
 start_service "Storage Node" \
     "python storage_node/main.py" \
     ""
 
-# 4. Start Compute Node
+# 5. Start Compute Node
 start_service "Compute Node" \
     "python compute_node/main.py" \
     ""
 
-# 5. Start Additional Services
+# 6. Start Additional Services
 start_service "Session Daemon" \
     "python session-daemon/main.py" \
     ""
@@ -265,6 +270,13 @@ else
     echo "  ⚠️  Backend API Server: Starting up..."
 fi
 
+# Check Frontend HTTP Server
+if curl -s "http://127.0.0.1:8081/omega-new.html" >/dev/null 2>&1; then
+    echo "  ✅ Frontend HTTP Server: http://127.0.0.1:8081"
+else
+    echo "  ⚠️  Frontend HTTP Server: Starting up..."
+fi
+
 # Check Control Node
 if curl -s "http://127.0.0.1:7777/health" >/dev/null 2>&1; then
     echo "  ✅ Control Node: http://127.0.0.1:7777"
@@ -273,8 +285,8 @@ else
 fi
 
 # Check desktop app files
-if [ -f "control_node/desktop_app/omega-control-center.html" ]; then
-    echo "  ✅ Desktop App: control_node/desktop_app/omega-control-center.html"
+if [ -f "control_node/desktop_app/omega-new.html" ]; then
+    echo "  ✅ Desktop App: control_node/desktop_app/omega-new.html"
 else
     echo "  ❌ Desktop App: Missing"
 fi
@@ -290,8 +302,9 @@ echo "=============================================="
 echo ""
 echo "📊 Service Status:"
 echo "  • Backend API Server:    http://127.0.0.1:8443"
+echo "  • Frontend HTTP Server:  http://127.0.0.1:8081"
 echo "  • Control Node:          http://127.0.0.1:7777"
-echo "  • Desktop App:           file://$(pwd)/control_node/desktop_app/omega-control-center.html"
+echo "  • Desktop App:           http://127.0.0.1:8081/omega-new.html"
 echo "  • Metrics Endpoint:      http://127.0.0.1:8000/metrics"
 echo ""
 echo "🔧 Service PIDs:"
@@ -304,7 +317,7 @@ for pid in "${SERVICE_PIDS[@]}"; do
 done
 echo ""
 echo "📁 Key Files:"
-echo "  • Main Interface:        control_node/desktop_app/omega-control-center.html"
+echo "  • Main Interface:        control_node/desktop_app/omega-new.html"
 echo "  • Backend API:           backend/api_server.py"
 echo "  • Control Node:          control_node/main.py"
 echo "  • Configuration:         omega_v2_config.ini"
@@ -316,7 +329,7 @@ echo "  • Project:               SuperDesktop v2.0"
 echo "  • Repository:            https://github.com/Chandu00756/Superdesktop"
 echo ""
 echo "🎮 Usage Instructions:"
-echo "  1. Open desktop app in browser: control_node/desktop_app/omega-control-center.html"
+echo "  1. Open desktop app in browser: http://127.0.0.1:8081/omega-new.html"
 echo "  2. Access API documentation: http://127.0.0.1:8443/docs"
 echo "  3. View system metrics: http://127.0.0.1:8000/metrics"
 echo "  4. Monitor logs: tail -f logs/*.log"
@@ -371,15 +384,15 @@ trap cleanup INT TERM
 if command -v open >/dev/null 2>&1; then
     # macOS
     echo "🌐 Opening desktop app in browser..."
-    open "file://$(pwd)/control_node/desktop_app/omega-control-center.html" 2>/dev/null &
+    open "http://127.0.0.1:8081/omega-new.html" 2>/dev/null &
 elif command -v xdg-open >/dev/null 2>&1; then
     # Linux
     echo "🌐 Opening desktop app in browser..."
-    xdg-open "file://$(pwd)/control_node/desktop_app/omega-control-center.html" 2>/dev/null &
+    xdg-open "http://127.0.0.1:8081/omega-new.html" 2>/dev/null &
 elif command -v start >/dev/null 2>&1; then
     # Windows
     echo "🌐 Opening desktop app in browser..."
-    start "file://$(pwd)/control_node/desktop_app/omega-control-center.html" 2>/dev/null &
+    start "http://127.0.0.1:8081/omega-new.html" 2>/dev/null &
 fi
 
 echo "✅ SuperDesktop v2.0 is running successfully!"

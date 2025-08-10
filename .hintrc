@@ -8,7 +8,9 @@
       "default",
       {
         "ignore": [
-          "min-width: fit-content"
+          "min-width: fit-content",
+          "backdrop-filter",
+          "image-rendering: crisp-edges"
         ]
       }
     ]

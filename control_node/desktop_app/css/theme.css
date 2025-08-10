@@ -1,0 +1,75 @@
+/* Theme Variables */
+:root {
+    /* Primary Colors */
+    --color-primary: #00ffff;
+    --color-primary-dark: #00cccc;
+    --color-primary-light: #4dffff;
+    
+    /* Background Colors */
+    --bg-primary: #0a0a0a;
+    --bg-secondary: #1a1a1a;
+    --bg-surface: #2a2a2a;
+    --bg-elevated: #3a3a3a;
+    
+    /* Text Colors */
+    --text-primary: #ffffff;
+    --text-secondary: #cccccc;
+    --text-muted: #888888;
+    --text-inverse: #000000;
+    
+    /* Status Colors */
+    --color-success: #00ff88;
+    --color-warning: #ffaa00;
+    --color-error: #ff4444;
+    --color-info: #0088ff;
+    
+    /* Spacing */
+    --space-xs: 4px;
+    --space-sm: 8px;
+    --space-md: 16px;
+    --space-lg: 24px;
+    --space-xl: 32px;
+    --space-xxl: 48px;
+    
+    /* Typography */
+    --font-family-primary: 'Segoe UI', system-ui, sans-serif;
+    --font-family-mono: 'Cascadia Code', 'Fira Code', monospace;
+    --font-size-xs: 12px;
+    --font-size-sm: 14px;
+    --font-size-md: 16px;
+    --font-size-lg: 18px;
+    --font-size-xl: 24px;
+    --font-size-xxl: 32px;
+    
+    /* Effects */
+    --shadow-sm: 0 2px 4px rgba(0, 255, 255, 0.1);
+    --shadow-md: 0 4px 8px rgba(0, 255, 255, 0.15);
+    --shadow-lg: 0 8px 16px rgba(0, 255, 255, 0.2);
+    --border-radius: 4px;
+    --border-radius-lg: 8px;
+    
+    /* Transitions */
+    --transition-fast: 0.15s ease;
+    --transition-normal: 0.25s ease;
+    --transition-slow: 0.35s ease;
+}
+
+/* Dark Theme Overrides */
+[data-theme="dark"] {
+    --bg-primary: #000000;
+    --bg-secondary: #111111;
+    --bg-surface: #222222;
+    --bg-elevated: #333333;
+}
+
+/* Light Theme Overrides */
+[data-theme="light"] {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f5f5f5;
+    --bg-surface: #eeeeee;
+    --bg-elevated: #e0e0e0;
+    --text-primary: #000000;
+    --text-secondary: #333333;
+    --text-muted: #777777;
+    --text-inverse: #ffffff;
+}

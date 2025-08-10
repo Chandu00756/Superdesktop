@@ -1,0 +1,34 @@
+<!-- Tab Navigation Component -->
+<div class="tab-navigation">
+    <div class="tab-list">
+        <div class="tab-item active" data-tab="dashboard">
+            <i class="fas fa-tachometer-alt"></i>
+            <span>Dashboard</span>
+        </div>
+        <div class="tab-item" data-tab="sessions">
+            <i class="fas fa-desktop"></i>
+            <span>Sessions</span>
+        </div>
+        <div class="tab-item" data-tab="nodes">
+            <i class="fas fa-network-wired"></i>
+            <span>Nodes</span>
+        </div>
+        <div class="tab-item" data-tab="performance">
+            <i class="fas fa-chart-line"></i>
+            <span>Performance</span>
+        </div>
+        <div class="tab-item" data-tab="settings">
+            <i class="fas fa-cog"></i>
+            <span>Settings</span>
+        </div>
+    </div>
+    
+    <div class="tab-controls">
+        <button class="tab-add" onclick="addNewTab()" title="Add New Tab">
+            <i class="fas fa-plus"></i>
+        </button>
+        <button class="tab-menu" onclick="openTabMenu()" title="Tab Menu">
+            <i class="fas fa-ellipsis-v"></i>
+        </button>
+    </div>
+</div>

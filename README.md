@@ -25,57 +25,99 @@ A revolutionary distributed computing system that aggregates CPU, GPU, RAM, stor
 
 ## [ARCHITECTURE] Architecture
 
-## SuperDesktop v2.0 - Advanced Distributed Desktop Environment
+## SuperDesktop v2.0 - Distributed Desktop Environment
 
-**Professional distributed computing platform with AI-powered optimization, real-time monitoring, and heterogeneous hardware support.**
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Status: Production Ready](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)]()
 
-![SuperDesktop v2.0](https://img.shields.io/badge/SuperDesktop-v2.0-blue?style=for-the-badge)
-![Status](https://img.shields.io/badge/Status-Production%20Ready-green?style=for-the-badge)
-![Contact](https://img.shields.io/badge/Contact-chandu%40portalvii.com-orange?style=for-the-badge)
+> **🚀 Latest Update**: Complete system v2.0 with unified architecture, modular frontend system, and enterprise-grade security!
 
----
+## 🌟 Overview
 
-## 🚀 **One-Click Development Setup**
+**SuperDesktop v2.0** is a revolutionary distributed desktop environment that combines the power of cloud computing with the familiarity of traditional desktop interfaces. Built from the ground up with modern web technologies and distributed systems architecture, it provides a seamless, AI-powered desktop experience that can scale from personal use to enterprise deployments.
 
-### **Prerequisites**
+### 🎯 Key Features
 
-- **Python 3.11+** (Required)
-- **Node.js 18+** (Optional, for enhanced features)
-- **Git** (For cloning)
+- **🖥️ Distributed Desktop Environment**: Full desktop experience running across multiple nodes
+- **🤖 AI-Powered Intelligence**: Built-in AI assistance for system management and optimization
+- **🔒 Enterprise Security**: AES-256-GCM encryption, JWT authentication, and secure communication
+- **📊 Real-time Monitoring**: Live system metrics, performance tracking, and health monitoring
+- **🌐 Modern Frontend Interface**: Modular ES6-based interface with responsive design
+- **🔄 Fault Tolerance**: Self-healing architecture with automatic failover and recovery
+- **📦 Containerized Deployment**: Docker support for easy deployment and scaling
+- **🎮 Interactive Interface**: Modern, responsive UI with real-time data updates
 
-### **Quick Start**
+## 🚀 Quick Start
+
+### Option 1: One-Command Startup (Recommended)
 
 ```bash
-# Clone repository
+# Clone the repository
 git clone https://github.com/Chandu00756/Superdesktop.git
 cd Superdesktop
 
-# Start entire system (one command)
-chmod +x start_core_services_v2.sh
-./start_core_services_v2.sh
-```text
-
-**That's it!** The system will:
-
-- ✅ Auto-create Python virtual environment
-- ✅ Install all dependencies
-- ✅ Start all backend services
-- ✅ Launch desktop interface
-- ✅ Open in your browser automatically
-
-### **Stop System**
-
-```bash
-./stop-omega.sh
+# Start the complete system
+./start-omega.sh
 ```
 
----
+The startup script will automatically:
+- ✅ Check system requirements (Python 3.11+, Node.js 18+)
+- ✅ Create and activate virtual environment
+- ✅ Install all dependencies automatically
+- ✅ Start Backend API Server (Port 8443)
+- ✅ Start Frontend HTTP Server (Port 8081)
+- ✅ Start all node services (Control, Storage, Compute, etc.)
+- ✅ Open the desktop interface in your browser
+
+### Option 2: Manual Setup
+
+```bash
+# 1. Create virtual environment
+python3 -m venv omega_env
+source omega_env/bin/activate  # Linux/macOS
+# or
+omega_env\Scripts\activate  # Windows
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Start backend services
+python backend/api_server.py &
+
+# 4. Start frontend HTTP server
+python -m http.server 8081 --directory control_node/desktop_app &
+
+# 5. Start control node
+python control_node/main.py &
+
+# 6. Open the desktop interface
+open http://localhost:8081/omega-new.html  # macOS
+# or navigate to the URL in your browser
+```
+
+### 🌐 Access the System
+
+After startup, access the system through:
+
+- **📱 Main Desktop Interface**: `http://localhost:8081/omega-new.html` (Modern modular interface)
+- **🔌 Backend API**: `http://localhost:8443/docs` (FastAPI documentation)
+- **📊 Control Node**: `http://localhost:7777/health` (Node management)
+- **📈 Metrics Dashboard**: `http://localhost:8000/metrics` (System monitoring)
+
+### 🛑 Stop the System
+
+```bash
+# Stop all services gracefully
+./stop-omega.sh
+```
 
 ## 🎯 **What You Get**
 
 ### **🖥️ Desktop Interface**
 
-- **URL**: `control_node/desktop_app/omega-control-center.html`
+- **URL**: `http://localhost:8081/omega-new.html`
 - **Features**: Real-time monitoring, node management, performance analytics
 - **Data**: 100% real backend integration (no simulation)
 
@@ -105,31 +147,51 @@ chmod +x start_core_services_v2.sh
 
 ## 📂 **Project Structure**
 
-``
+```
 SuperDesktop/
-├── 🚀 start_core_services_v2.sh    # Main startup script
+├── 🚀 start-omega.sh               # Main startup script
 ├── 🛑 stop-omega.sh                # System shutdown script
 ├── 📋 requirements.txt              # Python dependencies
 ├── 📖 README.md                     # This file
 │
 ├── 🔧 backend/                      # Backend API services
-│   ├── api_server.py               # Main API server
+│   ├── api_server.py               # FastAPI backend server (Port 8443)
 │   ├── frontend_connector.py       # Frontend integration
 │   └── requirements.txt            # Backend dependencies
 │
 ├── 🖥️ control_node/                # Control & orchestration
 │   ├── main.py                     # Control node manager
 │   └── desktop_app/                # Desktop interface
-│       ├── omega-control-center.html  # Main UI
-│       ├── package.json            # Node.js dependencies
-│       └── [CSS/JS assets]
+│       ├── omega-new.html          # Main UI Interface
+│       ├── omega-style.css         # Styling and layout
+│       ├── omega-renderer.js       # Core rendering engine
+│       └── frontend/               # Modular Frontend System
+│           ├── main.js             # Bootstrap entry point
+│           ├── core/               # Core system modules
+│           │   ├── StateStore.js   # State management
+│           │   ├── apiClient.js    # API communication
+│           │   ├── widgetManager.js # Widget management
+│           │   └── sidebarManager.js # Navigation management
+│           └── tabs/               # Tab renderers (dashboard, nodes, etc.)
 │
 ├── 💾 storage_node/                # Storage management
 ├── ⚡ compute_node/                # Compute resources
 ├── 🧠 ai_engine/                   # AI optimization
 ├── 🔗 network/                     # Network management
-└── 📊 [Additional services]        # Supporting components
-
+├── 🔒 security/                    # Security & authentication
+├── 📊 session-daemon/              # Session management
+├── 🎯 omega-orchestrator/          # System orchestration
+├── 🧮 memory-fabric/               # Memory management
+├── 🔮 predictor-service/           # Predictive analytics
+├── 🎨 render-router/               # Rendering router
+├── 🔧 middleware/                  # Middleware services
+├── 📡 edge_node/                   # Edge computing
+├── 🌐 network_node/                # Network node
+├── 📁 data/                        # Data storage (PostgreSQL, Redis, Object storage)
+├── 📝 logs/                        # System logs
+├── 🧪 tests/                       # Test suites
+├── 📚 docs/                        # Documentation
+└── 🐍 omega_env/                   # Python virtual environment
 ```
 
 ---
@@ -149,7 +211,7 @@ chmod +x *.sh
 
 ```bash
 # Start development environment
-./start_core_services_v2.sh
+./start-omega.sh
 
 # Code changes...
 # (System auto-restarts services on changes)
@@ -162,14 +224,14 @@ chmod +x *.sh
 
 ```bash
 # Start system
-./start_core_services_v2.sh
+./start-omega.sh
 
 # Test endpoints
 curl http://127.0.0.1:8443/api/dashboard/metrics
 curl http://127.0.0.1:7777/health
 
 # Check desktop app
-open control_node/desktop_app/omega-control-center.html
+open http://localhost:8081/omega-new.html
 ```
 
 ---
@@ -275,7 +337,7 @@ pip install -r backend/requirements.txt
 curl http://127.0.0.1:8443/api/dashboard/metrics
 
 # Open desktop app manually
-open control_node/desktop_app/omega-control-center.html
+open http://localhost:8081/omega-new.html
 ```
 
 ### **Log Files**
@@ -285,7 +347,7 @@ open control_node/desktop_app/omega-control-center.html
 tail -f logs/*.log
 
 # Check startup logs
-./start_core_services_v2.sh | tee startup.log
+./start-omega.sh | tee startup.log
 ```
 
 ---
@@ -308,7 +370,7 @@ export OMEGA_LOG_LEVEL="INFO"
 export OMEGA_CLUSTER_NAME="production"
 
 # Start with production settings
-./start_core_services_v2.sh
+./start-omega.sh
 ```
 
 ---

@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omega SuperDesktop v2.0 - Advanced Control Center</title>
+    
+    <!-- External Dependencies -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <style>
+        /* Ultra-Advanced Design System */
+        :root {
+            --omega-black: #000000;
+            --omega-dark-1: #0a0a0a;
+            --omega-dark-2: #111111;
+            --omega-dark-3: #1a1a1a;
+            --omega-dark-4: #222222;
+            --omega-gray-1: #333333;
+            --omega-gray-2: #444444;
+            --omega-light-1: #999999;
+            --omega-white: #ffffff;
+            --omega-cyan: #00f5ff;
+            --omega-green: #00ff7f;
+            --omega-blue: #0066cc;
+            --omega-red: #ff4444;
+            --omega-yellow: #ffaa00;
+            --menu-height: 32px;
+            --sidebar-width: 280px;
+            --taskbar-height: 40px;
+            --space-xs: 4px;
+            --space-sm: 8px;
+            --space-md: 12px;
+            --space-lg: 16px;
+            --space-xl: 24px;
+            --font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
+            --font-size-xs: 10px;
+            --font-size-sm: 11px;
+            --font-size-base: 13px;
+            --font-size-md: 14px;
+            --font-size-lg: 16px;
+            --transition-fast: 0.15s ease;
+            --glow-sm: 0 0 4px var(--omega-cyan);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; overflow: hidden; font-family: var(--font-mono); background: var(--omega-black); color: var(--omega-white); }
+
+        .omega-desktop {
+            display: grid;
+            grid-template-areas: "menu menu menu" "sidebar main-content widgets" "taskbar taskbar taskbar";
+            grid-template-rows: var(--menu-height) 1fr var(--taskbar-height);
+            grid-template-columns: var(--sidebar-width) 1fr 260px;
+            height: 100vh; width: 100vw; position: fixed; top: 0; left: 0;
+            overflow: hidden;
+        }
+
+        .omega-menu {
+            grid-area: menu; background: var(--omega-dark-2); border-bottom: 1px solid var(--omega-gray-1);
+            display: flex; align-items: center; padding: 0 var(--space-md); font-size: var(--font-size-sm); z-index: 1000;
+        }
+
+        .omega-logo { color: var(--omega-cyan); font-weight: bold; margin-right: var(--space-xl); font-size: var(--font-size-md); }
+        .menu-items { display: flex; gap: var(--space-lg); }
+        .menu-item { padding: var(--space-xs) var(--space-sm); cursor: pointer; border-radius: 2px; transition: var(--transition-fast); color: var(--omega-light-1); }
+        .menu-item:hover { background: var(--omega-gray-1); color: var(--omega-white); }
+        .menu-right { margin-left: auto; display: flex; align-items: center; gap: var(--space-md); font-size: var(--font-size-sm); }
+
+        .omega-sidebar {
+            grid-area: sidebar; background: var(--omega-dark-2); border-right: 1px solid var(--omega-gray-1);
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+
+        .sidebar-content { flex: 1; overflow-y: auto; padding: var(--space-md); }
+        .sidebar-section { margin-bottom: var(--space-lg); }
+        .sidebar-title { font-size: var(--font-size-sm); font-weight: bold; color: var(--omega-cyan); margin-bottom: var(--space-sm); display: flex; align-items: center; gap: var(--space-sm); }
+        .sidebar-item { padding: var(--space-sm); margin-bottom: var(--space-xs); background: var(--omega-dark-3); border: 1px solid var(--omega-gray-2); border-radius: 2px; font-size: var(--font-size-xs); cursor: pointer; transition: var(--transition-fast); }
+        .sidebar-item:hover { border-color: var(--omega-cyan); background: var(--omega-dark-4); }
+
+        .omega-main { 
+            grid-area: main-content; background: var(--omega-dark-1); position: relative; 
+            overflow: hidden; display: flex; flex-direction: column; 
+            min-width: 0; /* Important for flex child overflow */
+        }
+
+        .tab-navigation {
+            display: flex; background: var(--omega-dark-2); border-bottom: 1px solid var(--omega-gray-1);
+            padding: 0; margin: 0; flex-wrap: nowrap; overflow-x: auto; flex-shrink: 0;
+        }
+
+        .tab-btn {
+            background: transparent; border: none; color: var(--omega-light-1); padding: var(--space-sm) var(--space-md);
+            cursor: pointer; transition: all var(--transition-fast); display: flex; align-items: center; gap: var(--space-xs);
+            font-family: var(--font-mono); font-size: var(--font-size-sm); border-bottom: 2px solid transparent;
+            min-width: 120px; justify-content: center; white-space: nowrap;
+        }
+
+        .tab-btn:hover { background: var(--omega-dark-3); color: var(--omega-cyan); }
+        .tab-btn.active { background: var(--omega-dark-1); color: var(--omega-cyan); border-bottom-color: var(--omega-cyan); box-shadow: var(--glow-sm); }
+
+        .tab-container { 
+            flex: 1; overflow: hidden; position: relative; background: var(--omega-dark-1); 
+            display: flex; flex-direction: column; min-height: 0; /* Important for flex overflow */
+        }
+        #tab-root { 
+            flex: 1; overflow: auto; padding: var(--space-md); background: var(--omega-dark-1); 
+            width: 100%; height: 100%; box-sizing: border-box;
+        }
+
+        .floating-widgets {
+            grid-area: widgets; padding: var(--space-md); display: flex; flex-direction: column; gap: var(--space-md);
+            overflow-y: auto; overflow-x: hidden; background: var(--omega-dark-1); border-left: 1px solid var(--omega-gray-1);
+            width: 260px; min-width: 260px; max-width: 260px;
+        }
+
+        .widget { 
+            background: var(--omega-dark-3); border: 1px solid var(--omega-gray-1); border-radius: 4px; 
+            min-height: 120px; max-height: 200px; transition: var(--transition-fast); 
+            width: 100%; box-sizing: border-box; flex-shrink: 0;
+        }
+        .widget:hover { border-color: var(--omega-cyan); box-shadow: var(--glow-sm); }
+        .widget-header { 
+            padding: var(--space-sm); border-bottom: 1px solid var(--omega-gray-2); 
+            display: flex; align-items: center; justify-content: space-between; 
+            font-weight: bold; font-size: var(--font-size-sm); background: var(--omega-dark-4);
+            flex-shrink: 0;
+        }
+        .widget-content { 
+            padding: var(--space-sm); font-size: var(--font-size-sm); 
+            overflow-y: auto; overflow-x: hidden; 
+            height: calc(100% - 40px); /* Account for header height */
+            box-sizing: border-box;
+        }
+        .metric-item { display: flex; justify-content: space-between; padding: var(--space-xs) 0; border-bottom: 1px solid var(--omega-gray-2); }
+        .metric-value { font-weight: bold; color: var(--omega-cyan); }
+
+        .omega-taskbar { grid-area: taskbar; background: var(--omega-dark-2); border-top: 1px solid var(--omega-gray-1); display: flex; align-items: center; padding: 0 var(--space-md); gap: var(--space-sm); }
+        .taskbar-start { background: linear-gradient(135deg, var(--omega-cyan), var(--omega-blue)); color: var(--omega-black); padding: var(--space-sm) var(--space-md); border-radius: 2px; font-weight: bold; cursor: pointer; transition: var(--transition-fast); font-size: var(--font-size-sm); }
+        .taskbar-start:hover { transform: scale(1.05); box-shadow: var(--glow-sm); }
+        .taskbar-items { display: flex; gap: var(--space-xs); flex: 1; }
+        .taskbar-system { display: flex; align-items: center; gap: var(--space-md); font-size: var(--font-size-sm); }
+        .system-indicator { display: flex; align-items: center; gap: var(--space-xs); color: var(--omega-light-1); }
+
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--omega-dark-3); }
+        ::-webkit-scrollbar-thumb { background: var(--omega-gray-1); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--omega-gray-2); }
+
+        .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--omega-cyan); }
+        .spinner { border: 2px solid var(--omega-gray-1); border-top: 2px solid var(--omega-cyan); border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin-right: var(--space-sm); }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .widget-action-btn {
+            width: 100%; padding: 6px; margin-bottom: 3px; background: var(--omega-dark-4); color: var(--omega-white);
+            border: 1px solid var(--omega-gray-1); border-radius: 2px; cursor: pointer; display: flex; align-items: center;
+            gap: 6px; font-family: var(--font-mono); font-size: var(--font-size-xs); transition: var(--transition-fast);
+            box-sizing: border-box; flex-shrink: 0;
+        }
+        .widget-action-btn:hover { border-color: var(--omega-cyan); background: var(--omega-dark-3); }
+        .widget-action-btn:first-child { background: var(--omega-cyan); color: var(--omega-black); border: none; }
+        .widget-action-btn:first-child:hover { background: var(--omega-blue); }
+    </style>
+</head>
+<body>
+    <div class="omega-desktop">
+        <!-- Menu Bar -->
+        <div class="omega-menu">
+            <div class="omega-logo">OMEGA v2.0</div>
+            <div class="menu-items">
+                <div class="menu-item">File</div>
+                <div class="menu-item">Edit</div>
+                <div class="menu-item">View</div>
+                <div class="menu-item">Tools</div>
+                <div class="menu-item">Help</div>
+            </div>
+            <div class="menu-right">
+                <div class="system-indicator">
+                    <i class="fas fa-wifi"></i>
+                    <span>Connected</span>
+                </div>
+                <div class="system-indicator">
+                    <i class="fas fa-battery-three-quarters"></i>
+                    <span>78%</span>
+                </div>
+                <div class="system-indicator">
+                    <span id="current-time">--:--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar - Will be populated by sidebar manager -->
+        <div class="omega-sidebar" id="omega-sidebar">
+            <div class="sidebar-content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <span>Loading sidebar...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content Area -->
+        <div class="omega-main">
+            <!-- Tab Navigation -->
+            <div class="tab-navigation">
+                <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">
+                    <i class="fas fa-tachometer-alt"></i>
+                    <span>Dashboard</span>
+                </button>
+                <button class="tab-btn" data-tab="nodes" onclick="switchTab('nodes')">
+                    <i class="fas fa-server"></i>
+                    <span>Nodes</span>
+                </button>
+                <button class="tab-btn" data-tab="sessions" onclick="switchTab('sessions')">
+                    <i class="fas fa-desktop"></i>
+                    <span>Sessions</span>
+                </button>
+                <button class="tab-btn" data-tab="network" onclick="switchTab('network')">
+                    <i class="fas fa-network-wired"></i>
+                    <span>Network</span>
+                </button>
+                <button class="tab-btn" data-tab="performance" onclick="switchTab('performance')">
+                    <i class="fas fa-chart-bar"></i>
+                    <span>Performance</span>
+                </button>
+                <button class="tab-btn" data-tab="security" onclick="switchTab('security')">
+                    <i class="fas fa-shield-alt"></i>
+                    <span>Security</span>
+                </button>
+                <button class="tab-btn" data-tab="plugins" onclick="switchTab('plugins')">
+                    <i class="fas fa-puzzle-piece"></i>
+                    <span>Plugins</span>
+                </button>
+                <button class="tab-btn" data-tab="ai-hub" onclick="switchTab('ai-hub')">
+                    <i class="fas fa-robot"></i>
+                    <span>AI Hub</span>
+                </button>
+                <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">
+                    <i class="fas fa-cog"></i>
+                    <span>Settings</span>
+                </button>
+            </div>
+
+            <!-- Tab Container -->
+            <div class="tab-container">
+                <div id="tab-root">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>Loading Omega Control Center...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel Widgets - Will be populated by widget manager -->
+        <div class="floating-widgets" id="floating-widgets">
+            <div class="loading">
+                <div class="spinner"></div>
+                <span>Loading widgets...</span>
+            </div>
+        </div>
+
+        <!-- Taskbar -->
+        <div class="omega-taskbar">
+            <div class="taskbar-start">START</div>
+            <div class="taskbar-items">
+                <div class="taskbar-item active">Control Center</div>
+                <div class="taskbar-item">File Manager</div>
+                <div class="taskbar-item">Terminal</div>
+            </div>
+            <div class="taskbar-system">
+                <div class="system-indicator">
+                    <i class="fas fa-volume-up"></i>
+                </div>
+                <div class="system-indicator">
+                    <i class="fas fa-wifi"></i>
+                    <span>5G</span>
+                </div>
+                <div class="system-indicator">
+                    <i class="fas fa-battery-three-quarters"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load the main application -->
+    <script type="module">
+        import './frontend/main.js';
+        
+        // Add a simple check to make sure things are working
+        console.log('[Omega] HTML loaded, modules importing...');
+        
+        // Fallback initialization check
+        setTimeout(() => {
+            if (!window.state || !window.switchTab) {
+                console.error('[Omega] Failed to initialize, retrying...');
+                location.reload();
+            }
+        }, 3000);
+        
+        // Update clock
+        function updateClock() {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-US', { 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit' 
+            });
+            const clockEl = document.getElementById('current-time');
+            if (clockEl) clockEl.textContent = timeStr;
+        }
+        
+        updateClock();
+        setInterval(updateClock, 1000);
+    </script>
+
+    <!-- Fallback for older browsers -->
+    <script nomodule>
+        document.body.innerHTML = `
+            <div style="display: flex; align-items: center; justify-content: center; height: 100vh; background: #000; color: #fff; font-family: monospace; text-align: center;">
+                <div>
+                    <h1 style="color: #ff4444;">⚠️ Browser Not Supported</h1>
+                    <p>Omega SuperDesktop v2.0 requires a modern browser with ES6 module support.</p>
+                    <p>Please update your browser to Chrome 61+, Firefox 54+, Safari 10.1+, or Edge 16+.</p>
+                    <button onclick="location.reload()" style="padding: 10px 20px; background: #00ffff; color: #000; border: none; border-radius: 4px; cursor: pointer; margin-top: 20px;">Retry</button>
+                </div>
+            </div>
+        `;
+    </script>
+</body>
+</html>
