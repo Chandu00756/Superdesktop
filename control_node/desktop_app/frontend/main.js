@@ -9,6 +9,7 @@ import { renderPlugins } from './tabs/plugins.js';
 import { renderAIHub } from './tabs/ai-hub.js';
 import { renderSettings } from './tabs/settings.js';
 import StateStore from './core/StateStore.js';
+import { VirtualDesktopManager } from './core/virtualDesktop.js';
 import { ApiClient } from './core/apiClient.js';
 import { notify } from './core/notify.js';
 import { SidebarManager } from './core/sidebarManager.js';
@@ -57,6 +58,7 @@ console.log('[Omega] State initialized:', window.state);
 console.log('[Omega] State.data:', window.state.data);
 window.api = new ApiClient();
 window.notify = notify;
+window.vd = new VirtualDesktopManager(window.api);
 
 // Tab registry
 const tabs = {

@@ -151,6 +151,12 @@ export OMEGA_NODE_ID="omega-control-$(hostname)-$(date +%s)"
 export OMEGA_LOG_LEVEL="INFO"
 export OMEGA_CORE_SERVICES_ENABLED="true"
 export OMEGA_CLUSTER_NAME="superdesktop-cluster-v2"
+# Default to HTTP for local development to avoid browser self-signed TLS issues.
+export OMEGA_ENABLE_TLS="0"
+# Virtual Desktop image selection and pull policy
+# Set OMEGA_DEFAULT_VD_IMAGE to override the default container image, e.g. "dorowu/ubuntu-desktop-lxde-vnc"
+# OMEGA_VD_PULL_POLICY: Always|IfNotPresent|Never (default IfNotPresent)
+export OMEGA_VD_PULL_POLICY="IfNotPresent"
 
 # Generate temporary SSL certificates if not present
 if [ ! -f "security/certs/control_node.crt" ]; then
@@ -206,14 +212,14 @@ start_service() {
     cd "$SCRIPT_DIR"
 }
 
-# 1. Start Backend API Server
+# 1. Start Backend API Server (TLS-aware, proper cwd)
 start_service "Backend API Server" \
-    "python backend/api_server.py" \
-    ""
+    "python start_backend.py" \
+    "backend"
 
-# 2. Start Frontend HTTP Server
+# 2. Start Frontend HTTP Server (serve from desktop_app dir, bind to 127.0.0.1)
 start_service "Frontend HTTP Server" \
-    "python -m http.server 8081 --directory control_node/desktop_app" \
+    "cd control_node/desktop_app && python -m http.server 8081 --bind 127.0.0.1" \
     ""
 
 # 3. Start Control Node
@@ -263,9 +269,9 @@ sleep 5
 echo ""
 echo "🩺 Performing health checks..."
 
-# Check Backend API
-if curl -s "http://127.0.0.1:8443/api/dashboard/metrics" >/dev/null 2>&1; then
-    echo "  ✅ Backend API Server: http://127.0.0.1:8443"
+# Check Backend API (prefer HTTP in dev unless TLS enabled)
+if curl -s "http://127.0.0.1:8443/docs" >/dev/null 2>&1 || curl -sk "https://127.0.0.1:8443/docs" >/dev/null 2>&1; then
+    echo "  ✅ Backend API Server: 127.0.0.1:8443"
 else
     echo "  ⚠️  Backend API Server: Starting up..."
 fi

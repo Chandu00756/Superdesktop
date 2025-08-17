@@ -21,6 +21,7 @@ export class WidgetManager {
     render() {
         console.log('[WidgetManager] Rendering widgets...');
         const widgetConfigs = [
+            { id: 'active-desktop', title: 'Active Desktop', icon: 'display', type: 'active-desktop' },
             { id: 'quick-actions', title: 'Quick Actions', icon: 'bolt', type: 'actions' },
             { id: 'resource-usage', title: 'Resource Usage', icon: 'chart-pie', type: 'resources' },
             { id: 'recent-activity', title: 'Recent Activity', icon: 'history', type: 'activity' },
@@ -50,6 +51,8 @@ export class WidgetManager {
 
     renderWidgetContent(type) {
         switch (type) {
+            case 'active-desktop':
+                return this.renderActiveDesktop();
             case 'actions':
                 return this.renderQuickActions();
             case 'resources':
@@ -63,6 +66,31 @@ export class WidgetManager {
             default:
                 return '<div class="loading"><div class="spinner"></div>Loading...</div>';
         }
+    }
+
+    renderActiveDesktop() {
+        const vd = window.vd?.getCurrent?.();
+        if (!vd) {
+            return `
+                <div style="font-size: var(--font-size-xs); color: var(--omega-light-1);">
+                    No active desktop
+                </div>
+                <div style="display:flex; gap:6px; margin-top:8px;">
+                    <button class="widget-action-btn" data-action="open-sessions"><i class="fas fa-desktop"></i> Open Sessions</button>
+                </div>
+            `;
+        }
+        const shortId = vd.sessionId ? (vd.sessionId.slice(0, 10) + '…') : '--';
+        return `
+            <div style="display:flex; flex-direction:column; gap:6px; font-size: var(--font-size-xs);">
+                <div><b>Session:</b> ${shortId}</div>
+                <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><b>URL:</b> ${vd.url}</div>
+            </div>
+            <div style="display:flex; gap:6px; margin-top:8px;">
+                <button class="widget-action-btn" data-action="reopen-desktop"><i class="fas fa-external-link-alt"></i> Reopen</button>
+                <button class="widget-action-btn" data-action="disconnect-desktop"><i class="fas fa-stop"></i> Disconnect</button>
+            </div>
+        `;
     }
 
     renderQuickActions() {
@@ -183,6 +211,26 @@ export class WidgetManager {
         this.container.querySelectorAll('.widget-action-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const action = e.currentTarget.dataset.action;
+                // Route desktop actions
+                if (action === 'reopen-desktop') {
+                    const vd = window.vd?.getCurrent?.();
+                    if (vd) {
+                        window.switchTab?.('sessions');
+                        // try reconnect in current session view
+                        setTimeout(() => window.connectDesktop?.(vd.sessionId), 150);
+                    } else {
+                        window.notify?.('No active desktop to reopen', 'warning');
+                    }
+                    return;
+                }
+                if (action === 'disconnect-desktop') {
+                    window.disconnectDesktop?.();
+                    return;
+                }
+                if (action === 'open-sessions') {
+                    window.switchTab?.('sessions');
+                    return;
+                }
                 this.handleQuickAction(action, e.currentTarget);
             });
         });
@@ -300,6 +348,10 @@ export class WidgetManager {
         this.updateInterval = setInterval(() => {
             this.updateWidgets();
         }, 3000);
+        // Subscribe to active desktop changes to update widget immediately
+        if (window.vd?.onChange) {
+            window.vd.onChange(() => this.updateActiveDesktopWidget());
+        }
     }
 
     updateWidgets() {
@@ -307,6 +359,7 @@ export class WidgetManager {
         this.updateResourceUsage();
         this.updateNetworkStatus();
         this.updateRecentActivity();
+    this.updateActiveDesktopWidget();
     }
 
     updateResourceUsage() {
@@ -327,6 +380,14 @@ export class WidgetManager {
         const content = document.getElementById('widget-content-recent-activity');
         if (content) {
             content.innerHTML = this.renderRecentActivity();
+        }
+    }
+
+    updateActiveDesktopWidget() {
+        const content = document.getElementById('widget-content-active-desktop');
+        if (content) {
+            content.innerHTML = this.renderActiveDesktop();
+            this.attachEventListeners();
         }
     }
 

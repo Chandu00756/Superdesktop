@@ -13,6 +13,14 @@ export function renderSecurity(root, state) {
       <div class="security-status-header">
         <div class="security-overview">
           <div class="security-metric">
+            <i class="fas fa-user-shield"></i>
+            <span>Signed in: <strong id="whoami-user">loading...</strong></span>
+          </div>
+          <div class="security-metric">
+            <i class="fas fa-id-badge"></i>
+            <span>Roles: <strong id="whoami-roles">-</strong></span>
+          </div>
+          <div class="security-metric">
             <i class="fas fa-shield-alt"></i>
             <span>Security Level: <strong class="security-level high">HIGH</strong></span>
           </div>
@@ -33,6 +41,10 @@ export function renderSecurity(root, state) {
           <button onclick="runSecurityScan()" class="security-btn primary">
             <i class="fas fa-search"></i>
             Security Scan
+          </button>
+          <button onclick="refreshWhoami()" class="security-btn">
+            <i class="fas fa-sync"></i>
+            Refresh Identity
           </button>
           <button onclick="generateSecurityReport()" class="security-btn">
             <i class="fas fa-file-shield"></i>
@@ -208,8 +220,21 @@ export function renderSecurity(root, state) {
                 <i class="fas fa-plus"></i>
                 Add User
               </button>
+              <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+                <input id="rbac-username" placeholder="username" class="user-search" style="width:140px;">
+                <input id="rbac-role" placeholder="role (e.g., admin)" class="user-search" style="width:140px;">
+                <button onclick="assignRoleUI()" class="user-btn">
+                  <i class="fas fa-user-plus"></i>
+                  Assign Role
+                </button>
+                <button onclick="removeRoleUI()" class="user-btn">
+                  <i class="fas fa-user-minus"></i>
+                  Remove Role
+                </button>
+              </div>
             </div>
           </div>
+          <div id="rbac-banner" style="display:none; margin: 8px 0; padding: 8px; border-radius: 6px;"></div>
           <div class="users-table-container">
             <table class="users-table">
               <thead>
@@ -368,6 +393,70 @@ export function renderSecurity(root, state) {
   renderFirewallActivity(state);
   renderAuditLog(state);
   renderPoliciesList(state);
+
+  // RBAC helpers bound to this render context
+  function showBanner(msg, isError=false) {
+    const el = root.querySelector('#rbac-banner');
+    if (!el) return;
+    el.style.display = 'block';
+    el.textContent = msg;
+    el.style.background = isError ? '#ffe6e6' : '#e6ffea';
+    el.style.border = `1px solid ${isError ? '#ffb3b3' : '#b3ffcc'}`;
+    el.style.color = '#333';
+    setTimeout(() => {
+      el.style.display = 'none';
+    }, 3500);
+  }
+
+  async function refreshWhoami() {
+    const userEl = root.querySelector('#whoami-user');
+    const rolesEl = root.querySelector('#whoami-roles');
+    try {
+      userEl.textContent = 'loading...';
+      rolesEl.textContent = '-';
+  const info = await window.api?.whoami?.();
+      userEl.textContent = info?.user || 'unknown';
+      rolesEl.textContent = Array.isArray(info?.roles) ? (info.roles.join(', ') || 'none') : 'none';
+    } catch (e) {
+      userEl.textContent = 'error';
+      rolesEl.textContent = '—';
+      showBanner(`Failed to load identity: ${e?.message || e}`, true);
+    }
+  }
+
+  async function assignRoleUI() {
+    const u = root.querySelector('#rbac-username')?.value?.trim();
+    const r = root.querySelector('#rbac-role')?.value?.trim();
+    if (!u || !r) return showBanner('Username and role required.', true);
+    try {
+  await window.api?.assignRole?.(u, r);
+      showBanner(`Assigned role '${r}' to ${u}.`);
+      refreshWhoami();
+    } catch (e) {
+      showBanner(`Assign failed: ${e?.message || e}`, true);
+    }
+  }
+
+  async function removeRoleUI() {
+    const u = root.querySelector('#rbac-username')?.value?.trim();
+    const r = root.querySelector('#rbac-role')?.value?.trim();
+    if (!u || !r) return showBanner('Username and role required.', true);
+    try {
+  await window.api?.removeRole?.(u, r);
+      showBanner(`Removed role '${r}' from ${u}.`);
+      refreshWhoami();
+    } catch (e) {
+      showBanner(`Remove failed: ${e?.message || e}`, true);
+    }
+  }
+
+  // expose for inline onclick handlers
+  window.refreshWhoami = refreshWhoami;
+  window.assignRoleUI = assignRoleUI;
+  window.removeRoleUI = removeRoleUI;
+
+  // initial identity fetch
+  refreshWhoami();
 }
 
 function renderSecurityEvents(state) {

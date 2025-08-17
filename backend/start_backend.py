@@ -28,7 +28,7 @@ def check_dependencies():
 def start_backend():
     """Start the backend API server"""
     print("Starting Omega Control Center Backend...")
-    print("API Server will be available at: http://127.0.0.1:8443")
+    print("API Server will be available at: https://127.0.0.1:8443 (if TLS certs found), else http")
     print("Press Ctrl+C to stop the server")
     
     # Set up logging
@@ -41,13 +41,28 @@ def start_backend():
     from api_server import app
     import uvicorn
     
+    # TLS is disabled by default for local development to avoid self-signed cert issues in the browser.
+    # To enable TLS, set OMEGA_ENABLE_TLS=1 and provide cert/key files (via env or default paths).
+    enable_tls = os.environ.get('OMEGA_ENABLE_TLS', '0') in ('1', 'true', 'yes', 'on')
+    cert_env = os.environ.get('OMEGA_SSL_CERT')
+    key_env = os.environ.get('OMEGA_SSL_KEY')
+    cert_default = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'security', 'certs', 'control_node.crt'))
+    key_default = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'security', 'certs', 'control_node.key'))
+    cert_file = None
+    key_file = None
+    if enable_tls:
+        cert_file = cert_env if cert_env and os.path.exists(cert_env) else (cert_default if os.path.exists(cert_default) else None)
+        key_file = key_env if key_env and os.path.exists(key_env) else (key_default if os.path.exists(key_default) else None)
+
     uvicorn.run(
         app,
         host="127.0.0.1",
         port=8443,
         reload=False,
         access_log=True,
-        log_level="info"
+        log_level="info",
+        ssl_certfile=cert_file,
+        ssl_keyfile=key_file
     )
 
 if __name__ == "__main__":

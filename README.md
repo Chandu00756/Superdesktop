@@ -1,10 +1,59 @@
-# Omega Super Desktop Console Prototype v2.0 
+# Virtual Desktop Sessions (NoVNC over VNC)
+
+This version adds a production-ready Virtual Desktop under the Sessions tab.
+
+Key points:
+
+- Backend secure API on <https://127.0.0.1:8443> under `/api/secure/*`.
+- Handshake endpoint: `POST /api/secure/session/start` for AES-256-GCM session bootstrap.
+- Create desktop: `POST /api/secure/vd/create` with JSON body `{ user_id, os_image, cpu_cores, memory_gb }`.
+- Get connection URL: `GET /api/secure/vd/{session_id}/url` returns a noVNC URL.
+- Pause/Resume: `POST /api/secure/vd/{session_id}/pause` and `POST /api/secure/vd/{session_id}/resume`.
+- Terminate: `DELETE /api/secure/vd/{session_id}`.
+
+Snapshots and RDP:
+
+- Snapshot: `POST /api/secure/vd/{session_id}/snapshot`
+- List snapshots: `GET /api/secure/vd/{session_id}/snapshots`
+- Delete snapshot: `POST /api/secure/vd/{session_id}/snapshot/delete` with `{ tag }`
+- Restore snapshot: `POST /api/secure/vd/{session_id}/snapshot/restore` with `{ tag }` (restores to a new container and returns connect_url)
+- RDP sessions (Windows):
+  - Create: `POST /api/secure/rdp/create` with `{ user_id, host, port, username, password, domain? }`
+  - Get URL: `GET /api/secure/rdp/{session_id}/url`
+  - Delete: `DELETE /api/secure/rdp/{session_id}`
+
+RBAC enforcement:
+
+- Destructive operations (kill processes, delete/restore snapshots) require `admin` role.
+- Session deletion allowed to the owner or an admin.
+
+Images:
+
+- ubuntu-xfce: `dorowu/ubuntu-desktop-lxde-vnc` (default)
+- debian-xfce: `accetto/debian-vnc-xfce`
+- kali-xfce: `lscr.io/linuxserver/kali-linux:latest` (may need extra flags)
+- Windows desktops require licensed VM and use RDP; not supported via the NoVNC container path.
+
+Storage:
+
+- Default per-session path: `./data/object_storage/sessions/<session_id>`
+- Override with `OMEGA_SESSION_BASE` env var.
+
+TLS:
+
+- If `security/certs/control_node.crt|.key` exist or `OMEGA_SSL_CERT`/`OMEGA_SSL_KEY` env provided, the backend serves HTTPS on 8443.
+
+Notes:
+
+- Requires Docker installed and available on host for managing desktop containers.
+
+## Omega Super Desktop Console v2.0
 
 ## Initial prototype Distributed Computing Platform
 
 A revolutionary distributed computing system that aggregates CPU, GPU, RAM, storage and network of multiple commodity PCs into one low-latency "super desktop" that runs unmodified Windows/Linux/Mac workloads.
 
-## Features
+## [LAUNCH] Features
 
 ### Core Platform
 
@@ -23,7 +72,7 @@ A revolutionary distributed computing system that aggregates CPU, GPU, RAM, stor
 - **Node Monitoring**: Visual node status and resource utilization
 - **Performance Analytics**: Historical performance data and trend analysis
 
-## Architecture
+## [ARCHITECTURE] Architecture
 
 ## SuperDesktop v2.0 - Distributed Desktop Environment
 
@@ -147,7 +196,7 @@ After startup, access the system through:
 
 ## 📂 **Project Structure**
 
-```
+```text
 SuperDesktop/
 ├── 🚀 start-omega.sh               # Main startup script
 ├── 🛑 stop-omega.sh                # System shutdown script
@@ -375,7 +424,7 @@ export OMEGA_CLUSTER_NAME="production"
 
 ---
 
-## **Support & Contact**
+## 📞 **Support & Contact**
 
 - **📧 Email**: <chandu@portalvii.com>
 - **🐙 Repository**: <https://github.com/Chandu00756/Superdesktop>
@@ -390,7 +439,7 @@ This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) 
 
 ---
 
-## **Acknowledgments**
+## 🙏 **Acknowledgments**
 
 - **Core Team**: Advanced distributed systems architecture
 - **AI Integration**: Machine learning optimization engines

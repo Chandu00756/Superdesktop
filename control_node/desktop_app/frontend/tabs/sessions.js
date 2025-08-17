@@ -13,8 +13,8 @@ export function renderSessions(root, state) {
   root.innerHTML = `
     <div style="display: grid; grid-template-rows: auto 1fr; gap: 16px; height: 100%;">
       <!-- Session Controls -->
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;">
-        <button onclick="createSession('webrtc')" class="session-create-btn">
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; align-items: center;">
+  <button onclick="openVdCreateDialog()" class="session-create-btn">
           <i class="fas fa-video"></i>
           <div>New WebRTC Session</div>
           <div>Ultra-low latency desktop</div>
@@ -63,6 +63,7 @@ export function renderSessions(root, state) {
               <button class="session-subtab" data-subtab="performance">Performance</button>
               <button class="session-subtab" data-subtab="files">Files</button>
               <button class="session-subtab" data-subtab="processes">Processes</button>
+              <button class="session-subtab" data-subtab="snapshots">Snapshots</button>
               <button class="session-subtab" data-subtab="settings">Settings</button>
             </div>
           </div>
@@ -99,6 +100,18 @@ export function renderSessions(root, state) {
               <div style="padding: 16px;">
                 <h4>Session Processes</h4>
                 <div id="session-process-list"></div>
+              </div>
+            </div>
+            <div id="session-snapshots" class="session-panel">
+              <div style="padding: 16px;">
+                <div style="display:flex; justify-content: space-between; align-items:center; margin-bottom: 12px;">
+                  <h4>Snapshots</h4>
+                  <div style="display:flex; gap:8px;">
+                    <button class="btn-secondary" id="snapshot-refresh-btn"><i class="fas fa-sync"></i> Refresh</button>
+                    <button class="btn-secondary" id="snapshot-create-btn"><i class="fas fa-camera"></i> New Snapshot</button>
+                  </div>
+                </div>
+                <div id="session-snapshot-list"></div>
               </div>
             </div>
             <div id="session-settings" class="session-panel">
@@ -156,6 +169,7 @@ export function renderSessions(root, state) {
 
   function selectSession(session) {
     selectedSession = session;
+  try { localStorage.setItem('omega:lastSession', session.session_id); } catch {}
     const header = root.querySelector('#session-inspector-header');
     const subtabs = root.querySelector('#session-subtabs');
     
@@ -171,7 +185,7 @@ export function renderSessions(root, state) {
         </div>
         <div style="display: flex; gap: 8px;">
           <button onclick="pauseSession('${session.session_id}')" class="btn-secondary">
-            <i class="fas fa-pause"></i> Pause
+            <i class="fas fa-pause"></i> ${session.status === 'paused' ? 'Resume' : 'Pause'}
           </button>
           <button onclick="terminateSession('${session.session_id}')" class="btn-danger">
             <i class="fas fa-stop"></i> Terminate
@@ -190,6 +204,7 @@ export function renderSessions(root, state) {
   }
 
   function showSessionSubtab(subtab) {
+  try { localStorage.setItem('omega:lastSessionTab', subtab); } catch {}
     // Update active tab
     root.querySelectorAll('.session-subtab').forEach(t => {
       t.classList.toggle('active', t.dataset.subtab === subtab);
@@ -219,6 +234,9 @@ export function renderSessions(root, state) {
         break;
       case 'settings':
         renderSessionSettings();
+        break;
+      case 'snapshots':
+        renderSessionSnapshots();
         break;
     }
   }
@@ -512,6 +530,74 @@ export function renderSessions(root, state) {
     `;
   }
 
+  async function renderSessionSnapshots() {
+    const panel = root.querySelector('#session-snapshots');
+    if (!selectedSession) {
+      panel.innerHTML = '<div style="padding: 16px; color: var(--omega-light-1);">No session selected</div>';
+      return;
+    }
+    // Structure already in DOM; attach handlers and load data
+    const listEl = panel.querySelector('#session-snapshot-list');
+    const refreshBtn = panel.querySelector('#snapshot-refresh-btn');
+    const createBtn = panel.querySelector('#snapshot-create-btn');
+
+    refreshBtn.onclick = async () => {
+      await loadSnapshots();
+    };
+    createBtn.onclick = async () => {
+      try {
+        createBtn.disabled = true; createBtn.textContent = 'Creating...';
+        const res = await window.api.snapshotVirtualDesktop(selectedSession.session_id);
+        window.notify('success', 'Snapshot', `Created: ${res.snapshot}`);
+        await loadSnapshots();
+      } catch (e) {
+        window.notify('error', 'Snapshot', e.message);
+        showInlineError('session-snapshots', 'Snapshot failed', e.message);
+      } finally {
+        createBtn.disabled = false; createBtn.innerHTML = '<i class="fas fa-camera"></i> New Snapshot';
+      }
+    };
+
+    async function loadSnapshots() {
+      listEl.innerHTML = '<div style="color: var(--omega-light-1);">Loading snapshots...</div>';
+      try {
+        const resp = await window.api.listSnapshots(selectedSession.session_id);
+        const items = resp.snapshots || [];
+        if (!items.length) {
+          listEl.innerHTML = '<div style="color: var(--omega-light-1);">No snapshots yet</div>';
+          return;
+        }
+        listEl.innerHTML = `
+          <div class="snapshot-timeline">
+            ${items.map(evt => snapshotItem(evt)).join('')}
+          </div>
+        `;
+      } catch (e) {
+        listEl.innerHTML = '<div style="color: var(--omega-red);">Failed to load snapshots</div>';
+        showInlineError('session-snapshots', 'Failed to load snapshots', e.message);
+      }
+    }
+
+    function snapshotItem(evt) {
+      const ts = new Date((evt.created_at || Date.now()/1000) * 1000).toLocaleString();
+      const tag = evt.tag || (evt.message?.replace('Snapshot created: ','') || 'snapshot');
+      return `
+        <div class="snapshot-item">
+          <div class="snapshot-meta">
+            <div class="snapshot-time"><i class="fas fa-clock"></i> ${ts}</div>
+            <div class="snapshot-tag">${tag}</div>
+          </div>
+          <div style="display:flex; gap:6px; margin-top:6px;">
+            <button class="btn-secondary" onclick="restoreSnapshot('${selectedSession.session_id}','${tag}')"><i class="fas fa-undo"></i> Restore</button>
+            <button class="btn-danger" onclick="deleteSnapshot('${selectedSession.session_id}','${tag}')"><i class="fas fa-trash"></i> Delete</button>
+          </div>
+        </div>
+      `;
+    }
+
+    await loadSnapshots();
+  }
+
   function renderSessionSettings() {
     const panel = root.querySelector('#session-settings');
     if (!selectedSession) return;
@@ -588,44 +674,373 @@ export function renderSessions(root, state) {
   }
 
   // Global functions for session management
+  // (OS dropdown removed; OS selection happens in the create dialog. Default image is ubuntu-xfce.)
+
+  // Create dialog for VD creation
+  window.openVdCreateDialog = async () => {
+    // Load OS catalog and profiles concurrently
+    const [cat, profResp] = await Promise.all([
+      window.api.getOsCatalog().catch(()=>({ builtin: [], custom: [] })),
+      window.api.getVdProfiles().catch(() => ({ profiles: [
+        { id: 'browser', label: 'Browser', packages: ['firefox','curl','wget','zip','unzip'] },
+        { id: 'developer', label: 'Developer', packages: ['firefox','git','curl','wget','htop','build-essential','vim','python3','python3-pip'] },
+        { id: 'office', label: 'Office', packages: ['firefox','libreoffice','curl','zip','unzip'] }
+      ] }))
+    ]);
+    const options = [...(cat.builtin||[]), ...(cat.custom||[])];
+    const selOptions = options.map(o => `<option value="${o.id}">${o.id}${o.description?` (${o.description})`:''}</option>`).join('');
+    const profiles = profResp?.profiles || [];
+    const profOptions = (profiles.length
+      ? profiles.map(p => `<option value="${p.id}" ${p.id==='browser'?'selected':''}>${p.label}</option>`).join('')
+      : '<option value="browser" selected>Browser</option>');
+    const profMap = Object.fromEntries((profiles||[]).map(p => [p.id, p.packages || []]));
+    const html = `
+      <div class="inline-rdp-dialog" id="vd-create-dialog"><div class="rdp-form" style="width:520px;">
+        <div style="font:600 14px var(--font-mono); color: var(--omega-white); margin-bottom:8px;">Create Virtual Desktop</div>
+        <div class="rdp-form-row"><label>OS</label><select id="vd-os">${selOptions || '<option value="ubuntu-xfce">ubuntu-xfce (default)</option>'}</select></div>
+        <div class="rdp-form-row"><label>Profile</label><select id="vd-profile">${profOptions}</select></div>
+        <div class="rdp-form-row"><label>CPU Cores</label><input id="vd-cpu" type="number" min="1" max="16" value="2"/></div>
+        <div class="rdp-form-row"><label>Memory (GB)</label><input id="vd-ram" type="number" min="2" max="64" value="4"/></div>
+        <div class="rdp-form-row"><label>Resolution</label><input id="vd-res" placeholder="1920x1080"/></div>
+        <div class="rdp-form-row"><label>VNC Password</label><input id="vd-pass" type="password" placeholder="auto-generate"/></div>
+        <div class="rdp-form-row"><label>Packages</label><input id="vd-pkgs" placeholder="comma separated (e.g., firefox,vlc,libreoffice)"/></div>
+        <div class="rdp-actions">
+          <button id="vd-cancel" class="btn-secondary">Cancel</button>
+          <button id="vd-create" class="btn-primary">Create</button>
+        </div>
+      </div></div>`;
+    const dlg = document.createElement('div'); dlg.innerHTML = html; document.body.appendChild(dlg);
+    // Auto-fill packages when profile changes (for transparency)
+    const profileSel = dlg.querySelector('#vd-profile');
+    const pkgsInput = dlg.querySelector('#vd-pkgs');
+    const syncPkgs = () => {
+      const pid = profileSel?.value;
+      if (pid && profMap[pid]) pkgsInput.value = (profMap[pid] || []).join(',');
+    };
+    if (profileSel && pkgsInput) {
+      syncPkgs();
+      profileSel.onchange = syncPkgs;
+    }
+    dlg.querySelector('#vd-cancel').onclick = () => dlg.remove();
+    dlg.querySelector('#vd-create').onclick = async () => {
+      try {
+        const os_image = dlg.querySelector('#vd-os').value || 'ubuntu-xfce';
+        const profile = (dlg.querySelector('#vd-profile')?.value || 'browser');
+        const cpu_cores = Math.max(1, parseInt(dlg.querySelector('#vd-cpu').value||'2',10)||2);
+        const memory_gb = Math.max(1, parseInt(dlg.querySelector('#vd-ram').value||'4',10)||4);
+        const resolution = (dlg.querySelector('#vd-res').value||'').trim() || undefined;
+        const vnc_password = (dlg.querySelector('#vd-pass').value||'').trim() || undefined;
+        const pkgsRaw = (dlg.querySelector('#vd-pkgs').value||'').trim();
+        const packages = pkgsRaw ? pkgsRaw.split(',').map(s=>s.trim()).filter(Boolean) : undefined;
+        window.notify('info', 'Session Creation', 'Launching desktop...');
+        const pkt = await window.api.createVirtualDesktop({ user_id: 'admin', os_image, cpu_cores, memory_gb, gpu_units: 0, packages, resolution, vnc_password, profile });
+        dlg.remove();
+        const sessionsPkt = await window.api.getSessions();
+        window.state.setState('sessions', sessionsPkt);
+        // auto-select and connect
+        const newId = pkt.session_id;
+        const newSession = (sessionsPkt.sessions||[]).find(s=>s.session_id===newId);
+        if (newSession) {
+          selectSession(newSession);
+          showSessionSubtab('desktop');
+          setTimeout(() => window.connectDesktop(newId), 300);
+        }
+        window.notify('success', 'Virtual Desktop', 'Desktop created');
+      } catch (e) {
+        window.notify('error', 'Virtual Desktop', e.message||String(e));
+      }
+    };
+  };
+
   window.createSession = async (type) => {
     try {
-      // This would integrate with backend session creation
       window.notify('info', 'Session Creation', `Creating ${type} session...`);
-      // Implementation would go here
+      // Disable create buttons to prevent duplicate calls
+      const btns = Array.from(document.querySelectorAll('.session-create-btn'));
+      btns.forEach(b => { b.disabled = true; b.classList.add('is-disabled'); });
+      if (type === 'webrtc') {
+        // Fallback path (primary flow uses openVdCreateDialog). Default OS image.
+        const os_image = 'ubuntu-xfce';
+        const pkt = await window.api.createVirtualDesktop({ user_id: 'admin', os_image, profile: 'browser' });
+        const payload = pkt;
+        // Refresh sessions list from backend
+        const sessionsPkt = await window.api.getSessions();
+        window.state.setState('sessions', sessionsPkt);
+        window.notify('success', 'Virtual Desktop', 'Desktop created. Select it to connect.');
+        // Auto-select new session if visible
+        const newId = payload.session_id;
+        const newSession = (sessionsPkt.sessions || []).find(s => s.session_id === newId);
+        if (newSession) {
+          selectSession(newSession);
+          showSessionSubtab('desktop');
+          // auto-connect
+          setTimeout(() => window.connectDesktop(newId), 300);
+        }
+      } else if (type === 'vnc') {
+        const os_image = 'ubuntu-xfce';
+        const pkt = await window.api.createVirtualDesktop({ user_id: 'admin', os_image, profile: 'browser' });
+        const sessionsPkt = await window.api.getSessions();
+        window.state.setState('sessions', sessionsPkt);
+        window.notify('success', 'Virtual Desktop', 'VNC desktop created');
+      } else if (type === 'rdp') {
+        // Show inline RDP dialog
+        const dialog = document.createElement('div');
+        dialog.className = 'inline-rdp-dialog';
+        dialog.innerHTML = `
+          <div class="rdp-form">
+            <div class="rdp-form-row"><label>Host</label><input id="rdp-host" placeholder="ip or hostname"/></div>
+            <div class="rdp-form-row"><label>Port</label><input id="rdp-port" type="number" value="3389"/></div>
+            <div class="rdp-form-row"><label>Username</label><input id="rdp-user" placeholder="domain\\user or user"/></div>
+            <div class="rdp-form-row"><label>Password</label><input id="rdp-pass" type="password" placeholder="password"/></div>
+            <div class="rdp-form-row"><label>Domain</label><input id="rdp-domain" placeholder="optional"/></div>
+            <div class="rdp-actions">
+              <button id="rdp-cancel" class="btn-secondary">Cancel</button>
+              <button id="rdp-create" class="btn-primary">Create</button>
+            </div>
+          </div>`;
+        document.body.appendChild(dialog);
+        await new Promise((resolve) => {
+          dialog.querySelector('#rdp-cancel').onclick = () => { dialog.remove(); resolve(); };
+          dialog.querySelector('#rdp-create').onclick = async () => {
+            try {
+              const host = dialog.querySelector('#rdp-host').value.trim();
+              const port = parseInt(dialog.querySelector('#rdp-port').value || '3389', 10) || 3389;
+              const username = dialog.querySelector('#rdp-user').value.trim();
+              const password = dialog.querySelector('#rdp-pass').value;
+              const domain = dialog.querySelector('#rdp-domain').value.trim();
+              if (!host || !username || !password) throw new Error('Host, username, password required');
+              await window.api.createRdpSession({ user_id: 'admin', host, port, username, password, domain });
+              dialog.remove();
+              resolve();
+            } catch (e) {
+              window.notify('error', 'RDP', e.message);
+            }
+          };
+        });
+        const sessionsPkt = await window.api.getSessions();
+        window.state.setState('sessions', sessionsPkt);
+        window.notify('success', 'RDP', 'RDP session created. Select it to open.');
+      } else if (type === 'ssh') {
+        window.notify('warning', 'SSH', 'SSH terminal will be added after VD core.');
+      }
     } catch (e) {
-      window.notify('error', 'Session Creation', e.message);
+      window.notify('error', 'Session Creation', String(e?.message || e));
+      showInlineError('session-list', 'Failed to create session', e.message);
+    } finally {
+      const btns = Array.from(document.querySelectorAll('.session-create-btn'));
+      btns.forEach(b => { b.disabled = false; b.classList.remove('is-disabled'); });
     }
   };
 
   window.connectDesktop = async (sessionId) => {
     try {
       window.notify('info', 'Desktop Connection', `Connecting to session ${sessionId}...`);
-      // WebRTC desktop connection implementation would go here
-      document.getElementById('desktop-status').textContent = 'Connected';
-      document.getElementById('desktop-status').style.color = 'var(--omega-green)';
-      document.getElementById('desktop-overlay').style.display = 'none';
+      // Detect session type
+      const curSessions = window.state.data.sessions?.sessions || [];
+      const s = curSessions.find(x => x.session_id === sessionId);
+      if (s && s.application === 'rdp-desktop') {
+        const info = await window.api.getRdpUrl(sessionId);
+        const url = info.connect_url;
+        window.notify('info', 'RDP', 'Opening RDP client...');
+        window.open(url, '_blank');
+        return;
+      }
+      // Wait for viewer readiness: poll health for up to ~10s
+      const url = await (async () => {
+        const start = Date.now();
+        const timeoutMs = 10000;
+        const delay = (ms) => new Promise(r => setTimeout(r, ms));
+        // Helper to check health
+        const healthy = async () => {
+          try {
+            const pkt = await window.api.getVirtualDesktopHealth(sessionId);
+            return !!pkt.ready;
+          } catch {
+            return false;
+          }
+        };
+        // First ask for URL (so we can embed immediately if already ready)
+        let currentUrl = await window.api.getVirtualDesktopUrl(sessionId).then(p=>p.connect_url);
+        if (await healthy()) return currentUrl;
+        // Poll a few times with backoff
+        let attempt = 0; const steps = [250, 400, 600, 800, 1200, 1600, 2000, 2000];
+        while (Date.now() - start < timeoutMs && attempt < steps.length) {
+          await delay(steps[attempt++]);
+          currentUrl = await window.api.getVirtualDesktopUrl(sessionId).then(p=>p.connect_url);
+          if (await healthy()) return currentUrl;
+        }
+        // Return last known URL anyway
+        return currentUrl;
+      })();
+      const canvas = document.getElementById('desktop-canvas');
+      const overlay = document.getElementById('desktop-overlay');
+      const container = canvas?.parentElement;
+      // Replace canvas with iframe of noVNC page for now
+      if (container) {
+        container.innerHTML = `<iframe id="novnc-frame" src="${url}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;background:#000;"></iframe>`;
+      }
+      const status = document.getElementById('desktop-status');
+      if (status) { status.textContent = 'Connected'; status.style.color = 'var(--omega-green)'; }
+      if (overlay) overlay.style.display = 'none';
     } catch (e) {
-      window.notify('error', 'Desktop Connection', e.message);
+      const msg = String(e?.message || e);
+      window.notify('error', 'Desktop Connection', msg);
+      showInlineError('session-desktop', 'Failed to connect desktop', msg);
     }
   };
 
   window.pauseSession = async (sessionId) => {
     try {
-      await window.omegaAPI.secureAction('pause_session', { session_id: sessionId });
-      window.notify('success', 'Session Control', `Session ${sessionId} paused`);
+      // Toggle based on current selected state
+      if (selectedSession && selectedSession.session_id === sessionId && selectedSession.status === 'paused') {
+        await window.api.resumeVirtualDesktop(sessionId);
+        window.notify('success', 'Session Control', `Session ${sessionId} resumed`);
+      } else {
+        await window.api.pauseVirtualDesktop(sessionId);
+        window.notify('success', 'Session Control', `Session ${sessionId} paused`);
+      }
+      const sessionsPkt = await window.api.getSessions();
+      window.state.setState('sessions', sessionsPkt);
+  // Re-render to update button labels and statuses
+  renderSessions(root, window.state);
     } catch (e) {
       window.notify('error', 'Session Control', e.message);
+  showInlineError('session-inspector-header', 'Failed to change session state', e.message);
     }
   };
 
   window.terminateSession = async (sessionId) => {
     try {
-      await window.omegaAPI.secureAction('terminate_session', { session_id: sessionId });
-      window.notify('success', 'Session Control', `Session ${sessionId} terminated`);
+  // delete VD and remove from list
+  await window.api.deleteVirtualDesktop(sessionId);
+  const sessionsPkt = await window.api.getSessions();
+  window.state.setState('sessions', sessionsPkt);
+  window.notify('success', 'Session Control', `Session ${sessionId} terminated`);
+  // Auto-refresh list UI
+  renderSessions(root, window.state);
     } catch (e) {
       window.notify('error', 'Session Control', e.message);
+      showInlineError('session-inspector-header', 'Failed to terminate session', e.message);
     }
+  };
+
+  // Extra actions wired to backend
+  window.snapshotSession = async (sessionId) => {
+    try {
+      const res = await window.api.snapshotVirtualDesktop(sessionId);
+      window.notify('success', 'Snapshot', `Snapshot created: ${res.snapshot}`);
+    } catch (e) {
+      window.notify('error', 'Snapshot', e.message);
+  showInlineError('session-overview', 'Snapshot failed', e.message);
+    }
+  };
+
+  window.killProcess = async (pid) => {
+    try {
+      await window.api.killProcess(pid);
+      window.notify('success', 'Process', `PID ${pid} terminated`);
+      const procs = await window.api.getProcesses();
+      window.state.setState('processes', procs);
+      renderSessionProcesses();
+    } catch (e) {
+      window.notify('error', 'Process', e.message);
+      showInlineError('session-processes', `Failed to kill PID ${pid}`, e.message);
+    }
+  };
+
+  window.deleteSnapshot = async (sessionId, tag) => {
+    try {
+      await window.api.deleteSnapshot(sessionId, tag);
+      window.notify('success', 'Snapshot', `Deleted ${tag}`);
+      const panel = root.querySelector('#session-snapshots');
+      if (panel) {
+        await renderSessionSnapshots();
+      }
+    } catch (e) {
+      window.notify('error', 'Snapshot', e.message);
+    }
+  };
+
+  window.restoreSnapshot = async (sessionId, tag) => {
+    try {
+      const res = await window.api.restoreSnapshot(sessionId, tag);
+      window.notify('success', 'Snapshot', 'Restored snapshot to new container');
+      // Optionally open restored URL in new window
+      if (res.connect_url) {
+        window.open(res.connect_url, '_blank');
+      }
+    } catch (e) {
+      window.notify('error', 'Snapshot', e.message);
+    }
+  };
+
+  // Helper to show inline error banners near panels
+  function showInlineError(containerId, title, message) {
+    const container = root.querySelector(`#${containerId}`) || document.getElementById(containerId);
+    if (!container) return;
+    const banner = document.createElement('div');
+    banner.className = 'inline-error';
+    banner.innerHTML = `
+      <div class="inline-error-content">
+        <i class="fas fa-exclamation-circle"></i>
+        <div>
+          <div class="inline-error-title">${title}</div>
+          <div class="inline-error-message">${message}</div>
+        </div>
+        <button class="inline-error-close" aria-label="Dismiss">×</button>
+      </div>`;
+    const close = () => banner.remove();
+    banner.querySelector('.inline-error-close').onclick = close;
+    setTimeout(close, 6000);
+    container.parentElement?.insertBefore(banner, container.nextSibling);
+  }
+
+  // Refresh helpers
+  window.refreshSessions = async () => {
+    try {
+      const sessionsPkt = await window.api.getSessions();
+      window.state.setState('sessions', sessionsPkt);
+      // Re-render sessions tab to reflect new list
+      renderSessions(root, window.state);
+    } catch (e) {
+      window.notify('error', 'Sessions', e.message);
+    }
+  };
+
+  window.refreshProcesses = async () => {
+    try {
+      const procs = await window.api.getProcesses();
+      window.state.setState('processes', procs);
+      // Re-render the processes panel if present
+      renderSessionProcesses();
+    } catch (e) {
+      window.notify('error', 'Processes', e.message);
+    }
+  };
+
+  // UI stubs to avoid undefined handler errors
+  window.disconnectDesktop = () => {
+  if (window.vd) window.vd.disconnect();
+    const frame = document.getElementById('novnc-frame');
+    if (frame && frame.parentElement) {
+      frame.parentElement.innerHTML = '<canvas id="desktop-canvas" style="width: 100%; height: 100%; object-fit: contain;"></canvas>';
+    }
+    const status = document.getElementById('desktop-status');
+    if (status) { status.textContent = 'Disconnected'; status.style.color = 'var(--omega-red)'; }
+    window.notify('info', 'Desktop', 'Disconnected');
+  };
+  window.fullscreenDesktop = () => {
+    const el = document.getElementById('novnc-frame') || document.getElementById('desktop-canvas');
+    if (el && el.requestFullscreen) el.requestFullscreen();
+  };
+  window.screenshotDesktop = () => {
+    window.notify('warning', 'Desktop', 'Screenshot not implemented yet.');
+  };
+  window.shareSession = (sessionId) => {
+    window.notify('info', 'Share', `Share link for ${sessionId} coming soon.`);
+  };
+  window.backupSession = (sessionId) => {
+    window.notify('info', 'Backup', `Backup for ${sessionId} queued (stub).`);
   };
 
   // Add CSS for sessions
@@ -844,4 +1259,63 @@ export function renderSessions(root, state) {
     `;
     document.head.appendChild(style);
   }
+
+  // Extra styles for disabled buttons and inline errors (separate tag to avoid editing large block above)
+  if (!document.getElementById('sessions-styles-extra')) {
+    const style2 = document.createElement('style');
+    style2.id = 'sessions-styles-extra';
+    style2.textContent = `
+      .session-create-btn.is-disabled { opacity: 0.6; cursor: not-allowed; }
+      .inline-error { background: rgba(255, 77, 77, 0.08); border: 1px solid rgba(255, 77, 77, 0.45); color: #ff7777; border-radius: 4px; margin: 8px 12px; }
+      .inline-error-content { display: flex; gap: 10px; align-items: center; padding: 10px 12px; }
+      .inline-error-title { font: 600 12px var(--font-mono); }
+      .inline-error-message { font: 400 11px var(--font-mono); opacity: 0.9; }
+      .inline-error-close { margin-left: auto; background: transparent; border: none; color: inherit; font-size: 16px; cursor: pointer; }
+  .snapshot-timeline { display: grid; gap: 8px; }
+  .snapshot-item { border: 1px solid var(--omega-gray-1); background: var(--omega-dark-4); border-radius: 4px; padding: 8px 10px; }
+  .snapshot-meta { display: flex; justify-content: space-between; font: 400 11px var(--font-mono); color: var(--omega-light-1); }
+  .snapshot-tag { color: var(--omega-cyan); font-weight: 600; }
+  .inline-rdp-dialog { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: grid; place-items: center; z-index: 9999; }
+  .rdp-form { width: 360px; background: var(--omega-dark-3); border: 1px solid var(--omega-gray-1); border-radius: 4px; padding: 12px; }
+  .rdp-form-row { display: grid; grid-template-columns: 90px 1fr; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .rdp-form-row label { color: var(--omega-light-1); font: 600 11px var(--font-mono); }
+  .rdp-form-row input { background: var(--omega-dark-2); border: 1px solid var(--omega-gray-1); color: var(--omega-white); padding: 6px 8px; border-radius: 3px; font: 400 11px var(--font-mono); }
+  /* Keep selects within the dialog and visually consistent with inputs */
+  .rdp-form-row select { 
+    background: var(--omega-dark-2);
+    border: 1px solid var(--omega-gray-1);
+    color: var(--omega-white);
+    padding: 6px 8px;
+    border-radius: 3px;
+    font: 400 11px var(--font-mono);
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+  /* Specific fix for the VD create dialog where long OS labels caused overflow */
+  #vd-create-dialog .rdp-form { max-width: 560px; width: 520px; }
+  #vd-create-dialog select { width: 100%; max-width: 100%; }
+  @media (max-width: 600px) {
+    #vd-create-dialog .rdp-form { width: 92vw; }
+  }
+  .rdp-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+    `;
+    document.head.appendChild(style2);
+  }
+
+  // Auto-restore last selected session and subtab after render
+  try {
+    const savedId = localStorage.getItem('omega:lastSession');
+    if (savedId) {
+      const s = sessions.find(x => x.session_id === savedId);
+      if (s) {
+        selectSession(s);
+        const tab = localStorage.getItem('omega:lastSessionTab') || 'desktop';
+        showSessionSubtab(tab);
+        if (tab === 'desktop') {
+          setTimeout(() => window.connectDesktop(savedId), 300);
+        }
+      }
+    }
+  } catch {}
 }

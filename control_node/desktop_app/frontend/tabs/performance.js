@@ -448,6 +448,17 @@ export function renderPerformance(root, state) {
   renderAlertThresholds(state);
   initializePerformanceCharts(state);
   drawPerfCanvases();
+
+  // Fetch latest performance from backend
+  ;(async () => {
+    try {
+      const perf = await window.api.getPerformance();
+      window.state.setState('performance', perf);
+      updatePerformanceStatus(window.state);
+    } catch (e) {
+      console.warn('[Performance] Failed to load performance', e);
+    }
+  })();
 }
 
 function updatePerformanceStatus(state) {
@@ -936,8 +947,16 @@ window.switchPerformanceTab = (tabName) => {
 
 window.runBenchmark = async () => {
   try {
-    window.notify('info', 'Performance', 'Starting comprehensive benchmark...');
-    // Benchmark implementation would go here
+  window.notify('info', 'Performance', 'Starting benchmark...');
+  const res = await window.api.secureAction('run_benchmark');
+  const result = res?.result || {};
+  // Update performance section in state
+  const current = window.state.data.performance || {};
+  current.benchmark = { latest_score: result.score, components: result.components, history: [{ date: new Date().toLocaleString(), score: result.score }, ...(current.benchmark?.history || [])].slice(0, 10) };
+  window.state.setState('performance', current);
+  renderBenchmarkResults(window.state);
+  renderBenchmarkHistory(window.state);
+  window.notify('success', 'Performance', `Benchmark score: ${result.score}`);
   } catch (e) {
     window.notify('error', 'Performance', e.message);
   }
