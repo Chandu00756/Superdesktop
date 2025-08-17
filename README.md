@@ -33,6 +33,7 @@ Images:
 - debian-xfce: `accetto/debian-vnc-xfce`
 - kali-xfce: `lscr.io/linuxserver/kali-linux:latest` (may need extra flags)
 - Windows desktops require licensed VM and use RDP; not supported via the NoVNC container path.
+- Qubes OS is provided as an external OS option (qubes-os) in the catalog. It cannot run inside Docker; use RDP/VNC to connect to an existing Qubes VM managed outside this platform, or register a connector via `/api/secure/vd/os-register`.
 
 Storage:
 

@@ -168,6 +168,10 @@ export class ApiClient {
     const pkt = await this._req('/api/secure/vd/os-list');
     return pkt;
   }
+  async getDockerHealth() {
+    const pkt = await this._req('/api/secure/vd/docker-health');
+    return pkt;
+  }
   async getVdProfiles() {
     const pkt = await this._req('/api/secure/vd/profiles');
     return pkt;

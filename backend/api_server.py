@@ -1286,12 +1286,21 @@ def _image_for_os(os_image: str) -> str:
     'ubuntu-xfce': 'accetto/ubuntu-vnc-xfce:latest',  # exposes :6901 (noVNC) and :5901
     # Chromium variant maps to the same base; Chromium can be added via packages/profile
     'ubuntu-xfce-chromium': 'accetto/ubuntu-vnc-xfce:latest',
+    # Webtop variants (noVNC on :3000)
+    'ubuntu-webtop': 'lscr.io/linuxserver/webtop:ubuntu',
         # Legacy option (kept for compatibility)
         'ubuntu-lxde-legacy': 'dorowu/ubuntu-desktop-lxde-vnc',
         # Alternatives
         'debian-xfce': 'accetto/debian-vnc-xfce',
+    'debian-webtop': 'lscr.io/linuxserver/webtop:debian',
+    'fedora-webtop': 'lscr.io/linuxserver/webtop:fedora',
         'kali-xfce':   'lscr.io/linuxserver/kali-linux:latest',  # may require extra config
     }
+    # External OS that cannot run in our Docker-based flow
+    if os_image in ('qubes', 'qubes-os', 'qubesos'):
+        raise HTTPException(status_code=400, detail='Qubes OS requires an external hypervisor (Xen). Use /api/secure/rdp/create to connect to a Qubes VM or register an external connector.')
+    if os_image in ('freebsd','openbsd','inferno-os','plan9','centos-stream','almalinux','rocky-linux'):
+        raise HTTPException(status_code=400, detail=f"{os_image} is an external OS. Use /api/secure/rdp/create or register an external connector.")
     if os_image == 'windows':
         # Windows handled via RDP endpoints
         raise HTTPException(status_code=400, detail='Windows requires RDP. Use /api/secure/rdp/create')
@@ -1316,20 +1325,57 @@ def _container_ports_for_image(image: str) -> dict:
         return {'http': 80, 'vnc': 5900}
     if 'accetto' in image:
         return {'http': 6901, 'vnc': 5901}
+    if 'linuxserver/webtop' in image or 'lscr.io/linuxserver/webtop' in image:
+        # Web UI on 3000, no classic 590x VNC port exposed. We'll map vnc to 5901 as placeholder (unused)
+        return {'http': 3000, 'vnc': 5901}
     # Fallback
     return {'http': 80, 'vnc': 5900}
 
 def _env_for_image(image: str, vnc_password: str, resolution: Optional[str] = None) -> list[str]:
     # Provide multiple common env names used by popular VNC desktop images
     envs = []
+    # Set multiple common VNC password envs
     for key in ('VNC_PASSWORD', 'PASSWORD', 'VNC_PW'):
         envs += ['-e', f"{key}={vnc_password}"]
+    # Some images require setting USER to root for password/program installs
+    envs += ['-e', 'USER=root']
     # Some accetto images support user/password pairs; keep minimal for now
     if resolution:
         # Support common env names across images
         for rkey in ('RESOLUTION', 'VNC_RESOLUTION'):
             envs += ['-e', f"{rkey}={resolution}"]
+        # For webtop, hint width/height if RESOLUTION provided (optional)
+        if 'linuxserver/webtop' in image or 'lscr.io/linuxserver/webtop' in image:
+            try:
+                parts = resolution.lower().split('x')
+                if len(parts) == 2:
+                    w, h = parts[0], parts[1]
+                    envs += ['-e', f"WEBTOP_WIDTH={w}", '-e', f"WEBTOP_HEIGHT={h}"]
+            except Exception:
+                pass
     return envs
+
+def _detect_viewer_path(http_port: int) -> tuple[str, str]:
+    """Probe the container viewer endpoint and pick the correct path and query defaults.
+    Returns (path, query_string_without_leading_question_mark).
+    - accetto images: /vnc.html and no host/port/path params required
+    - dorowu images: /static/vnc.html and needs host/port/path=websockify
+    Fallback to '/' if neither is available.
+    """
+    import urllib.request
+    def _head(path: str) -> int:
+        try:
+            req = urllib.request.Request(f'http://127.0.0.1:{http_port}{path}', method='HEAD')
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                return int(resp.getcode())
+        except Exception:
+            return 0
+    if _head('/vnc.html') == 200:
+        return '/vnc.html', 'autoconnect=1'
+    if _head('/static/vnc.html') == 200:
+        return '/static/vnc.html', f'autoconnect=1&host=localhost&port={http_port}&path=websockify'
+    # last resort
+    return '/', ''
 
 @app.post('/api/secure/vd/create')
 async def vd_create(request: Request, spec: VDCreateRequest, background_tasks: BackgroundTasks):
@@ -1407,8 +1453,13 @@ async def vd_create(request: Request, spec: VDCreateRequest, background_tasks: B
         '-l', f'omega.session_id={session_id}',
         '-l', f'omega.user={spec.user_id or "admin"}'
     ]
-    run_args = ['run', '-d', '--name', name] + labels + ['-p', port_http_map, '-p', port_vnc_map] + envs + [image]
+    run_args = ['run', '-d', '--restart', 'unless-stopped', '--name', name] + labels + ['-p', port_http_map, '-p', port_vnc_map] + envs + [image]
     container_id = _docker_run(run_args, timeout=120)
+    # Give the container a brief moment to initialize services (tight timeout to avoid blocking)
+    try:
+        time.sleep(0.7)
+    except Exception:
+        pass
 
     # Register DB session
     s_info = SessionInfo(
@@ -1440,19 +1491,17 @@ async def vd_create(request: Request, spec: VDCreateRequest, background_tasks: B
     if custom_viewer:
         connect_path = custom_viewer
         connect_query = f"autoconnect=1&password={vnc_password}"
-    elif 'dorowu/ubuntu-desktop-lxde-vnc' in image:
-        # websockify path is typically /websockify or /websockify, but dorowu bundle routes internally via static/vnc.html
-        connect_path = '/static/vnc.html'
-        # Important: noVNC connects to ws on the HTTP port via path=websockify
-        connect_query = f"autoconnect=1&password={vnc_password}&host=localhost&port={http_port}&path=websockify"
-    elif 'accetto' in image:
-        # Accetto images publish viewer at '/' or '/vnc.html'
+    elif 'linuxserver/webtop' in image or 'lscr.io/linuxserver/webtop' in image:
+        # Webtop serves UI at / on :3000 and doesn't use the noVNC query params
         connect_path = '/'
-        connect_query = f"autoconnect=1&password={vnc_password}"
+        connect_query = ''
     else:
-        connect_path = '/'
-        connect_query = f"autoconnect=1&password={vnc_password}"
-    connect_url = f"http://localhost:{http_port}{connect_path}?{connect_query}"
+        # Auto-detect between accetto (/vnc.html) and dorowu (/static/vnc.html)
+        path, q = _detect_viewer_path(http_port)
+        connect_path = path
+        # Always include password if we have one
+        connect_query = (q + ('&' if q else '') + f'password={vnc_password}').strip('&')
+    connect_url = f"http://localhost:{http_port}{connect_path}{('?' + connect_query) if connect_query else ''}"
     # Store meta
     with sqlite3.connect(api_server.database.db_path) as conn:
         conn.execute(
@@ -1478,46 +1527,71 @@ async def vd_create(request: Request, spec: VDCreateRequest, background_tasks: B
         pkgs = [p.strip() for p in default_pkgs.split(',') if p.strip()]
     def _check_network_and_install(cid: str, packages: List[str]):
         try:
-            # Quick network connectivity check via a fast apt-get update with low timeouts
+            # Detect package manager and refresh caches with reasonable timeout
             try:
-                _docker_run(['exec', '-u', '0', cid, 'bash', '-lc', "apt-get update -o Acquire::http::Timeout=5 -o Acquire::https::Timeout=5 -y || true"], timeout=180)  # noqa: E501
-                api_server.database.log_event('vd_network_ok', session_id, 'Network connectivity verified inside desktop', 'info')
+                pm_detect = (
+                    'set +e; '
+                    'pm=""; '
+                    'if command -v apt-get >/dev/null 2>&1; then pm=apt; '
+                    'elif command -v dnf >/dev/null 2>&1; then pm=dnf; '
+                    'elif command -v yum >/dev/null 2>&1; then pm=yum; '
+                    'elif command -v apk >/dev/null 2>&1; then pm=apk; fi; '
+                    'echo "$pm"'
+                )
+                pm = _docker_run(['exec','-u','0', cid, 'bash','-lc', pm_detect], timeout=60).strip()
+            except HTTPException:
+                pm = ''
+            try:
+                if pm == 'apt':
+                    _docker_run(['exec','-u','0', cid, 'bash','-lc', 'export DEBIAN_FRONTEND=noninteractive; apt-get update -y -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 || true'], timeout=600)
+                elif pm == 'dnf':
+                    _docker_run(['exec','-u','0', cid, 'bash','-lc', 'dnf -y makecache || true'], timeout=600)
+                elif pm == 'yum':
+                    _docker_run(['exec','-u','0', cid, 'bash','-lc', 'yum -y makecache || true'], timeout=600)
+                elif pm == 'apk':
+                    _docker_run(['exec','-u','0', cid, 'bash','-lc', 'apk update || true'], timeout=300)
+                api_server.database.log_event('vd_network_ok', session_id, f'PM={pm or "unknown"}: repo cache refreshed', 'info')
             except HTTPException as e:
-                api_server.database.log_event('vd_network_warn', session_id, f'Network check issue: {e.detail}', 'warning')
+                api_server.database.log_event('vd_network_warn', session_id, f'PM={pm or "unknown"}: repo refresh issue: {e.detail}', 'warning')
             # Install additional packages if requested
             if packages:
-                # Install packages individually to avoid whole-command failure if one package is unavailable
+                # Install packages individually with cross-distro fallbacks
                 pkgs_str = ' '.join([shlex.quote(p) if ' ' in p else p for p in packages]) if packages else ''
-                # For Ubuntu containers, the standard 'firefox' apt may be a snap and fail.
-                # Try a chain of fallbacks for browsers so at least one GUI browser is available.
-                install_script = (
-                    'set +e; '
-                    + 'export DEBIAN_FRONTEND=noninteractive; '
-                    + 'apt-get update -y >/dev/null 2>&1 || true; '
-                    + 'for p in ' + pkgs_str + '; do '
-                    + '  installed=0; echo "Installing $p"; '
-                    + '  case "$p" in '
-                    + '    firefox|browser) '
-                    + '      for alt in firefox epiphany-browser midori chromium; do '
-                    + '        apt-get install -y --no-install-recommends "$alt" >/dev/null 2>&1 && echo "INSTALL_OK:$alt" && installed=1 && break; '
-                    + '      done; '
-                    + '      [ $installed -eq 1 ] || echo "INSTALL_FAIL:$p"; '
-                    + '      ;;'
-                    + '    chromium|chromium-browser) '
-                    + '      for alt in chromium chromium-browser chromium-common epiphany-browser midori; do '
-                    + '        apt-get install -y --no-install-recommends "$alt" >/dev/null 2>&1 && echo "INSTALL_OK:$alt" && installed=1 && break; '
-                    + '      done; '
-                    + '      [ $installed -eq 1 ] || echo "INSTALL_FAIL:$p"; '
-                    + '      ;;'
-                    + '    *) '
-                    + '      apt-get install -y --no-install-recommends "$p" >/dev/null 2>&1 && echo "INSTALL_OK:$p" || echo "INSTALL_FAIL:$p"; '
-                    + '      ;;'
-                    + '  esac; '
-                    + 'done; true'
-                )
+                parts = [
+                    'set +e; export DEBIAN_FRONTEND=noninteractive; ',
+                    'pm=""; ',
+                    'if command -v apt-get >/dev/null 2>&1; then pm=apt; ',
+                    'elif command -v dnf >/dev/null 2>&1; then pm=dnf; ',
+                    'elif command -v yum >/dev/null 2>&1; then pm=yum; ',
+                    'elif command -v apk >/dev/null 2>&1; then pm=apk; fi; ',
+                    'install_apt() { apt-get install -y --no-install-recommends "$1" >/dev/null 2>&1; }; ',
+                    'install_dnf() { dnf install -y "$1" >/dev/null 2>&1; }; ',
+                    'install_yum() { yum install -y "$1" >/dev/null 2>&1; }; ',
+                    'install_apk() { apk add --no-cache "$1" >/dev/null 2>&1; }; ',
+                    'do_install() { case "$pm" in apt) install_apt "$1" ;; dnf) install_dnf "$1" ;; yum) install_yum "$1" ;; apk) install_apk "$1" ;; *) return 1 ;; esac; }; ',
+                    'for p in ', pkgs_str, ' ; do ',
+                    '  installed=0; echo "Installing $p via $pm"; ',
+                    '  case "$p" in ',
+                    '    firefox|browser) ',
+                    '      for alt in firefox firefox-esr chromium epiphany-browser epiphany midori; do do_install "$alt" && echo "INSTALL_OK:$alt" && installed=1 && break; done; ',
+                    '      [ $installed -eq 1 ] || echo "INSTALL_FAIL:$p"; ;;',
+                    '    chromium|chromium-browser) ',
+                    '      for alt in chromium chromium-browser chromium-common epiphany-browser epiphany midori; do do_install "$alt" && echo "INSTALL_OK:$alt" && installed=1 && break; done; ',
+                    '      [ $installed -eq 1 ] || echo "INSTALL_FAIL:$p"; ;;',
+                    '    *) do_install "$p" && echo "INSTALL_OK:$p" || echo "INSTALL_FAIL:$p"; ;;',
+                    '  esac; ',
+                    'done; ',
+                    'BROWSER=$(command -v firefox || command -v chromium || command -v epiphany-browser || command -v epiphany || command -v midori || true); ',
+                    'echo "BROWSER_DETECTED:${BROWSER}"; true'
+                ]
+                install_script = ''.join(parts)
                 try:
-                    _docker_run(['exec', '-u', '0', cid, 'bash', '-lc', install_script], timeout=1200)
-                    api_server.database.log_event('vd_packages', session_id, f'Package install attempted: {packages}', 'info')
+                    out = _docker_run(['exec', '-u', '0', cid, 'bash', '-lc', install_script], timeout=1800)
+                    api_server.database.log_event('vd_packages', session_id, f'Install attempted (pm={pm or "unknown"}): {packages}', 'info')
+                    # Surface detected browser to logs
+                    if out and 'BROWSER_DETECTED:' in out:
+                        line = [ln for ln in out.splitlines() if ln.startswith('BROWSER_DETECTED:')][-1]
+                        api_server.database.log_event('vd_browser', session_id, line, 'info')
                 except HTTPException as e:
                     api_server.database.log_event('vd_packages_error', session_id, f'Package loop failed: {e.detail}', 'warning')
         except HTTPException as e:
@@ -1549,11 +1623,22 @@ async def vd_profiles(request: Request):
 async def vd_get_url(request: Request, session_id: str):
     sid, key = validate_secure(request.headers)
     with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT connect_url,http_port,vnc_port,vnc_password,os_image FROM vd_session_meta WHERE session_id = ?', (session_id,))
+        cur = conn.execute('SELECT connect_url,http_port,vnc_port,vnc_password,os_image,container_id FROM vd_session_meta WHERE session_id = ?', (session_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail='VD session not found')
-        connect_url, http_port, vnc_port, vnc_password, os_image = row
+        connect_url, http_port, vnc_port, vnc_password, os_image, container_id = row
+    # Try to ensure container is running
+    try:
+        state = _docker_run(['inspect','-f','{{.State.Running}}', container_id]) if container_id else 'true'
+        if state.strip().lower() != 'true':
+            try:
+                _docker_run(['start', container_id])
+                time.sleep(0.5)
+            except HTTPException:
+                pass
+    except HTTPException:
+        pass
     # Recompute connect URL to handle image variations and fix older sessions
     image = _image_for_os(os_image)
     custom_viewer = None
@@ -1567,16 +1652,15 @@ async def vd_get_url(request: Request, session_id: str):
     if custom_viewer:
         connect_path = custom_viewer
         query = f"autoconnect=1&password={vnc_password}"
-    elif 'dorowu/ubuntu-desktop-lxde-vnc' in image:
-        connect_path = '/static/vnc.html'
-        query = f"autoconnect=1&password={vnc_password}&host=localhost&port={http_port}&path=websockify"
-    elif 'accetto' in image:
+    elif 'linuxserver/webtop' in image or 'lscr.io/linuxserver/webtop' in image:
         connect_path = '/'
-        query = f"autoconnect=1&password={vnc_password}"
+        query = ''
     else:
-        connect_path = '/'
-        query = f"autoconnect=1&password={vnc_password}"
-    new_url = f"http://localhost:{http_port}{connect_path}?{query}"
+        # Auto-detect path live in case the image mapping changed or a snapshot was restored
+        path, q = _detect_viewer_path(http_port)
+        connect_path = path
+        query = (q + ('&' if q else '') + f'password={vnc_password}').strip('&')
+    new_url = f"http://localhost:{http_port}{connect_path}{('?' + query) if query else ''}"
     payload = {'session_id': session_id, 'connect_url': new_url, 'http_port': http_port, 'vnc_port': vnc_port}
     return wrap_encrypted(sid, key, payload)
 
@@ -1947,9 +2031,22 @@ async def vd_os_list(request: Request):
     builtin = [
     {'id':'ubuntu-xfce', 'image':'accetto/ubuntu-vnc-xfce:latest', 'http_port':6901, 'vnc_port':5901, 'viewer_path':'/', 'description':'Ubuntu + XFCE (modern) + noVNC'},
     {'id':'ubuntu-xfce-chromium', 'image':'accetto/ubuntu-vnc-xfce:latest', 'http_port':6901, 'vnc_port':5901, 'viewer_path':'/', 'description':'Ubuntu + XFCE (Chromium via packages)'},
+    {'id':'ubuntu-webtop', 'image':'lscr.io/linuxserver/webtop:ubuntu', 'http_port':3000, 'vnc_port':5901, 'viewer_path':'/', 'description':'Ubuntu Webtop (browser-based desktop)'},
         {'id':'ubuntu-lxde-legacy', 'image':'dorowu/ubuntu-desktop-lxde-vnc', 'http_port':80, 'vnc_port':5900, 'viewer_path':'/static/vnc.html', 'description':'Legacy LXDE variant'},
-        {'id':'debian-xfce', 'image':'accetto/debian-vnc-xfce', 'http_port':6901, 'vnc_port':5901, 'viewer_path':'/', 'description':'Debian + XFCE'},
+    {'id':'debian-xfce', 'image':'accetto/debian-vnc-xfce', 'http_port':6901, 'vnc_port':5901, 'viewer_path':'/', 'description':'Debian + XFCE'},
+    {'id':'debian-webtop', 'image':'lscr.io/linuxserver/webtop:debian', 'http_port':3000, 'vnc_port':5901, 'viewer_path':'/', 'description':'Debian Webtop (browser-based desktop)'},
+    {'id':'fedora-webtop', 'image':'lscr.io/linuxserver/webtop:fedora', 'http_port':3000, 'vnc_port':5901, 'viewer_path':'/', 'description':'Fedora Webtop (browser-based desktop)'},
+    # RHEL-family presented as external connectors to avoid broken tags
+    {'id':'centos-stream', 'image':'external/centos', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'CentOS Stream (external – connect via RDP/VNC/SSH)', 'experimental': True},
+    {'id':'almalinux', 'image':'external/almalinux', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'AlmaLinux (external – connect via RDP/VNC/SSH)', 'experimental': True},
+    {'id':'rocky-linux', 'image':'external/rocky', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'Rocky Linux (external – connect via RDP/VNC/SSH)', 'experimental': True},
         {'id':'kali-xfce', 'image':'lscr.io/linuxserver/kali-linux:latest', 'http_port':80, 'vnc_port':5900, 'viewer_path':'/', 'description':'Kali XFCE (may need extra config)'},
+    # External OS (not containerized): provide as a catalog entry for UX; route users to RDP/VNC connectors
+    {'id':'qubes-os', 'image':'external/qubes', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'Qubes OS (external VM – connect via RDP/VNC)', 'experimental': True},
+    {'id':'freebsd', 'image':'external/freebsd', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'FreeBSD (external – connect via RDP/VNC/SSH)', 'experimental': True},
+    {'id':'openbsd', 'image':'external/openbsd', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'OpenBSD (external – connect via RDP/VNC/SSH)', 'experimental': True},
+    {'id':'inferno-os', 'image':'external/inferno', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'Inferno (research – external VM)', 'experimental': True},
+    {'id':'plan9', 'image':'external/plan9', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'Plan 9 from Bell Labs (research – external VM)', 'experimental': True},
     ]
     custom=[]
     try:

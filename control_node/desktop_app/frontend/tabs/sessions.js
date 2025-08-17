@@ -679,16 +679,20 @@ export function renderSessions(root, state) {
   // Create dialog for VD creation
   window.openVdCreateDialog = async () => {
     // Load OS catalog and profiles concurrently
-    const [cat, profResp] = await Promise.all([
+    const [cat, profResp, dock] = await Promise.all([
       window.api.getOsCatalog().catch(()=>({ builtin: [], custom: [] })),
       window.api.getVdProfiles().catch(() => ({ profiles: [
         { id: 'browser', label: 'Browser', packages: ['firefox','curl','wget','zip','unzip'] },
         { id: 'developer', label: 'Developer', packages: ['firefox','git','curl','wget','htop','build-essential','vim','python3','python3-pip'] },
         { id: 'office', label: 'Office', packages: ['firefox','libreoffice','curl','zip','unzip'] }
-      ] }))
+      ] })),
+      window.api.getDockerHealth().catch(() => ({ docker: false }))
     ]);
     const options = [...(cat.builtin||[]), ...(cat.custom||[])];
-    const selOptions = options.map(o => `<option value="${o.id}">${o.id}${o.description?` (${o.description})`:''}</option>`).join('');
+    const selOptions = options.map(o => {
+      const label = `${o.id}${o.description?` (${o.description})`:''}${o.experimental?` [experimental]`:''}`;
+      return `<option value="${o.id}">${label}</option>`;
+    }).join('');
     const profiles = profResp?.profiles || [];
     const profOptions = (profiles.length
       ? profiles.map(p => `<option value="${p.id}" ${p.id==='browser'?'selected':''}>${p.label}</option>`).join('')
@@ -722,7 +726,7 @@ export function renderSessions(root, state) {
       profileSel.onchange = syncPkgs;
     }
     dlg.querySelector('#vd-cancel').onclick = () => dlg.remove();
-    dlg.querySelector('#vd-create').onclick = async () => {
+  dlg.querySelector('#vd-create').onclick = async () => {
       try {
         const os_image = dlg.querySelector('#vd-os').value || 'ubuntu-xfce';
         const profile = (dlg.querySelector('#vd-profile')?.value || 'browser');
@@ -732,6 +736,22 @@ export function renderSessions(root, state) {
         const vnc_password = (dlg.querySelector('#vd-pass').value||'').trim() || undefined;
         const pkgsRaw = (dlg.querySelector('#vd-pkgs').value||'').trim();
         const packages = pkgsRaw ? pkgsRaw.split(',').map(s=>s.trim()).filter(Boolean) : undefined;
+        // External OS guard: route to RDP connector flow
+        if (['qubes','qubes-os','qubesos','freebsd','openbsd','inferno-os','plan9'].includes(os_image)) {
+          dlg.remove();
+          const label = os_image.replace('-', ' ').toUpperCase();
+          window.notify('info', label, 'This OS runs outside containers. Use RDP/VNC to connect to an existing VM or server.');
+          // Open RDP inline dialog
+          await window.createSession('rdp');
+          return;
+        }
+        // Docker health pre-check
+        if (!dock?.docker) {
+          dlg.remove();
+          window.notify('error', 'Docker', 'Docker Desktop is not running. Use RDP or start Docker and retry.');
+          await window.createSession('rdp');
+          return;
+        }
         window.notify('info', 'Session Creation', 'Launching desktop...');
         const pkt = await window.api.createVirtualDesktop({ user_id: 'admin', os_image, cpu_cores, memory_gb, gpu_units: 0, packages, resolution, vnc_password, profile });
         dlg.remove();
@@ -777,6 +797,13 @@ export function renderSessions(root, state) {
           setTimeout(() => window.connectDesktop(newId), 300);
         }
       } else if (type === 'vnc') {
+        // Check Docker health first; if down, route to RDP
+        const dock = await window.api.getDockerHealth().catch(() => ({ docker: false }));
+        if (!dock?.docker) {
+          window.notify('error', 'Docker', 'Docker Desktop is not running. Opening RDP connector.');
+          await window.createSession('rdp');
+          return;
+        }
         const os_image = 'ubuntu-xfce';
         const pkt = await window.api.createVirtualDesktop({ user_id: 'admin', os_image, profile: 'browser' });
         const sessionsPkt = await window.api.getSessions();
@@ -848,7 +875,7 @@ export function renderSessions(root, state) {
       // Wait for viewer readiness: poll health for up to ~10s
       const url = await (async () => {
         const start = Date.now();
-        const timeoutMs = 10000;
+  const timeoutMs = 20000;
         const delay = (ms) => new Promise(r => setTimeout(r, ms));
         // Helper to check health
         const healthy = async () => {
