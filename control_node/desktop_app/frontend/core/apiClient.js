@@ -7,18 +7,130 @@ export class ApiClient {
     const auto = `${proto}://127.0.0.1:8443`;
     const finalBase = base || window.OMEGA_CONFIG?.FALLBACK_API_URL || auto;
     this.base = finalBase.replace(/\/$/, '');
-    this.token = null;
-    this.sessionId = null;
-    this.sessionKey = null; // base64 string
-    this.ready = this.initialize();
+  this.token = null;
+  this.sessionId = null;
+  this.sessionKey = null; // base64 string (kept in sessionStorage only)
+  this.ready = this.initialize();
   this._actionCtr = 0;
+  this._polling = false;
+  this._storagePrefix = 'omega_session';
   }
 
   async initialize() {
+    // Recover persisted session if available
+    try {
+      const saved = localStorage.getItem(this._storagePrefix);
+      if (saved) {
+        const obj = JSON.parse(saved);
+        if (obj && obj.sessionId && obj.token) {
+          this.sessionId = obj.sessionId;
+          this.token = obj.token;
+          this._actionCtr = obj.ctr || 0;
+          // sessionKey is intentionally stored in sessionStorage only (per-tab memory)
+          const key = sessionStorage.getItem(`${this._storagePrefix}_key:${this.sessionId}`);
+          if (key) {
+            this.sessionKey = key;
+            return;
+          }
+          // no sessionKey available in this tab; fall through to full handshake
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+    // Check WebCrypto support early
+    this.cryptoAvailable = (typeof window !== 'undefined' && window.crypto && window.crypto.subtle);
+    if (!this.cryptoAvailable) {
+      console.error('[ApiClient] Web Crypto API not available in this environment; secure transport will not function');
+    }
     // 1) Authenticate (reuse static admin for now)
     await this._login();
     // 2) Establish secure session
     await this._handshake();
+    // 3) Start realtime WS to receive server push notifications (rekey requests, etc.)
+    try {
+      this._startRealtime();
+    } catch (e) {
+      // Non-fatal
+    }
+    // Start polling fallback in case WS is unavailable
+    try { this._startPoll(); } catch (e) {}
+  }
+
+  _startRealtime() {
+    try {
+      if (!this.sessionId) return;
+      const proto = (location && location.protocol === 'https:') ? 'wss' : 'ws';
+      const host = (new URL(this.base)).host;
+      const wsUrl = `${proto}://${host}/ws/secure/realtime?session_id=${encodeURIComponent(this.sessionId)}`;
+      this._ws = new WebSocket(wsUrl);
+      this._ws.addEventListener('open', () => {
+        // Ensure polling stops when WS is active
+        try { this._stopPoll(); } catch (e) {}
+      });
+      this._ws.addEventListener('message', async (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data && data.type === 'rekey_request') {
+            // Server asks client to rotate its AES key. Perform client-initiated rotate.
+            try {
+              await this.rotateSessionKey();
+              // Optionally notify UI
+              console.info('[ApiClient] Performed automatic session rotate on server request');
+            } catch (e) {
+              console.error('[ApiClient] Automatic rotate failed:', e);
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      });
+  this._ws.addEventListener('close', () => { this._ws = null; this._startPoll(); });
+  this._ws.addEventListener('error', (e) => { /* ignore */ });
+    } catch (e) {
+      // ignore failures
+    }
+  }
+
+  _startPoll(interval = 15000) {
+    if (this._pollTimer || this._ws) return;
+    try {
+      this._pollTimer = setInterval(async () => {
+        if (!this.sessionId) return;
+        try {
+          const res = await fetch(`${this.base}/api/secure/session/poll`, { method: 'POST', headers: this._headers({ 'Content-Type':'application/json' }), body: JSON.stringify({ session_id: this.sessionId }) });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data.status === 'rekey_pending') {
+            try {
+              window.notify && window.notify('info','Key rotation requested','Server requested key rotation for this session');
+              await this.rotateSessionKey();
+              window.notify && window.notify('success','Key rotated','Session key rotated successfully');
+            } catch (e) {
+              window.notify && window.notify('error','Rotation failed',String(e));
+            }
+          } else if (data.status === 'revoked') {
+            window.notify && window.notify('error','Session revoked','This session has been revoked by an administrator');
+            // clear local session and force reload
+            this.clearSession();
+            try { this._stopPoll(); } catch (e) {}
+          }
+        } catch (e) {
+          // ignore transient poll errors
+        }
+      }, interval);
+    } catch (e) {}
+  }
+
+  _stopPoll() {
+  try { if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; } } catch (e) {}
+  }
+
+  clearSession() {
+  try { localStorage.removeItem(this._storagePrefix); } catch (e){}
+  try { if (this.sessionId) sessionStorage.removeItem(`${this._storagePrefix}_key:${this.sessionId}`); } catch (e) {}
+  this.sessionId = null; this.sessionKey = null; this.token = null; this._actionCtr = 0;
+  try { if (this._ws) this._ws.close(); } catch (e) {}
   }
 
   async _login() {
@@ -29,19 +141,49 @@ export class ApiClient {
     });
     if (!res.ok) throw new Error(`Auth failed: ${res.status}`);
     const data = await res.json();
-    this.token = data?.token ? `Bearer ${JSON.stringify(data.token)}` : 'Bearer bootstrap';
+    // Normalize token: server may return encrypted token object or raw string. Keep token as a compact string.
+    if (data?.token) {
+      const tok = typeof data.token === 'string' ? data.token : btoa(JSON.stringify(data.token));
+      this.token = `Bearer ${tok}`;
+    } else {
+      this.token = 'Bearer bootstrap';
+    }
   }
 
   async _handshake() {
+    // 1) fetch server RSA public key
+    const pubRes = await fetch(`${this.base}/api/secure/public_key`);
+    if (!pubRes.ok) throw new Error('Failed to fetch server public key');
+    const pubData = await pubRes.json();
+    const pem = pubData.public_key_pem;
+    // Import server RSA public key
+    const spki = this._pemToArrayBuffer(pem);
+    const pubKey = await crypto.subtle.importKey('spki', spki, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+    // 2) generate AES-256-GCM key locally
+    const rawKey = crypto.getRandomValues(new Uint8Array(32));
+    this.sessionKey = this._bytesToB64(rawKey);
+    // 3) encrypt AES key with server RSA public key
+    const encrypted = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pubKey, rawKey);
+    const encrypted_b64 = btoa(String.fromCharCode(...new Uint8Array(encrypted)));
+    // 4) send encrypted_key to server to register session (server stores key; does NOT return it)
     const res = await fetch(`${this.base}/api/secure/session/start`, {
       method: 'POST',
       headers: { 'Authorization': this.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ client: 'desktop-app', user_id: 'admin' })
+      body: JSON.stringify({ client: 'desktop-app', user_id: 'admin', encrypted_key: encrypted_b64 })
     });
     if (!res.ok) throw new Error(`Handshake failed: ${res.status}`);
     const data = await res.json();
     this.sessionId = data.session_id;
-    this.sessionKey = data.session_key; // base64
+    // If server issued a token, persist it alongside session info
+    if (data && data.token) {
+      const tok = typeof data.token === 'string' ? data.token : btoa(JSON.stringify(data.token));
+      this.token = `Bearer ${tok}`;
+    }
+    // Persist minimal metadata to localStorage and keep sessionKey in sessionStorage (per-tab)
+    try {
+      localStorage.setItem(this._storagePrefix, JSON.stringify({ sessionId: this.sessionId, token: this.token, ctr: this._actionCtr }));
+      sessionStorage.setItem(`${this._storagePrefix}_key:${this.sessionId}`, this.sessionKey);
+    } catch (e) {}
   }
 
   // AES-GCM decrypt utility matching backend wrap_encrypted
@@ -85,9 +227,63 @@ export class ApiClient {
     return Object.assign({
       'Authorization': this.token,
       'X-Session-ID': this.sessionId,
-      'X-Session-Key': this.sessionKey,
       'Content-Type': 'application/json'
     }, extra);
+  }
+
+  // Client-initiated rekey flow: generate a fresh AES key, encrypt with server RSA pubkey and POST to rotate endpoint
+  async rotateSessionKey() {
+    // generate fresh AES key
+    const rawKey = crypto.getRandomValues(new Uint8Array(32));
+    const spkiRes = await fetch(`${this.base}/api/secure/public_key`);
+    if (!spkiRes.ok) throw new Error('Failed fetching public key for rotation');
+    const spkiData = await spkiRes.json();
+    const pem = spkiData.public_key_pem;
+    const spki = this._pemToArrayBuffer(pem);
+    const pubKey = await crypto.subtle.importKey('spki', spki, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+    const encrypted = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pubKey, rawKey);
+    const encrypted_b64 = btoa(String.fromCharCode(...new Uint8Array(encrypted)));
+    const body = { session_id: this.sessionId, encrypted_key: encrypted_b64 };
+    const res = await fetch(`${this.base}/api/secure/session/rotate`, { method: 'POST', headers: this._headers({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    if (!res.ok) {
+      const txt = await res.text().catch(()=>'');
+      window.notify && window.notify('error','Rotate failed',`Server error ${res.status}`+(txt?` - ${txt}`:''));
+      throw new Error(`Rotate failed: ${res.status} ${txt}`);
+    }
+    const data = await res.json().catch(()=>null);
+    // on success, update locally-held sessionKey and persist
+    this.sessionKey = this._bytesToB64(rawKey);
+  try { sessionStorage.setItem(`${this._storagePrefix}_key:${this.sessionId}`, this.sessionKey); } catch (e) {}
+    window.notify && window.notify('success','Rotate successful','New session key installed');
+    return data || true;
+  }
+
+  // Admin helper: revoke a session (requires admin privileges on caller)
+  async adminRevokeSession(targetSessionId, reason = '') {
+    const body = { session_id: targetSessionId, reason };
+    const pkt = await this._req('/api/secure/admin/session/revoke', { method: 'POST', body: JSON.stringify(body) });
+    return pkt;
+  }
+
+  // Admin helper: request server-side rotate which will signal client via WS
+  async adminRotateSession(targetSessionId) {
+    const body = { session_id: targetSessionId };
+    const pkt = await this._req('/api/secure/admin/session/rotate', { method: 'POST', body: JSON.stringify(body) });
+    return pkt;
+  }
+
+  _pemToArrayBuffer(pem) {
+    // remove header/footer and newlines
+    const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+    const bin = atob(b64);
+    const len = bin.length;
+    const buf = new Uint8Array(len);
+    for (let i = 0; i < len; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+
+  _bytesToB64(bytes) {
+    return btoa(String.fromCharCode(...new Uint8Array(bytes)));
   }
 
   async _req(path, opts = {}) {
@@ -105,6 +301,13 @@ export class ApiClient {
       throw new Error(`${path} failed: ${res.status}${detail}`);
     }
     const data = await res.json();
+    // Persist CTR and token after successful secure request to reduce race on client crash
+    try {
+      // save minimal meta (no sessionKey) and keep key in sessionStorage
+      if (this.sessionId) {
+        localStorage.setItem(this._storagePrefix, JSON.stringify({ sessionId: this.sessionId, token: this.token, ctr: this._actionCtr }));
+      }
+    } catch (e) {}
     return this._decryptPacket(data);
   }
 

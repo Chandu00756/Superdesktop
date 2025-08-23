@@ -55,6 +55,7 @@ except ImportError:
 # Monitoring
 import structlog
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from utils.metrics import create_counter, create_gauge, create_histogram
 
 # Configure logging
 structlog.configure(
@@ -78,11 +79,11 @@ structlog.configure(
 logger = structlog.get_logger()
 
 # Prometheus Metrics
-prediction_requests_total = Counter('prediction_requests_total', 'Total prediction requests', ['model_type'])
-prediction_accuracy = Gauge('prediction_accuracy_score', 'Model prediction accuracy', ['model_type'])
-anomaly_detections_total = Counter('anomaly_detections_total', 'Total anomalies detected', ['anomaly_type'])
-model_training_duration = Histogram('model_training_duration_seconds', 'Model training duration')
-prediction_latency = Histogram('prediction_latency_seconds', 'Prediction request latency')
+prediction_requests_total = create_counter('prediction_requests_total', 'Total prediction requests', ['model_type'])
+prediction_accuracy = create_gauge('prediction_accuracy_score', 'Model prediction accuracy', ['model_type'])
+anomaly_detections_total = create_counter('anomaly_detections_total', 'Total anomalies detected', ['anomaly_type'])
+model_training_duration = create_histogram('model_training_duration_seconds', 'Model training duration')
+prediction_latency = create_histogram('prediction_latency_seconds', 'Prediction request latency')
 
 # Prediction Types and Models
 class PredictionType(Enum):
@@ -463,10 +464,10 @@ class MLModelManager:
             joblib.dump(model, f"{models_dir}/{model_name}_model.pkl")
             joblib.dump(scaler, f"{models_dir}/{model_name}_scaler.pkl")
             
-            logger.info(f"Model saved successfully", model_name=model_name)
+            logger.info("Model saved successfully: %s", model_name)
             
         except Exception as e:
-            logger.error(f"Failed to save model", model_name=model_name, error=str(e))
+            logger.error("Failed to save model %s: %s", model_name, str(e))
     
     async def load_models(self):
         """Load models from disk"""
@@ -480,10 +481,10 @@ class MLModelManager:
                 if os.path.exists(model_path) and os.path.exists(scaler_path):
                     self.models[model_name] = joblib.load(model_path)
                     self.scalers[model_name] = joblib.load(scaler_path)
-                    logger.info(f"Model loaded successfully", model_name=model_name)
+                    logger.info("Model loaded successfully: %s", model_name)
             
         except Exception as e:
-            logger.error("Failed to load models", error=str(e))
+            logger.error("Failed to load models: %s", str(e))
 
 class PredictorService:
     """Main predictor service with advanced ML capabilities"""
@@ -506,12 +507,22 @@ class PredictorService:
     async def initialize(self):
         """Initialize the predictor service"""
         try:
-            # Redis connection
-            self.redis_client = await aioredis.from_url(
-                os.getenv('REDIS_URL', 'redis://localhost:6379'),
-                encoding='utf-8',
-                decode_responses=True
-            )
+            # Redis connection (centralized helper)
+            try:
+                from utils.redis_helper import get_redis_client
+                self.redis_client = await get_redis_client(os.getenv('REDIS_URL', 'redis://localhost:6379'))
+            except Exception as e:
+                logger.warning(f"Redis helper failed in predictor-service, using in-memory stub: {e}")
+                class _InMemoryRedisStub:
+                    def __init__(self):
+                        self._store = {}
+                    async def hset(self, key, mapping=None, **kwargs):
+                        self._store[key] = mapping or kwargs
+                    async def delete(self, key):
+                        self._store.pop(key, None)
+                    async def hgetall(self, key):
+                        return self._store.get(key, {})
+                self.redis_client = _InMemoryRedisStub()
             
             # PostgreSQL connection
             self.postgres_pool = await asyncpg.create_pool(

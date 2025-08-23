@@ -139,7 +139,7 @@ class BackendConnector:
     
     async def connect_websocket(self):
         try:
-            self.websocket = await websockets.connect(f"ws://127.0.0.1:8443/ws/realtime")
+            self.websocket = await websockets.connect("ws://127.0.0.1:8443/ws/realtime")
             asyncio.create_task(self.websocket_handler())
             logging.info("WebSocket connected")
         except Exception as e:

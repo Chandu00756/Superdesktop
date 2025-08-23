@@ -15,6 +15,8 @@ import hashlib
 
 from fastapi import FastAPI, WebSocket, BackgroundTasks
 from pydantic import BaseModel
+import os as _os
+_os.environ.setdefault('PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION', 'python')
 import aioredis
 import asyncpg
 from kubernetes import client, config
@@ -64,10 +66,45 @@ class OmegaOrchestrator:
     async def initialize(self):
         """Initialize orchestrator components"""
         # Redis for fast lookups
-        self.redis_client = await aioredis.from_url(REDIS_URL)
+        try:
+            # Use centralized helper which tries aioredis, redis.asyncio, then an in-memory stub.
+            from utils.redis_helper import get_redis_client
+            self.redis_client = await get_redis_client(REDIS_URL)
+        except Exception as e:
+            self.logger.warning(f"Redis client helper failed, using in-memory fallback: {e}")
+            class _InMemoryRedisStub:
+                def __init__(self):
+                    self._store = {}
+                async def hset(self, key, mapping=None, **kwargs):
+                    self._store[key] = mapping or kwargs
+                async def delete(self, key):
+                    self._store.pop(key, None)
+                async def hgetall(self, key):
+                    return self._store.get(key, {})
+            self.redis_client = _InMemoryRedisStub()
         
-        # PostgreSQL for persistent storage
-        self.postgres_pool = await asyncpg.create_pool(POSTGRES_URL)
+        # PostgreSQL for persistent storage (fall back to SQLite if not available)
+        try:
+            self.postgres_pool = await asyncpg.create_pool(POSTGRES_URL)
+        except Exception as e:
+            self.logger.warning(f"Postgres unavailable ({e}), falling back to local SQLite")
+            try:
+                import aiosqlite
+                # Use a simple aiosqlite-based thin pool wrapper
+                class _SQLitePool:
+                    def __init__(self, path):
+                        self.path = path
+                    async def acquire(self):
+                        return await aiosqlite.connect(self.path)
+                    async def __aenter__(self):
+                        return await aiosqlite.connect(self.path)
+                    async def __aexit__(self, exc_type, exc, tb):
+                        pass
+                sqlite_path = _os.path.join(_os.getcwd(), 'omega_orchestrator.db')
+                self.postgres_pool = _SQLitePool(sqlite_path)
+            except Exception:
+                self.logger.error("No local DB available for orchestrator persistence")
+                self.postgres_pool = None
         
         # etcd for distributed consensus
         self.etcd_client = etcd3.client(host='localhost', port=2379)

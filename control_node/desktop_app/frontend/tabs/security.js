@@ -202,7 +202,15 @@ export function renderSecurity(root, state) {
                 </div>
               </div>
             </div>
-          </div>
+            <div style="margin-top:12px; padding:8px; border-top:1px solid #eee;">
+              <h5>Admin Session Controls</h5>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <input id="admin-session-id" placeholder="session id (e.g. sid-...)" style="flex:1; padding:6px;" />
+                <button id="admin-rotate-btn" class="security-btn">Rotate</button>
+                <button id="admin-revoke-btn" class="security-btn danger">Revoke</button>
+              </div>
+              <div id="admin-session-result" style="margin-top:8px; color:#333;"></div>
+            </div>
         </div>
 
         <!-- Users & Access Panel -->
@@ -394,6 +402,38 @@ export function renderSecurity(root, state) {
   renderAuditLog(state);
   renderPoliciesList(state);
 
+  // Admin session control wiring (deferred until elements exist)
+  setTimeout(() => {
+    try {
+      const adminRotateBtn = root.querySelector('#admin-rotate-btn');
+      const adminRevokeBtn = root.querySelector('#admin-revoke-btn');
+      const adminSessionInput = root.querySelector('#admin-session-id');
+      const adminResult = root.querySelector('#admin-session-result');
+      if (adminRotateBtn && adminRevokeBtn && adminSessionInput && adminResult) {
+        adminRotateBtn.addEventListener('click', async () => {
+          const sid = adminSessionInput.value.trim();
+          if (!sid) { adminResult.innerText = 'Provide session id'; return; }
+          adminResult.innerText = 'Requesting rotate...';
+          try {
+            const res = await window.api.adminRotateSession(sid);
+            adminResult.innerText = 'Rotate requested (pushed=' + (res.pushed ? 'true' : 'false') + ')';
+          } catch (e) { adminResult.innerText = 'Rotate failed: ' + (e?.message || e); }
+        });
+        adminRevokeBtn.addEventListener('click', async () => {
+          const sid = adminSessionInput.value.trim();
+          if (!sid) { adminResult.innerText = 'Provide session id'; return; }
+          adminResult.innerText = 'Requesting revoke...';
+          try {
+            const res = await window.api.adminRevokeSession(sid);
+            adminResult.innerText = 'Revoked: ' + (res.revoked ? 'true' : 'false');
+          } catch (e) { adminResult.innerText = 'Revoke failed: ' + (e?.message || e); }
+        });
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, 120);
+
   // RBAC helpers bound to this render context
   function showBanner(msg, isError=false) {
     const el = root.querySelector('#rbac-banner');
@@ -414,9 +454,27 @@ export function renderSecurity(root, state) {
     try {
       userEl.textContent = 'loading...';
       rolesEl.textContent = '-';
-  const info = await window.api?.whoami?.();
+      const info = await window.api?.whoami?.();
       userEl.textContent = info?.user || 'unknown';
-      rolesEl.textContent = Array.isArray(info?.roles) ? (info.roles.join(', ') || 'none') : 'none';
+      // Show roles with descriptions if available
+      if (Array.isArray(info?.roles) && info?.role_descriptions) {
+        rolesEl.innerHTML = info.roles.map(r => {
+          const desc = info.role_descriptions[r] ? ` <span class='role-desc'>(${info.role_descriptions[r]})</span>` : '';
+          return `<span class='role-name'>${r}</span>${desc}`;
+        }).join(', ') || 'none';
+      } else {
+        rolesEl.textContent = Array.isArray(info?.roles) ? (info.roles.join(', ') || 'none') : 'none';
+      }
+      // Optionally show permissions somewhere in the UI
+      if (info?.permissions) {
+        let permEl = root.querySelector('#whoami-permissions');
+        if (!permEl) {
+          permEl = document.createElement('div');
+          permEl.id = 'whoami-permissions';
+          rolesEl.parentNode.appendChild(permEl);
+        }
+        permEl.innerHTML = `<span style='font-size:10px;color:#aaa;'>Permissions: ${info.permissions.join(', ')}</span>`;
+      }
     } catch (e) {
       userEl.textContent = 'error';
       rolesEl.textContent = '—';
@@ -454,6 +512,74 @@ export function renderSecurity(root, state) {
   window.refreshWhoami = refreshWhoami;
   window.assignRoleUI = assignRoleUI;
   window.removeRoleUI = removeRoleUI;
+
+  // User management actions
+  window.resetPassword = async function(username) {
+    try {
+      await window.api?.resetUserPassword?.(username);
+      showBanner(`Password reset for ${username}.`);
+    } catch (e) {
+      showBanner(`Reset failed: ${e?.message || e}`, true);
+    }
+  };
+  window.suspendUser = async function(username) {
+    try {
+      await window.api?.suspendUser?.(username);
+      showBanner(`User ${username} suspended.`);
+    } catch (e) {
+      showBanner(`Suspend failed: ${e?.message || e}`, true);
+    }
+  };
+  window.activateUser = async function(username) {
+    try {
+      await window.api?.activateUser?.(username);
+      showBanner(`User ${username} activated.`);
+    } catch (e) {
+      showBanner(`Activate failed: ${e?.message || e}`, true);
+    }
+  };
+
+  // Certificate actions
+  window.viewCertificate = async function(certName) {
+    try {
+      const cert = await window.api?.getCertificate?.(certName);
+      window.notify && window.notify('info', 'Certificate', JSON.stringify(cert, null, 2));
+    } catch (e) {
+      showBanner(`View failed: ${e?.message || e}`, true);
+    }
+  };
+  window.renewCertificate = async function(certName) {
+    try {
+      await window.api?.renewCertificate?.(certName);
+      showBanner(`Certificate ${certName} renewed.`);
+    } catch (e) {
+      showBanner(`Renew failed: ${e?.message || e}`, true);
+    }
+  };
+  window.revokeCertificate = async function(certName) {
+    try {
+      await window.api?.revokeCertificate?.(certName);
+      showBanner(`Certificate ${certName} revoked.`);
+    } catch (e) {
+      showBanner(`Revoke failed: ${e?.message || e}`, true);
+    }
+  };
+  window.generateCertificate = async function() {
+    try {
+      await window.api?.generateCertificate?.();
+      showBanner('Certificate generated.');
+    } catch (e) {
+      showBanner(`Generate failed: ${e?.message || e}`, true);
+    }
+  };
+  window.importCertificate = async function() {
+    try {
+      await window.api?.importCertificate?.();
+      showBanner('Certificate imported.');
+    } catch (e) {
+      showBanner(`Import failed: ${e?.message || e}`, true);
+    }
+  };
 
   // initial identity fetch
   refreshWhoami();

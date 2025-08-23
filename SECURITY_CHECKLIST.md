@@ -14,7 +14,7 @@
 - **Fixed**: Improved token verification with proper error handling
 - **Fixed**: Added environment variable support for admin credentials
 - **Added**: AES-256-GCM secure session bootstrap at `POST /api/secure/session/start`
-- **Added**: All `/api/secure/*` endpoints return AES-GCM encrypted payloads requiring `Authorization`, `X-Session-ID`, and `X-Session-Key` headers
+- **Added**: All `/api/secure/*` endpoints return AES-GCM encrypted payloads requiring `Authorization` and `X-Session-ID` headers. AES session keys are provisioned by the client and sent encrypted with the server RSA public key; keys are never returned by the server or sent alongside ciphertext.
 - **Added**: RBAC scaffolding (roles, user_roles) with default admin; enforced on destructive ops
 
 ### 3. Error Handling
@@ -32,7 +32,7 @@
 ### 5. Secure API & RBAC (New)
 
 - Secure endpoints under `/api/secure/*` (Dashboard, Nodes, Sessions, Processes, VD, RDP, Logs, Performance)
-- WebSocket realtime: `/ws/secure/realtime?session_id=...&session_key=...`
+- WebSocket realtime: `/ws/secure/realtime?session_id=...` (session_key must NOT be provided in query params; key material is kept client-side and server-side only)
 - RBAC enforcement:
   - Admin only: `/api/secure/processes/kill`, VD snapshot delete/restore
   - Owner or Admin: Delete VD or RDP sessions
@@ -163,7 +163,6 @@ OMEGA_SESSION_BASE=/absolute/path/to/data/object_storage/sessions
 ## 📞 Security Contacts
 
 - **Security Team**: <chandu@portalvii.com>
-- **Emergency**: +1-555-SECURITY
 - **Bug Reports**: <chandu@portalvii.com>
 
 ---

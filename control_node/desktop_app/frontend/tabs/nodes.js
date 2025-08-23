@@ -11,29 +11,48 @@ export function renderNodes(root, state) {
   const processes = (state.data.processes?.processes) || [];
   const logs = (state.data.logs?.events) || [];
   
-  // Create advanced nodes interface with sub-tabs
+  // Create advanced nodes interface with registration form and sub-tabs
   root.innerHTML = `
-    <div style="display: grid; grid-template-columns: 280px 1fr; gap: 16px; height: 100%;">
-      <!-- Nodes List -->
+    <div style="display: grid; grid-template-columns: 320px 1fr; gap: 16px; height: 100%;">
+      <!-- Nodes List & Registration -->
       <div style="display: flex; flex-direction: column; border: 1px solid var(--omega-gray-1); background: var(--omega-dark-3); border-radius: 4px; overflow: hidden;">
         <div style="padding: 12px; font: 600 12px var(--font-mono); color: var(--omega-cyan); border-bottom: 1px solid var(--omega-gray-1);">
           <i class="fas fa-server"></i> NODES (${nodes.length})
         </div>
         <div id="node-list" style="overflow: auto; flex: 1;"></div>
         <div style="padding: 8px; border-top: 1px solid var(--omega-gray-1);">
-          <button onclick="window.omegaAPI.secureAction('discover_nodes', {})" class="btn-primary" style="width: 100%; font-size: 11px;">
+          <button onclick="window.omegaAPI.secureAction('discover_nodes', {})" class="btn-primary" style="width: 100%; font-size: 11px; margin-bottom:8px;">
             <i class="fas fa-search"></i> Discover Nodes
           </button>
+          <button id="show-register-node" class="btn-secondary" style="width: 100%; font-size: 11px;">
+            <i class="fas fa-plus"></i> Register Node
+          </button>
+        </div>
+        <div id="register-node-form-container" style="display:none; background:var(--omega-dark-4); padding:12px; border-top:1px solid var(--omega-gray-1);">
+          <form id="register-node-form" autocomplete="off">
+            <div style="font:600 12px var(--font-mono); color:var(--omega-cyan); margin-bottom:8px;">Register New Node</div>
+            <input name="node_id" placeholder="Node ID" required style="width:100%;margin-bottom:6px;" />
+            <input name="node_type" placeholder="Type (compute/storage/gpu/edge)" required style="width:100%;margin-bottom:6px;" />
+            <input name="hostname" placeholder="Hostname" required style="width:100%;margin-bottom:6px;" />
+            <input name="ip_address" placeholder="IP Address" required style="width:100%;margin-bottom:6px;" />
+            <input name="port" placeholder="Port" type="number" required style="width:100%;margin-bottom:6px;" />
+            <input name="cpu_cores" placeholder="CPU Cores" type="number" required style="width:100%;margin-bottom:6px;" />
+            <input name="memory_gb" placeholder="Memory (GB)" type="number" required style="width:100%;margin-bottom:6px;" />
+            <input name="gpu_units" placeholder="GPU Units" type="number" style="width:100%;margin-bottom:6px;" />
+            <input name="storage_gb" placeholder="Storage (GB)" type="number" style="width:100%;margin-bottom:6px;" />
+            <input name="permissions" placeholder="Permissions (comma separated)" style="width:100%;margin-bottom:6px;" />
+            <textarea name="description" placeholder="Description" style="width:100%;margin-bottom:6px;"></textarea>
+            <button type="submit" class="btn-primary" style="width:100%;margin-top:4px;">Register</button>
+            <button type="button" id="cancel-register-node" class="btn-secondary" style="width:100%;margin-top:4px;">Cancel</button>
+            <div id="register-node-status" style="margin-top:6px;font-size:11px;"></div>
+          </form>
         </div>
       </div>
-      
       <!-- Node Detail with Sub-tabs -->
       <div style="display: flex; flex-direction: column; border: 1px solid var(--omega-gray-1); background: var(--omega-dark-3); border-radius: 4px; overflow: hidden;">
         <div id="node-detail-header" style="padding: 12px; border-bottom: 1px solid var(--omega-gray-1);">
           <div style="font: 600 14px var(--font-mono); color: var(--omega-white);">Select a node</div>
         </div>
-        
-        <!-- Node Sub-tabs -->
         <div id="node-subtabs" style="display: none; background: var(--omega-dark-2); border-bottom: 1px solid var(--omega-gray-1);">
           <div style="display: flex;">
             <button class="node-subtab active" data-subtab="overview">Overview</button>
@@ -44,13 +63,58 @@ export function renderNodes(root, state) {
             <button class="node-subtab" data-subtab="maintenance">Maintenance</button>
           </div>
         </div>
-        
-        <!-- Node Detail Content -->
         <div id="node-detail-content" style="flex: 1; padding: 16px; overflow: auto;">
           <div style="font: 400 13px var(--font-mono); color: var(--omega-light-1);">Select a node to view details</div>
         </div>
       </div>
     </div>`;
+
+  // Registration form logic
+  const showBtn = root.querySelector('#show-register-node');
+  const formContainer = root.querySelector('#register-node-form-container');
+  const form = root.querySelector('#register-node-form');
+  const cancelBtn = root.querySelector('#cancel-register-node');
+  const statusDiv = root.querySelector('#register-node-status');
+  showBtn.onclick = () => { formContainer.style.display = 'block'; showBtn.style.display = 'none'; };
+  cancelBtn.onclick = () => { formContainer.style.display = 'none'; showBtn.style.display = 'block'; statusDiv.textContent = ''; };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    statusDiv.textContent = 'Registering...';
+    const fd = new FormData(form);
+    const node_id = fd.get('node_id');
+    const node_type = fd.get('node_type');
+    const hostname = fd.get('hostname');
+    const ip_address = fd.get('ip_address');
+    const port = Number(fd.get('port'));
+    const cpu_cores = Number(fd.get('cpu_cores'));
+    const memory_gb = Number(fd.get('memory_gb'));
+    const gpu_units = Number(fd.get('gpu_units')) || 0;
+    const storage_gb = Number(fd.get('storage_gb')) || 0;
+    const permissions = (fd.get('permissions')||'').split(',').map(x=>x.trim()).filter(Boolean);
+    const description = fd.get('description');
+    const resources = { cpu_cores, memory_gb, gpu_units, storage_gb };
+    try {
+      await window.omegaAPI._req('/api/secure/nodes/register', {
+        method: 'POST',
+        body: JSON.stringify({ node_id, node_type, hostname, ip_address, port, resources, permissions, description })
+      });
+      statusDiv.textContent = 'Node registered!';
+      setTimeout(() => { formContainer.style.display = 'none'; showBtn.style.display = 'block'; statusDiv.textContent = ''; form.reset(); refreshNodes(); }, 1200);
+    } catch (err) {
+      statusDiv.textContent = 'Error: ' + (err?.message || err);
+    }
+  };
+
+  // Live refresh after registration
+  async function refreshNodes() {
+    try {
+      const pkt = await window.omegaAPI.getNodes();
+      state.data.nodes = pkt;
+      renderNodes(root, state);
+    } catch (e) {
+      window.notify && window.notify('error', 'Nodes', e.message);
+    }
+  }
 
   const list = root.querySelector('#node-list');
   let selectedNode = null;

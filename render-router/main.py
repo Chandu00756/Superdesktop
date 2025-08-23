@@ -57,6 +57,7 @@ except ImportError:
 # Monitoring
 import structlog
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from utils.metrics import create_counter, create_gauge, create_histogram
 
 # Configure logging
 structlog.configure(
@@ -80,13 +81,13 @@ structlog.configure(
 logger = structlog.get_logger()
 
 # Prometheus Metrics
-render_requests_total = Counter('render_requests_total', 'Total render requests', ['gpu_id', 'encoding'])
-frame_render_duration = Histogram('frame_render_duration_ms', 'Frame render time in milliseconds')
-encoding_duration = Histogram('encoding_duration_ms', 'Frame encoding time in milliseconds')
-frame_drops_total = Counter('frame_drops_total', 'Total dropped frames', ['reason'])
-bandwidth_utilization = Gauge('bandwidth_utilization_mbps', 'Current bandwidth utilization')
-gpu_render_utilization = Gauge('gpu_render_utilization_percent', 'GPU render utilization', ['gpu_id'])
-active_streams = Gauge('active_render_streams', 'Number of active render streams')
+render_requests_total = create_counter('render_requests_total', 'Total render requests', ['gpu_id', 'encoding'])
+frame_render_duration = create_histogram('frame_render_duration_ms', 'Frame render time in milliseconds')
+encoding_duration = create_histogram('encoding_duration_ms', 'Frame encoding time in milliseconds')
+frame_drops_total = create_counter('frame_drops_total', 'Total dropped frames', ['reason'])
+bandwidth_utilization = create_gauge('bandwidth_utilization_mbps', 'Current bandwidth utilization')
+gpu_render_utilization = create_gauge('gpu_render_utilization_percent', 'GPU render utilization', ['gpu_id'])
+active_streams = create_gauge('active_render_streams', 'Number of active render streams')
 
 # Rendering and Encoding Types
 class RenderingAPI(Enum):
@@ -608,12 +609,22 @@ class RenderRouter:
             # Initialize GPU manager
             await self.gpu_manager.initialize()
             
-            # Redis connection
-            self.redis_client = await aioredis.from_url(
-                os.getenv('REDIS_URL', 'redis://localhost:6379'),
-                encoding='utf-8',
-                decode_responses=True
-            )
+            # Redis connection via centralized helper
+            try:
+                from utils.redis_helper import get_redis_client
+                self.redis_client = await get_redis_client(os.getenv('REDIS_URL', 'redis://localhost:6379'))
+            except Exception as e:
+                logger.warning(f"Redis helper failed in render-router, using in-memory stub: {e}")
+                class _InMemoryRedisStub:
+                    def __init__(self):
+                        self._store = {}
+                    async def hset(self, key, mapping=None, **kwargs):
+                        self._store[key] = mapping or kwargs
+                    async def delete(self, key):
+                        self._store.pop(key, None)
+                    async def hgetall(self, key):
+                        return self._store.get(key, {})
+                self.redis_client = _InMemoryRedisStub()
             
             # PostgreSQL connection
             self.postgres_pool = await asyncpg.create_pool(

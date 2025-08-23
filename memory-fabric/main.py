@@ -41,6 +41,7 @@ import asyncpg
 # System monitoring
 import structlog
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from utils.metrics import create_counter, create_gauge, create_histogram
 
 # Configure logging
 structlog.configure(
@@ -64,13 +65,13 @@ structlog.configure(
 logger = structlog.get_logger()
 
 # Prometheus Metrics
-memory_allocations_total = Counter('memory_allocations_total', 'Total memory allocations', ['fabric_type', 'allocation_type'])
-memory_bandwidth_utilization = Gauge('memory_bandwidth_utilization_gbps', 'Memory bandwidth utilization', ['fabric_id', 'direction'])
-memory_fabric_latency = Histogram('memory_fabric_latency_ns', 'Memory fabric access latency in nanoseconds')
-memory_compression_ratio = Gauge('memory_compression_ratio', 'Memory compression ratio', ['fabric_id'])
-memory_deduplication_ratio = Gauge('memory_deduplication_ratio', 'Memory deduplication ratio', ['fabric_id'])
-numa_migrations_total = Counter('numa_migrations_total', 'Total NUMA migrations', ['source_node', 'target_node'])
-memory_encryption_overhead = Gauge('memory_encryption_overhead_percent', 'Memory encryption overhead percentage')
+memory_allocations_total = create_counter('memory_allocations_total', 'Total memory allocations', ['fabric_type', 'allocation_type'])
+memory_bandwidth_utilization = create_gauge('memory_bandwidth_utilization_gbps', 'Memory bandwidth utilization', ['fabric_id', 'direction'])
+memory_fabric_latency = create_histogram('memory_fabric_latency_ns', 'Memory fabric access latency in nanoseconds')
+memory_compression_ratio = create_gauge('memory_compression_ratio', 'Memory compression ratio', ['fabric_id'])
+memory_deduplication_ratio = create_gauge('memory_deduplication_ratio', 'Memory deduplication ratio', ['fabric_id'])
+numa_migrations_total = create_counter('numa_migrations_total', 'Total NUMA migrations', ['source_node', 'target_node'])
+memory_encryption_overhead = create_gauge('memory_encryption_overhead_percent', 'Memory encryption overhead percentage')
 
 # Memory Fabric Types and Technologies
 class FabricType(Enum):
@@ -525,11 +526,21 @@ class MemoryFabricService:
             await self.fabric_controller.initialize()
             
             # Redis connection
-            self.redis_client = await aioredis.from_url(
-                os.getenv('REDIS_URL', 'redis://localhost:6379'),
-                encoding='utf-8',
-                decode_responses=True
-            )
+            try:
+                from utils.redis_helper import get_redis_client
+                self.redis_client = await get_redis_client(os.getenv('REDIS_URL', 'redis://localhost:6379'))
+            except Exception as e:
+                logger.warning(f"Redis helper failed, using in-memory stub: {e}")
+                class _InMemoryRedisStub:
+                    def __init__(self):
+                        self._store = {}
+                    async def hset(self, key, mapping=None, **kwargs):
+                        self._store[key] = mapping or kwargs
+                    async def delete(self, key):
+                        self._store.pop(key, None)
+                    async def hgetall(self, key):
+                        return self._store.get(key, {})
+                self.redis_client = _InMemoryRedisStub()
             
             # PostgreSQL connection
             self.postgres_pool = await asyncpg.create_pool(

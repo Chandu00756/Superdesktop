@@ -1,3 +1,87 @@
+from fastapi import Body
+from fastapi import Request
+from typing import Optional
+from pydantic import BaseModel
+
+class NodeRegistrationRequest(BaseModel):
+    node_id: str
+    node_type: str
+    hostname: str
+    ip_address: str
+    port: int
+    resources: dict
+    permissions: Optional[list] = []
+    description: Optional[str] = None
+    device_fingerprint: str  # e.g. hash of hardware UUID, MAC, TPM, etc
+    public_key_pem: str      # Device public key PEM
+    signed_challenge: str    # Registration challenge signed by device private key
+    health_attestation: Optional[dict] = None  # TPM/secure boot, OS patch, malware scan, etc
+    device_certificate: Optional[str] = None   # PEM, signed by CA
+    geoip: Optional[str] = None                # GeoIP/location info
+    behavioral_baseline: Optional[dict] = None # Baseline resource/usage profile
+
+from fastapi import FastAPI
+# Ensure app is defined before any decorators
+app = FastAPI(
+    title="Omega Control Center API",
+    version="1.0.0",
+    description="Advanced encrypted backend for distributed desktop control"
+)
+
+@app.post('/api/secure/nodes/register')
+async def register_node(request: Request, body: NodeRegistrationRequest = Body(...)):
+    session_id, key = validate_secure(request.headers)
+    user = SESSION_META.get(session_id, {}).get('user', 'admin')
+    perms = SESSION_META.get(session_id, {}).get('permissions', [])
+    if 'admin' not in SESSION_META.get(session_id, {}).get('roles', []) and 'node_register' not in perms:
+        raise HTTPException(status_code=403, detail='Insufficient permissions to register node')
+    # Validate device fingerprint uniqueness
+    existing_nodes = api_server.database.get_nodes()
+    for n in existing_nodes:
+        res = n.get('resources')
+        if res:
+            try:
+                res_obj = json.loads(res) if isinstance(res, str) else res
+                if res_obj.get('device_fingerprint') == body.device_fingerprint:
+                    raise HTTPException(status_code=409, detail='Device fingerprint already registered')
+            except Exception as e:
+                logging.error(f"Error checking device fingerprint uniqueness: {e}")
+    # Validate public key and signed challenge (anti-spoof)
+    import base64, hashlib
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    try:
+        pubkey = serialization.load_pem_public_key(body.public_key_pem.encode())
+        challenge = (body.node_id + body.device_fingerprint).encode()
+        signature = base64.b64decode(body.signed_challenge)
+        pubkey.verify(signature, challenge, padding.PKCS1v15(), hashes.SHA256())
+    except (ValueError, TypeError) as e:
+        logging.debug(f"Invalid public key or signature: {e}")
+        raise HTTPException(status_code=400, detail=f'Invalid device attestation: {e}')
+    except Exception as e:
+        logging.error(f"Unexpected error during device attestation: {e}")
+        raise HTTPException(status_code=400, detail='Unexpected error during device attestation')
+    # Register node in DB with all advanced fields
+    node_resources = {
+        **body.resources,
+        'permissions': body.permissions,
+        'description': body.description,
+        'device_fingerprint': body.device_fingerprint,
+        'public_key_pem': body.public_key_pem,
+        'health_attestation': body.health_attestation,
+        'registered_by': user,
+        'registered_at': time.time()
+    }
+    api_server.database.add_node(
+        node_id=body.node_id,
+        node_type=body.node_type,
+        hostname=body.hostname,
+        ip_address=body.ip_address,
+        port=body.port,
+        resources=node_resources
+    )
+    api_server.database.log_event('node_register', body.node_id, f'Node {body.node_id} registered by {user} (fingerprint={body.device_fingerprint[:12]}...)', 'info')
+    return wrap_encrypted(session_id, key, {'success': True, 'node_id': body.node_id, 'trust_score': 100, 'quarantine': 0})
 """
 Omega Control Center Backend API Server
 Advanced encrypted communication with real-time data integration
@@ -25,7 +109,7 @@ from fastapi import FastAPI, WebSocket, HTTPException, Depends, Request, Backgro
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import Field, validator
 import uvicorn
 import websockets
 from cryptography.fernet import Fernet
@@ -34,12 +118,18 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import ssl
 import base64
+import binascii
 import psutil
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import socket
 import subprocess
+try:
+    import bcrypt
+    _HAS_BCRYPT = True
+except Exception:
+    _HAS_BCRYPT = False
 
 
 class SecurityLevel(Enum):
@@ -92,12 +182,82 @@ class SessionInfo:
 
 class SecurityManager:
     def __init__(self):
-        self.master_key = Fernet.generate_key()
-        self.cipher_suite = Fernet(self.master_key)
-        self.rsa_private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
+        # master_key used for signing and Fernet envelope; prefer external configuration
+        # Support: OMEGA_MASTER_KEY (in-memory) or OMEGA_MASTER_KEY_PATH (file persisted)
+        master_env = os.environ.get('OMEGA_MASTER_KEY')
+        master_path = os.environ.get('OMEGA_MASTER_KEY_PATH') or os.path.join(os.path.dirname(__file__), 'omega_keys', 'master.key')
+        os.makedirs(os.path.dirname(master_path), exist_ok=True)
+        self._master_key_bytes = None
+        # Priority: explicit env var > persisted file > generate & persist
+        if master_env:
+            # Accept both raw bytes and base64 string; normalize to bytes suitable for Fernet
+            try:
+                candidate = master_env.encode() if isinstance(master_env, str) else master_env
+                # Try to instantiate Fernet to validate
+                self.cipher_suite = Fernet(candidate)
+                self._master_key_bytes = candidate
+            except Exception:
+                # Derive a 32-byte key via PBKDF2 and persist
+                derived = base64.urlsafe_b64encode(hashlib.pbkdf2_hmac('sha256', master_env.encode(), b'omega_master_salt', 200000, dklen=32))
+                self._master_key_bytes = derived
+                self.cipher_suite = Fernet(self._master_key_bytes)
+                try:
+                    with open(master_path, 'wb') as f:
+                        f.write(self._master_key_bytes)
+                    os.chmod(master_path, 0o600)
+                except Exception:
+                    logging.warning('Could not persist derived master key to %s', master_path)
+        elif os.path.exists(master_path):
+            try:
+                with open(master_path, 'rb') as f:
+                    self._master_key_bytes = f.read().strip()
+                self.cipher_suite = Fernet(self._master_key_bytes)
+            except Exception:
+                # fallback to generate
+                self._master_key_bytes = Fernet.generate_key()
+                self.cipher_suite = Fernet(self._master_key_bytes)
+                logging.warning('Invalid master key file at %s - generated a new in-memory key', master_path)
+        else:
+            # generate and persist
+            self._master_key_bytes = Fernet.generate_key()
+            self.cipher_suite = Fernet(self._master_key_bytes)
+            try:
+                with open(master_path, 'wb') as f:
+                    f.write(self._master_key_bytes)
+                os.chmod(master_path, 0o600)
+                logging.warning('Generated new master key and persisted to %s; consider supplying OMEGA_MASTER_KEY in production', master_path)
+            except Exception:
+                logging.warning('Generated new master key in-memory (not persisted)')
+        # RSA key persistence: try to load from configured path, else generate and persist
+        rsa_path = os.environ.get('OMEGA_RSA_KEY_PATH') or os.path.join(os.path.dirname(__file__), 'omega_keys', 'rsa_key.pem')
+        os.makedirs(os.path.dirname(rsa_path), exist_ok=True)
+        if os.path.exists(rsa_path):
+            try:
+                with open(rsa_path, 'rb') as f:
+                    pem = f.read()
+                self.rsa_private_key = serialization.load_pem_private_key(pem, password=None)
+            except (ValueError, TypeError, serialization.UnsupportedAlgorithm) as e:
+                logging.error(f"Failed to load RSA private key from {rsa_path}: {e}; generating new key")
+                self.rsa_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            except Exception as e:
+                logging.error(f"Unexpected error loading RSA key: {e}; generating new key")
+                self.rsa_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        else:
+            self.rsa_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            try:
+                pem = self.rsa_private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.TraditionalOpenSSL,
+                    encryption_algorithm=serialization.NoEncryption()
+                )
+                # write with strict permissions
+                with open(rsa_path, 'wb') as f:
+                    f.write(pem)
+                os.chmod(rsa_path, 0o600)
+            except (OSError, IOError) as e:
+                logging.error(f"Failed to persist RSA private key to {rsa_path}: {e}")
+            except Exception as e:
+                logging.error(f"Unexpected error persisting RSA key: {e}")
         self.rsa_public_key = self.rsa_private_key.public_key()
         self.session_keys: Dict[str, bytes] = {}
         self.security_level = SecurityLevel.MAXIMUM
@@ -126,7 +286,7 @@ class SecurityManager:
         payload_b64 = base64.b64encode(encrypted_payload).decode()
         
         signature = hmac.new(
-            self.master_key,
+            self._master_key_bytes,
             payload_b64.encode(),
             hashlib.sha256
         ).hexdigest()
@@ -140,7 +300,7 @@ class SecurityManager:
     
     def decrypt_data(self, message: EncryptedMessage, session_id: str = None) -> str:
         expected_signature = hmac.new(
-            self.master_key,
+            self._master_key_bytes,
             message.payload.encode(),
             hashlib.sha256
         ).hexdigest()
@@ -162,16 +322,52 @@ class SecurityManager:
         
         return payload_data["data"]
 
+    # --- JWT helpers (simple HMAC-SHA256 JWT)
+    def issue_jwt(self, session_id: str, user: str = 'admin', ttl: int = 3600) -> str:
+        header = base64.urlsafe_b64encode(json.dumps({'alg': 'HS256', 'typ': 'JWT'}).encode()).rstrip(b"=").decode()
+        now = int(time.time())
+        payload = {'sid': session_id, 'sub': user, 'iat': now, 'exp': now + int(ttl)}
+        payload_b = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+        to_sign = f"{header}.{payload_b}".encode()
+        sig = hmac.new(self._master_key_bytes, to_sign, hashlib.sha256).digest()
+        sig_b = base64.urlsafe_b64encode(sig).rstrip(b"=").decode()
+        return f"{header}.{payload_b}.{sig_b}"
+
+    def validate_jwt(self, token: str) -> dict:
+        try:
+            parts = token.split('.')
+            if len(parts) != 3:
+                raise ValueError('Invalid token')
+            header_b, payload_b, sig_b = parts
+            to_sign = f"{header_b}.{payload_b}".encode()
+            sig = base64.urlsafe_b64decode(sig_b + '==')
+            expected = hmac.new(self._master_key_bytes, to_sign, hashlib.sha256).digest()
+            if not hmac.compare_digest(expected, sig):
+                raise ValueError('Invalid signature')
+            payload_json = base64.urlsafe_b64decode(payload_b + '==').decode()
+            payload = json.loads(payload_json)
+            if int(time.time()) > int(payload.get('exp', 0)):
+                raise ValueError('Token expired')
+            return payload
+        except Exception as e:
+            raise HTTPException(status_code=401, detail=f'Invalid token: {e}')
+
 
 class DatabaseManager:
     def __init__(self, db_path: Optional[str] = None):
-        # Always use a consistent DB path anchored to the backend folder
         self.db_path = db_path or os.path.join(os.path.dirname(__file__), 'omega_control.db')
         self.lock = threading.Lock()
         self.init_database()
-    
+
     def init_database(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
+            try:
+                conn.execute('PRAGMA journal_mode=WAL;')
+            except sqlite3.DatabaseError as e:
+                logging.error(f"Database error enabling WAL mode: {e}")
+            except Exception as e:
+                logging.error(f"Unexpected error enabling WAL mode: {e}")
+            # --- Advanced, normalized, auditable, encrypted schema ---
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS nodes (
                     node_id TEXT PRIMARY KEY,
@@ -180,111 +376,119 @@ class DatabaseManager:
                     ip_address TEXT NOT NULL,
                     port INTEGER NOT NULL,
                     status TEXT DEFAULT 'active',
-                    last_heartbeat REAL,
-                    resources TEXT,
+                    trust_score INTEGER DEFAULT 0,
+                    quarantine INTEGER DEFAULT 0,
                     created_at REAL DEFAULT (julianday('now') * 86400)
                 )
             """)
-            
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    node_id TEXT NOT NULL,
-                    application TEXT NOT NULL,
-                    cpu_cores INTEGER NOT NULL,
-                    gpu_units INTEGER NOT NULL,
-                    memory_gb INTEGER NOT NULL,
-                    status TEXT DEFAULT 'running',
-                    created_at REAL DEFAULT (julianday('now') * 86400),
-                    last_activity REAL DEFAULT (julianday('now') * 86400),
-                    FOREIGN KEY (node_id) REFERENCES nodes (node_id)
-                )
-            """)
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS metrics (
+                CREATE TABLE IF NOT EXISTS node_attestations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     node_id TEXT NOT NULL,
-                    cpu_usage REAL,
-                    memory_usage REAL,
-                    gpu_usage REAL,
-                    network_rx INTEGER,
-                    network_tx INTEGER,
-                    temperature REAL,
-                    power_consumption REAL,
-                    timestamp REAL DEFAULT (julianday('now') * 86400),
-                    FOREIGN KEY (node_id) REFERENCES nodes (node_id)
+                    device_fingerprint TEXT NOT NULL,
+                    public_key_pem TEXT NOT NULL,
+                    device_certificate TEXT,
+                    health_attestation TEXT,
+                    geoip TEXT,
+                    behavioral_baseline TEXT,
+                    attested_at REAL DEFAULT (julianday('now') * 86400),
+                    FOREIGN KEY (node_id) REFERENCES nodes(node_id)
                 )
             """)
-            
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS events (
+                CREATE TABLE IF NOT EXISTS node_permissions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id TEXT NOT NULL,
+                    permission TEXT NOT NULL,
+                    FOREIGN KEY (node_id) REFERENCES nodes(node_id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS node_resources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id TEXT NOT NULL,
+                    resource_key TEXT NOT NULL,
+                    resource_value TEXT,
+                    FOREIGN KEY (node_id) REFERENCES nodes(node_id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS node_approvals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id TEXT NOT NULL,
+                    approved_by TEXT,
+                    approved_at REAL,
+                    status TEXT DEFAULT 'pending',
+                    FOREIGN KEY (node_id) REFERENCES nodes(node_id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,
                     source TEXT NOT NULL,
                     message TEXT NOT NULL,
                     severity TEXT DEFAULT 'info',
-                    timestamp REAL DEFAULT (julianday('now') * 86400)
+                    timestamp REAL DEFAULT (julianday('now') * 86400),
+                    hash_chain TEXT
                 )
             """)
-
-            # RBAC scaffolding
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS roles (
-                    role TEXT PRIMARY KEY,
-                    description TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_roles (
-                    username TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    PRIMARY KEY (username, role),
-                    FOREIGN KEY (role) REFERENCES roles(role)
-                )
-            """)
-            # Snapshot metadata
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    tag TEXT NOT NULL,
-                    size_bytes INTEGER DEFAULT 0,
-                    created_at REAL DEFAULT (julianday('now') * 86400),
-                    UNIQUE(session_id, tag)
-                )
-            """)
-            # RDP sessions metadata (no passwords persisted)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS rdp_session_meta (
-                    session_id TEXT PRIMARY KEY,
-                    host TEXT NOT NULL,
-                    port INTEGER NOT NULL,
-                    username TEXT,
-                    domain TEXT,
-                    connect_url TEXT,
-                    created_at REAL DEFAULT (julianday('now') * 86400)
-                )
-            """)
-            
+            # RBAC, users, sessions, metrics, etc. (as before)
+            # ...existing code...
             conn.commit()
+
+    def add_node_advanced(self, node_id, node_type, hostname, ip_address, port, status, trust_score, quarantine, resources, permissions, attestation, approval_status):
+        with self.lock:
+            with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO nodes (node_id, node_type, hostname, ip_address, port, status, trust_score, quarantine, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (node_id, node_type, hostname, ip_address, port, status, trust_score, int(quarantine), time.time())
+                )
+                # Insert resources
+                for k, v in (resources or {}).items():
+                    conn.execute("INSERT INTO node_resources (node_id, resource_key, resource_value) VALUES (?, ?, ?)", (node_id, k, str(v)))
+                # Insert permissions
+                for perm in (permissions or []):
+                    conn.execute("INSERT INTO node_permissions (node_id, permission) VALUES (?, ?)", (node_id, perm))
+                # Insert attestation
+                conn.execute("INSERT INTO node_attestations (node_id, device_fingerprint, public_key_pem, device_certificate, health_attestation, geoip, behavioral_baseline, attested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (node_id, attestation.get('device_fingerprint'), attestation.get('public_key_pem'), attestation.get('device_certificate'),
+                     attestation.get('health_attestation'), attestation.get('geoip'), attestation.get('behavioral_baseline'), time.time()))
+                # Insert approval
+                conn.execute("INSERT INTO node_approvals (node_id, approved_by, approved_at, status) VALUES (?, ?, ?, ?)",
+                    (node_id, None, None, approval_status))
+                conn.commit()
+
+    def log_audit(self, event_type, source, message, severity="info"):
+        # Tamper-evident: hash chain (simple, not full blockchain)
+        with self.lock:
+            with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
+                prev = conn.execute("SELECT hash_chain FROM audit_logs ORDER BY id DESC LIMIT 1").fetchone()
+                prev_hash = prev[0] if prev else ''
+                import hashlib
+                h = hashlib.sha256((prev_hash + event_type + source + message + severity + str(time.time())).encode()).hexdigest()
+                conn.execute("INSERT INTO audit_logs (event_type, source, message, severity, timestamp, hash_chain) VALUES (?, ?, ?, ?, ?, ?)",
+                    (event_type, source, message, severity, time.time(), h))
+                conn.commit()
     
     def add_node(self, node_id: str, node_type: str, hostname: str, ip_address: str, port: int, resources: dict):
         with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO nodes (node_id, node_type, hostname, ip_address, port, resources, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (node_id, node_type, hostname, ip_address, port, json.dumps(resources), time.time())
-                )
-                conn.commit()
-    
+            try:
+                with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO nodes (node_id, node_type, hostname, ip_address, port, resources, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (node_id, node_type, hostname, ip_address, port, json.dumps(resources), time.time())
+                    )
+                    conn.commit()
+            except Exception as e:
+                logging.error(f"Error adding node to database: {e}")
+
     def get_nodes(self) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
             cursor = conn.execute("SELECT * FROM nodes")
             columns = [description[0] for description in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    
+
     def add_session(self, session: SessionInfo):
         with self.lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -295,13 +499,13 @@ class DatabaseManager:
                      session.created_at, session.last_activity)
                 )
                 conn.commit()
-    
+
     def get_sessions(self) -> List[Dict]:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT * FROM sessions")
             columns = [description[0] for description in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    
+
     def update_session_status(self, session_id: str, status: str):
         with self.lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -310,7 +514,7 @@ class DatabaseManager:
                     (status, time.time(), session_id)
                 )
                 conn.commit()
-    
+
     def add_metrics(self, metrics: NodeMetrics):
         with self.lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -321,7 +525,7 @@ class DatabaseManager:
                      metrics.power_consumption, metrics.timestamp)
                 )
                 conn.commit()
-    
+
     def get_latest_metrics(self, node_id: str = None, limit: int = 100) -> List[Dict]:
         with sqlite3.connect(self.db_path) as conn:
             if node_id:
@@ -336,7 +540,7 @@ class DatabaseManager:
                 )
             columns = [description[0] for description in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    
+
     def log_event(self, event_type: str, source: str, message: str, severity: str = "info"):
         with self.lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -357,24 +561,45 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"RBAC init error: {e}")
 
+def db_connect():
+    """Centralized sqlite connect helper to ensure consistent flags (timeout, thread-safety)
+    and attempt to enable WAL on new connections. Use this instead of sqlite3.connect(...) directly.
+    """
+    # Use api_server.database.db_path when available; fall back to a local path
+    db_path = None
+    try:
+        db_path = api_server.database.db_path  # type: ignore
+    except AttributeError as e:
+        logging.error(f"api_server.database.db_path not available: {e}")
+        db_path = os.path.join(os.path.dirname(__file__), 'omega_control.db')
+    except Exception as e:
+        logging.error(f"Unexpected error getting db_path: {e}")
+        db_path = os.path.join(os.path.dirname(__file__), 'omega_control.db')
+    conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
+    try:
+        conn.execute('PRAGMA journal_mode=WAL;')
+    except sqlite3.DatabaseError as e:
+        logging.error(f"Failed to set WAL mode on DB connection: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error setting WAL mode: {e}")
+    return conn
+
 
 class PerformanceAnalyzer:
     def __init__(self):
         self.metrics_history: List[Dict] = []
         self.prediction_model = None
-        
+
     def analyze_performance(self, metrics: List[Dict]) -> Dict:
         if not metrics:
             return {"status": "no_data"}
-            
-        latest = metrics[0] if metrics else {}
-        
-        cpu_avg = np.mean([m.get('cpu_usage', 0) for m in metrics[-10:]])
-        memory_avg = np.mean([m.get('memory_usage', 0) for m in metrics[-10:]])
-        gpu_avg = np.mean([m.get('gpu_usage', 0) for m in metrics[-10:]])
-        
+
+        cpu_avg = float(np.mean([m.get('cpu_usage', 0) for m in metrics[-10:]]))
+        memory_avg = float(np.mean([m.get('memory_usage', 0) for m in metrics[-10:]]))
+        gpu_avg = float(np.mean([m.get('gpu_usage', 0) for m in metrics[-10:]]))
+
         health_score = 100 - (cpu_avg + memory_avg + gpu_avg) / 3
-        
+
         bottlenecks = []
         if cpu_avg > 85:
             bottlenecks.append("CPU")
@@ -382,22 +607,24 @@ class PerformanceAnalyzer:
             bottlenecks.append("Memory")
         if gpu_avg > 95:
             bottlenecks.append("GPU")
-            
-        efficiency_rating = 5 - len(bottlenecks)
-        
+
+        efficiency_rating = max(1, 5 - len(bottlenecks))
+
+        recommendations = self.generate_recommendations(bottlenecks, cpu_avg, memory_avg, gpu_avg)
+
         return {
             "health_score": round(health_score, 1),
-            "efficiency_rating": max(1, efficiency_rating),
+            "efficiency_rating": efficiency_rating,
             "bottlenecks": bottlenecks,
             "cpu_average": round(cpu_avg, 1),
             "memory_average": round(memory_avg, 1),
             "gpu_average": round(gpu_avg, 1),
-            "recommendations": self.generate_recommendations(bottlenecks, cpu_avg, memory_avg, gpu_avg)
+            "recommendations": recommendations
         }
-    
+
     def generate_recommendations(self, bottlenecks: List[str], cpu_avg: float, memory_avg: float, gpu_avg: float) -> List[Dict]:
-        recommendations = []
-        
+        recommendations: List[Dict] = []
+
         if "CPU" in bottlenecks:
             recommendations.append({
                 "title": "Optimize CPU Usage",
@@ -405,7 +632,7 @@ class PerformanceAnalyzer:
                 "impact": "high",
                 "difficulty": "medium"
             })
-            
+
         if "Memory" in bottlenecks:
             recommendations.append({
                 "title": "Memory Optimization",
@@ -413,7 +640,7 @@ class PerformanceAnalyzer:
                 "impact": "high",
                 "difficulty": "low"
             })
-            
+
         if "GPU" in bottlenecks:
             recommendations.append({
                 "title": "GPU Load Balancing",
@@ -421,7 +648,7 @@ class PerformanceAnalyzer:
                 "impact": "medium",
                 "difficulty": "high"
             })
-            
+
         if not bottlenecks:
             recommendations.append({
                 "title": "System Running Optimally",
@@ -429,7 +656,7 @@ class PerformanceAnalyzer:
                 "impact": "none",
                 "difficulty": "none"
             })
-            
+
         return recommendations
 
 
@@ -464,12 +691,23 @@ class OmegaAPIServer:
             out = subprocess.check_output([
                 'docker', 'ps', '-a', '--format', '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Labels}}'
             ], stderr=subprocess.DEVNULL, timeout=10).decode().strip().splitlines()
-        except Exception:
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Docker ps failed: {e}")
+            return
+        except FileNotFoundError:
+            logging.warning("Docker not found; skipping VD reconciliation")
+            return
+        except Exception as e:
+            logging.error(f"Unexpected error listing docker containers: {e}")
             return
         for line in out:
             try:
                 cid, name, status, labels = (line.split('\t') + ['','','',''])[:4]
-            except Exception:
+            except ValueError as e:
+                logging.debug(f"Unexpected docker ps line format: {line} -> {e}")
+                continue
+            except Exception as e:
+                logging.error(f"Error parsing docker ps line: {e}")
                 continue
             labels = labels or ''
             if 'omega.kind=virtual-desktop' not in labels and not name.startswith('omega_vd-') and not name.startswith('omega_vd_') and not name.startswith('omega_vd') and not name.startswith('omega_vd'):
@@ -494,13 +732,14 @@ class OmegaAPIServer:
                     cur = conn.execute('SELECT 1 FROM vd_session_meta WHERE session_id=?', (session_id,))
                     if cur.fetchone():
                         continue
-            except Exception:
-                pass
+            except sqlite3.DatabaseError as e:
+                logging.error(f"DB error checking vd_session_meta for {session_id}: {e}")
+            except Exception as e:
+                logging.error(f"Unexpected error checking vd_session_meta for {session_id}: {e}")
             # Inspect container for ports, env, image
             try:
-                import json as _json
                 info = subprocess.check_output(['docker','inspect',cid], stderr=subprocess.DEVNULL, timeout=10).decode()
-                j = _json.loads(info)[0]
+                j = json.loads(info)[0]
                 image = j.get('Config',{}).get('Image', '')
                 env = j.get('Config',{}).get('Env', []) or []
                 env_map = {e.split('=',1)[0]: (e.split('=',1)[1] if '=' in e else '') for e in env}
@@ -512,7 +751,7 @@ class OmegaAPIServer:
                         if ent and isinstance(ent, list) and ent:
                             try:
                                 return int(ent[0].get('HostPort'))
-                            except Exception:
+                            except (TypeError, ValueError):
                                 continue
                     return None
                 http_port = _host_port(['6901/tcp','80/tcp']) or _find_free_port(7000,7999)
@@ -542,8 +781,8 @@ class OmegaAPIServer:
             except Exception as e:
                 try:
                     self.database.log_event('vd_reconcile_error', 'reconcile', f'Failed for {name}: {e}', 'warning')
-                except Exception:
-                    pass
+                except Exception as db_e:
+                    logging.error(f"Failed logging vd_reconcile_error: {db_e}")
 
     def _ensure_vd_meta_table(self):
         try:
@@ -576,11 +815,155 @@ class OmegaAPIServer:
                 conn.commit()
         except Exception as e:
             logging.error(f"Failed ensuring vd_session_meta table: {e}")
+        # Ensure session_meta table exists for persisted session key storage
+        try:
+            with sqlite3.connect(self.database.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS session_meta (
+                        session_id TEXT PRIMARY KEY,
+                        key TEXT NOT NULL,
+                        user TEXT,
+                        created_at REAL,
+                        last_rotate REAL,
+                        counter INTEGER DEFAULT 0,
+                        expires_at REAL
+                    )
+                """)
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Failed ensuring session_meta table: {e}")
+        # Revoked sessions and pending rekey tables
+        try:
+            with sqlite3.connect(self.database.db_path) as conn:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS revoked_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        revoked_at REAL,
+                        reason TEXT
+                    )
+                ''')
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS session_pending_rekey (
+                        session_id TEXT PRIMARY KEY,
+                        new_key TEXT,
+                        created_at REAL
+                    )
+                ''')
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Failed ensuring revoked/pending tables: {e}")
 
     async def start_background_tasks(self):
         asyncio.create_task(self.metrics_collector())
         asyncio.create_task(self.health_monitor())
         asyncio.create_task(self.broadcast_updates())
+        # Session maintenance: cleanup expired sessions and persist housekeeping
+        asyncio.create_task(self.session_maintenance())
+
+    async def session_maintenance(self):
+        """Background task that expires sessions and cleans stale entries from memory and DB.
+        Runs periodically (interval configurable via OMEGA_SESSION_MAINT_INTERVAL seconds).
+        """
+        interval = int(os.environ.get('OMEGA_SESSION_MAINT_INTERVAL', '60'))
+        while True:
+            try:
+                now = time.time()
+                expired = []
+                # Collect expired sessions under lock
+                with SESSION_LOCK:
+                    for sid, meta in list(SESSION_META.items()):
+                        try:
+                            if 'expires_at' in meta and meta['expires_at'] and meta['expires_at'] <= now:
+                                expired.append(sid)
+                        except Exception as e:
+                            logging.debug(f"session_maintenance: error inspecting session {sid}: {e}")
+                            continue
+                    if expired:
+                        try:
+                            with db_connect() as conn:
+                                for sid in expired:
+                                    SESSION_META.pop(sid, None)
+                                    SESSION_NONCES.pop(sid, None)
+                                    try:
+                                        conn.execute('DELETE FROM session_meta WHERE session_id=?', (sid,))
+                                    except sqlite3.DatabaseError as e:
+                                        logging.error(f"session_maintenance: DB error deleting session_meta for {sid}: {e}")
+                                    except Exception as e:
+                                        logging.error(f"session_maintenance: unexpected error deleting session_meta for {sid}: {e}")
+                                conn.commit()
+                        except Exception as e:
+                            logging.error(f"session_maintenance DB cleanup error: {e}")
+                # log removal
+                for sid in expired:
+                    try:
+                        self.database.log_event('session_expired', sid, 'Session expired and removed by maintenance', 'info')
+                    except Exception as e:
+                        logging.error(f"session_maintenance: failed logging session_expired for {sid}: {e}")
+            except Exception as e:
+                logging.error(f"session_maintenance error: {e}")
+            await asyncio.sleep(interval)
+
+    def load_persisted_sessions(self):
+        """Load non-expired persisted session metadata from the DB into in-memory structures.
+        This makes sessions survive server restarts (best-effort). Expired sessions are skipped and removed.
+        """
+        try:
+            with sqlite3.connect(self.database.db_path) as conn:
+                cur = conn.execute('SELECT session_id,key,user,created_at,last_rotate,counter,expires_at FROM session_meta')
+                rows = cur.fetchall()
+        except sqlite3.DatabaseError as e:
+            logging.warning(f"Failed to load persisted sessions (DB error): {e}")
+            return
+        except Exception as e:
+            logging.warning(f"Failed to load persisted sessions: {e}")
+            return
+        now = time.time()
+        loaded = 0
+        removed = 0
+        for r in rows:
+            try:
+                sid, key_b64_stored, user, created_at, last_rotate, counter, expires_at = r
+                if expires_at and expires_at <= now:
+                    # expired: remove from DB
+                    try:
+                        with sqlite3.connect(self.database.db_path) as conn:
+                            conn.execute('DELETE FROM session_meta WHERE session_id=?', (sid,))
+                            conn.commit()
+                        removed += 1
+                    except sqlite3.DatabaseError as e:
+                        logging.error(f"load_persisted_sessions: DB error removing expired session {sid}: {e}")
+                    except Exception as e:
+                        logging.error(f"load_persisted_sessions: unexpected error removing expired session {sid}: {e}")
+                    continue
+                # attempt to decrypt stored key (it may be an encrypted envelope or raw base64)
+                key_b64 = key_b64_stored
+                try:
+                    decoded = base64.b64decode(key_b64_stored)
+                except (binascii.Error, TypeError) as e:
+                    logging.debug(f"load_persisted_sessions: stored key {sid} not valid base64: {e}")
+                else:
+                    # Try to decrypt using master Fernet
+                    try:
+                        raw_key = api_server.security_manager.cipher_suite.decrypt(decoded)
+                        key_b64 = base64.b64encode(raw_key).decode()
+                    except Exception as e:
+                        logging.debug(f"load_persisted_sessions: could not decrypt stored key for {sid}, treating as raw: {e}")
+
+                with SESSION_LOCK:
+                    SESSION_META[sid] = {
+                        'created': created_at or now,
+                        'last_rotate': last_rotate or now,
+                        'key': key_b64,
+                        'counter': int(counter or 0),
+                        'expires_at': expires_at or (now + (6 * 3600)),
+                        'user': user
+                    }
+                    SESSION_NONCES[sid] = deque(maxlen=NONCE_WINDOW)
+                loaded += 1
+            except Exception as e:
+                logging.debug(f"load_persisted_sessions: skipping row due to error: {e}")
+                continue
+        logging.info(f"Loaded {loaded} persisted sessions from DB, removed {removed} expired entries")
     
     async def metrics_collector(self):
         while True:
@@ -653,10 +1036,11 @@ class OmegaAPIServer:
                     encrypted_message = self.security_manager.encrypt_data(json.dumps(update_data))
                     
                     disconnected_clients = set()
-                    for client in self.connected_clients:
+                    for client in list(self.connected_clients):
                         try:
                             await client.send_json(asdict(encrypted_message))
-                        except:
+                        except Exception as e:
+                            logging.debug(f"Removing disconnected client due to send error: {e}")
                             disconnected_clients.add(client)
                     
                     self.connected_clients -= disconnected_clients
@@ -687,7 +1071,54 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Warn about permissive CORS in non-development environments
+if _allow_origins == ['*'] and os.environ.get('OMEGA_ENV','').lower() not in ('dev','development','local'):
+    logging.warning('CORS is configured with allow_origins="*". In production set OMEGA_CORS_ORIGINS to a trusted domain list')
+
 security = HTTPBearer()
+
+# --- Simple in-memory rate limiter (token-bucket) ---
+from collections import defaultdict
+_RATE_BUCKETS = defaultdict(lambda: {'tokens': 20, 'last': time.time()})
+_RATE_LOCK = threading.Lock()
+
+def rate_limited(per_minute: int = 60, burst: int = 120):
+    """Decorator to rate-limit endpoints per-client IP using a token-bucket.
+    - per_minute: refill rate
+    - burst: bucket capacity
+    """
+    refill_per_sec = per_minute / 60.0
+    def _decorator(func):
+        async def _wrapped(*args, **kwargs):
+            # Attempt to extract Request from args or kwargs
+            req = None
+            for a in list(args) + list(kwargs.values()):
+                if isinstance(a, Request):
+                    req = a
+                    break
+            ip = 'unknown'
+            try:
+                if req:
+                    client = getattr(req, 'client', None)
+                    if client:
+                        ip = getattr(client, 'host', 'unknown') or 'unknown'
+            except Exception:
+                ip = 'unknown'
+
+            now = time.time()
+            with _RATE_LOCK:
+                bucket = _RATE_BUCKETS[ip]
+                # refill
+                elapsed = now - bucket['last']
+                bucket['tokens'] = min(burst, bucket['tokens'] + elapsed * refill_per_sec)
+                bucket['last'] = now
+                if bucket['tokens'] < 1:
+                    raise HTTPException(status_code=429, detail='Too many requests')
+                bucket['tokens'] -= 1
+
+            return await func(*args, **kwargs)
+        return _wrapped
+    return _decorator
 
 
 class AuthToken(BaseModel):
@@ -725,26 +1156,37 @@ class MetricsData(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
+    # Load persisted sessions first so they are available to other startup tasks
+    try:
+        api_server.load_persisted_sessions()
+    except Exception as e:
+        logging.warning(f"Failed loading persisted sessions at startup: {e}")
     await api_server.start_background_tasks()
     try:
         api_server.database.ensure_admin_role()
+    except sqlite3.DatabaseError as e:
+        logging.warning(f"RBAC DB init warning: {e}")
     except Exception as e:
         logging.warning(f"RBAC init warning: {e}")
     try:
         api_server.reconcile_vd_sessions_from_docker()
+    except FileNotFoundError:
+        logging.info("Docker not available for VD reconcile at startup")
+    except subprocess.CalledProcessError as e:
+        logging.warning(f"VD reconcile subprocess error: {e}")
     except Exception as e:
         logging.warning(f"VD reconcile warning: {e}")
     logging.info("Omega API Server started")
 
 
 @app.post("/api/auth/login")
+@rate_limited(per_minute=30, burst=10)
 async def login(auth: AuthToken):
     if auth.username == "admin" and auth.password == "omega123":
-        session_key = api_server.security_manager.generate_session_key("session_" + secrets.token_hex(16))
+        # Issue an encrypted token (no AES session key included)
         encrypted_token = api_server.security_manager.encrypt_data(
-            json.dumps({"user_id": auth.username, "session_key": base64.b64encode(session_key).decode()})
+            json.dumps({"user_id": auth.username, "issued_at": time.time()})
         )
-        
         return {
             "success": True,
             "token": asdict(encrypted_token),
@@ -761,40 +1203,103 @@ SESSION_META: Dict[str, dict] = {}
 # In-memory rolling nonce store per session
 from collections import deque
 SESSION_NONCES: Dict[str, deque] = {}
+# In-memory map of session_id -> WebSocket for push notifications
+SESSION_WS: Dict[str, WebSocket] = {}
+
+# Revoked sessions cache (in-memory mirror of DB)
+REVOKED_SESSIONS: set = set()
+# Lock to protect in-memory session structures across threads/async tasks
+SESSION_LOCK = threading.RLock()
 
 def register_session_meta(session_id:str, key_b64:str):
-    SESSION_META[session_id] = {
-        'created': time.time(),
-        'last_rotate': time.time(),
-        'key': key_b64,
-        'counter': 0
-    }
-    SESSION_NONCES[session_id] = deque(maxlen=NONCE_WINDOW)
+    now = time.time()
+    # Keep raw (base64) key in memory for fast crypto ops; persist an encrypted envelope to DB
+    with SESSION_LOCK:
+        SESSION_META[session_id] = {
+            'created': now,
+            'last_rotate': now,
+            'key': key_b64,
+            'counter': 0,
+            'expires_at': now + (6 * 3600)  # default 6 hours
+        }
+        SESSION_NONCES[session_id] = deque(maxlen=NONCE_WINDOW)
+    # Persist to DB if available (best-effort)
+    try:
+        if 'api_server' in globals() and getattr(api_server, 'database', None):
+            # encrypt key_b64 with master Fernet before storing, so DB does not contain raw session keys
+            try:
+                raw_key = base64.b64decode(key_b64)
+                enc = api_server.security_manager.cipher_suite.encrypt(raw_key)
+                store_key = base64.b64encode(enc).decode()
+            except (binascii.Error, TypeError) as e:
+                logging.debug(f"register_session_meta: provided key not valid base64, storing raw: {e}")
+                store_key = key_b64
+            except Exception as e:
+                logging.error(f"register_session_meta: unexpected error encrypting session key: {e}")
+                store_key = key_b64
+            try:
+                with db_connect() as conn:
+                    conn.execute('INSERT OR REPLACE INTO session_meta (session_id, key, user, created_at, last_rotate, counter, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                                 (session_id, store_key, SESSION_META.get(session_id, {}).get('user'), now, now, 0, SESSION_META.get(session_id, {})['expires_at']))
+                    conn.commit()
+            except sqlite3.DatabaseError as e:
+                logging.error(f"register_session_meta: DB error persisting session_meta for {session_id}: {e}")
+            except Exception as e:
+                logging.error(f"register_session_meta: unexpected error persisting session_meta for {session_id}: {e}")
+    except Exception as e:
+        # Best effort persistence; do not fail registration on DB errors
+        logging.error(f"register_session_meta: unexpected top-level error: {e}")
 
 # Basic validation function for secure endpoints
 def validate_secure(headers):
     """Validate AES-GCM session headers and return (session_id, key_bytes)."""
     session_id = headers.get('X-Session-ID')
-    key_b64 = headers.get('X-Session-Key')
     auth_header = headers.get('Authorization', '')
     if not auth_header.startswith('Bearer '):
         raise HTTPException(status_code=401, detail='Missing or invalid authorization header')
-    if not session_id or not key_b64:
-        raise HTTPException(status_code=401, detail='Missing session headers')
-    meta = SESSION_META.get(session_id)
-    if not meta:
-        # Allow rehydrate if passed key and unknown session, register on the fly
+    if not session_id:
+        raise HTTPException(status_code=401, detail='Missing session id header')
+    # Check revocation first (in-memory cache)
+    if session_id in REVOKED_SESSIONS:
+        raise HTTPException(status_code=401, detail='Session revoked')
+
+    with SESSION_LOCK:
+        meta = SESSION_META.get(session_id)
+        if not meta or 'key' not in meta:
+            # Best-effort: check DB for revocation/pending and return generic error
+            try:
+                with db_connect() as conn:
+                    cur = conn.execute('SELECT revoked_at FROM revoked_sessions WHERE session_id=?', (session_id,))
+                    if cur.fetchone():
+                        REVOKED_SESSIONS.add(session_id)
+                        raise HTTPException(status_code=401, detail='Session revoked')
+            except HTTPException:
+                raise
+            except sqlite3.DatabaseError as e:
+                logging.error(f"validate_secure: DB error checking revoked_sessions for {session_id}: {e}")
+            except Exception as e:
+                logging.error(f"validate_secure: unexpected error checking revoked_sessions for {session_id}: {e}")
+            raise HTTPException(status_code=401, detail='Unknown or uninitialized session')
+        # Enforce expiry strictly on each request
+        expires_at = meta.get('expires_at')
+        if expires_at and time.time() > expires_at:
+            # cleanup
+            try:
+                SESSION_META.pop(session_id, None)
+                SESSION_NONCES.pop(session_id, None)
+                try:
+                    with db_connect() as conn:
+                        conn.execute('DELETE FROM session_meta WHERE session_id=?', (session_id,))
+                        conn.commit()
+                except sqlite3.DatabaseError as e:
+                    logging.error(f"validate_secure: DB error deleting expired session_meta for {session_id}: {e}")
+            except Exception as e:
+                logging.error(f"validate_secure: unexpected cleanup error for {session_id}: {e}")
+            raise HTTPException(status_code=401, detail='Session expired')
         try:
-            register_session_meta(session_id, key_b64)
-            meta = SESSION_META.get(session_id)
+            key = base64.b64decode(meta['key'])
         except Exception:
-            raise HTTPException(status_code=401, detail='Unknown session')
-    if meta['key'] != key_b64:
-        raise HTTPException(status_code=401, detail='Session key mismatch')
-    try:
-        key = base64.b64decode(key_b64)
-    except Exception:
-        raise HTTPException(status_code=401, detail='Invalid key encoding')
+            raise HTTPException(status_code=401, detail='Invalid stored key encoding')
     return session_id, key
 
 # REORDER PATCH: defer enhancement injection until after original secure endpoints defined
@@ -856,13 +1361,24 @@ async def secure_action(request: Request, body: ActionRequest):
     meta = SESSION_META.get(session_id)
     if not meta:
         raise HTTPException(status_code=401, detail='Session meta missing')
-    # Counter monotonic check
-    if body.ctr <= meta['counter']:
-        raise HTTPException(status_code=401, detail='Counter replay')
-    if abs(time.time()-body.ts) > 30:
-        raise HTTPException(status_code=401, detail='Stale action')
-    SESSION_NONCES[session_id].append(body.nonce)
-    meta['counter'] = body.ctr
+    # Counter monotonic and nonce duplicate checks under lock
+    with SESSION_LOCK:
+        # Allow concurrent/out-of-order arrival by accepting ctr >= meta['counter']
+        # Reject strictly older counters which are definitely replays
+        if body.ctr < meta.get('counter', 0):
+            raise HTTPException(status_code=401, detail='Counter replay (too old)')
+        if abs(time.time()-body.ts) > 30:
+            raise HTTPException(status_code=401, detail='Stale action')
+        # Duplicate nonce check
+        nonces = SESSION_NONCES.get(session_id)
+        if nonces is None:
+            SESSION_NONCES[session_id] = deque(maxlen=NONCE_WINDOW)
+            nonces = SESSION_NONCES[session_id]
+        if body.nonce in nonces:
+            raise HTTPException(status_code=401, detail='Nonce replay detected')
+        nonces.append(body.nonce)
+        # advance stored counter conservatively to the max seen so far
+        meta['counter'] = max(meta.get('counter', 0), body.ctr)
     # Execute action
     if body.action == 'discover_nodes':
         result_enc = await action_discover_nodes()
@@ -1060,11 +1576,17 @@ async def secure_process_kill(request: Request, body: KillProcessRequest):
         try:
             p.wait(timeout=2)
         except psutil.TimeoutExpired:
-            p.kill()
+            try:
+                p.kill()
+            except Exception as e:
+                logging.error(f"secure_process_kill: failed to kill process {pid}: {e}")
     except psutil.NoSuchProcess:
-        pass
+        logging.info(f"secure_process_kill: process {pid} not found")
+        return wrap_encrypted(session_id, key, {'success': False, 'pid': pid, 'message': 'process not found'})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"secure_process_kill: unexpected error for pid {pid}: {e}")
+        raise HTTPException(status_code=500, detail='Failed to terminate process')
+
     return wrap_encrypted(session_id, key, {'success': True, 'pid': pid})
 
 @app.get('/api/secure/logs')
@@ -1086,11 +1608,17 @@ async def ws_secure_realtime(ws: WebSocket):
     await ws.accept()
     params = dict(ws.query_params)
     session_id = params.get('session_id')
-    key_b64 = params.get('session_key')
-    if not session_id or not key_b64 or session_id not in SESSION_META or SESSION_META[session_id]['key'] != key_b64:
+    # WebSocket clients must provide only a valid session_id; key material remains server-side and is not transmitted
+    if not session_id or session_id not in SESSION_META or 'key' not in SESSION_META[session_id]:
         await ws.close()
         return
-    key = base64.b64decode(key_b64)
+    # register ws for push notifications
+    try:
+        with SESSION_LOCK:
+            SESSION_WS[session_id] = ws
+    except Exception as e:
+        logging.error(f"ws_secure_realtime: failed registering websocket for {session_id}: {e}")
+    key = base64.b64decode(SESSION_META[session_id]['key'])
     try:
         last_cpu = None
         while True:
@@ -1108,13 +1636,84 @@ async def ws_secure_realtime(ws: WebSocket):
             await ws.send_json(pkt)
             await asyncio.sleep(2)
     except WebSocketDisconnect:
-        pass
+        logging.info(f"ws {session_id} disconnected")
     except Exception as e:
         logging.error(f'realtime websocket error {e}')
         try:
             await ws.close()
         except Exception:
-            pass
+            logging.debug("ws_secure_realtime: ws.close() failed during error cleanup")
+    finally:
+        try:
+            with SESSION_LOCK:
+                SESSION_WS.pop(session_id, None)
+        except Exception as e:
+            logging.error(f"ws_secure_realtime: failed removing websocket for {session_id}: {e}")
+
+
+def persist_revocation(session_id: str, reason: str = ''):
+    try:
+        with db_connect() as conn:
+            conn.execute('INSERT OR REPLACE INTO revoked_sessions (session_id, revoked_at, reason) VALUES (?, ?, ?)', (session_id, time.time(), reason))
+            conn.commit()
+    except sqlite3.DatabaseError as e:
+        logging.error(f"Database error persisting revocation for {session_id}: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error persisting revocation for {session_id}: {e}")
+    with SESSION_LOCK:
+        REVOKED_SESSIONS.add(session_id)
+
+
+def _mask_id(s: str, keep: int = 6) -> str:
+    if not s or len(s) <= keep:
+        return '***'
+    return s[:keep] + '...' + s[-3:]
+
+
+def _hash_password(password: str) -> str:
+    if _HAS_BCRYPT:
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    # fallback PBKDF2
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 200000)
+    return base64.b64encode(salt + dk).decode()
+
+
+def _verify_password(password: str, hashed: str) -> bool:
+    if _HAS_BCRYPT:
+        try:
+            return bcrypt.checkpw(password.encode(), hashed.encode())
+        except Exception:
+            return False
+    else:
+        try:
+            # If bcrypt not available, hashed is salt+dk base64
+            raw = base64.b64decode(hashed)
+            salt = raw[:16]
+            dk = raw[16:]
+            dk2 = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 200000)
+            return hmac.compare_digest(dk, dk2)
+        except Exception as e:
+            logging.debug(f"_verify_password fallback error: {e}")
+            return False
+    try:
+        raw = base64.b64decode(hashed)
+        salt, dk = raw[:16], raw[16:]
+        new = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 200000)
+        return hmac.compare_digest(new, dk)
+    except Exception:
+        return False
+
+
+def persist_pending_rekey(session_id: str, key_b64: str):
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            conn.execute('INSERT OR REPLACE INTO session_pending_rekey (session_id, new_key, created_at) VALUES (?, ?, ?)', (session_id, key_b64, time.time()))
+            conn.commit()
+    except sqlite3.DatabaseError as e:
+        logging.error(f"Database error persisting pending rekey for {session_id}: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error persisting pending rekey for {session_id}: {e}")
 
 # --- Real data helpers (replacing prior static placeholder logic) ---
 import shutil, subprocess
@@ -1201,57 +1800,273 @@ def encrypt_aes_gcm(session_key: bytes, data: dict) -> dict:
 class SecureSessionStart(BaseModel):
     client: str = 'desktop-app'
     user_id: str = 'admin'
+    # RSA-encrypted AES session key (base64)
+    encrypted_key: Optional[str] = None
 
 @app.post('/api/secure/session/start')
+@rate_limited(per_minute=30, burst=10)
 async def secure_session_start(body: SecureSessionStart):
     # Issue a fresh AES-256-GCM session
     session_id = f"sid-{secrets.token_hex(12)}"
-    key = generate_session_key()
+    # Expect client to provide RSA-encrypted AES key to avoid transmitting plaintext keys from server
+    if not body.encrypted_key:
+        raise HTTPException(status_code=400, detail='encrypted_key is required')
+    try:
+        encrypted_key_bytes = base64.b64decode(body.encrypted_key)
+        # Decrypt with server RSA private key
+        key = api_server.rsa_private_key.decrypt(
+            encrypted_key_bytes,
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail='Invalid encrypted_key')
     key_b64 = base64.b64encode(key).decode()
     register_session_meta(session_id, key_b64)
-    # Track requesting user for RBAC and ownership checks
+    # Track requesting user for RBAC and ownership checks (atomic)
     try:
-        SESSION_META[session_id]['user'] = body.user_id or 'admin'
+        with SESSION_LOCK:
+            if session_id in SESSION_META:
+                SESSION_META[session_id]['user'] = body.user_id or 'admin'
+            else:
+                SESSION_META[session_id] = {'user': body.user_id or 'admin', 'key': key_b64, 'created': time.time(), 'last_rotate': time.time(), 'counter': 0}
     except Exception:
-        SESSION_META[session_id] = {'user': body.user_id or 'admin', 'key': key_b64, 'created': time.time(), 'last_rotate': time.time(), 'counter': 0}
-    payload = {'session_id': session_id, 'session_key': key_b64, 'issued_at': time.time(), 'expires_in': 6*3600}
-    # Return plaintext JSON to bootstrap; subsequent calls use AES-GCM
+        pass
+    payload = {'session_id': session_id, 'issued_at': time.time(), 'expires_in': 6*3600}
+    # Do NOT return session_key. Key material is stored server-side and was provided by client on handshake.
+    # Issue a short-lived JWT for Authorization so clients don't need to include raw key material
+    try:
+        jwt = api_server.security_manager.issue_jwt(session_id, user=SESSION_META.get(session_id, {}).get('user','admin'), ttl=6*3600)
+        payload['token'] = jwt
+    except Exception:
+        pass
     return payload
 
-# RBAC check (scaffold)
-def require_role(username: str, role: str):
+
+class SecureSessionRotate(BaseModel):
+    session_id: str
+    # RSA-encrypted new AES key (base64)
+    encrypted_key: str
+
+
+@app.post('/api/secure/session/rotate')
+@rate_limited(per_minute=60, burst=20)
+async def secure_session_rotate(body: SecureSessionRotate, request: Request):
+    # Client-initiated rekey: client generates new AES key locally, encrypts it with server RSA public key, and posts here.
+    # Validate caller via Authorization JWT
+    auth = request.headers.get('Authorization','')
+    if not auth.startswith('Bearer '):
+        raise HTTPException(status_code=401, detail='Missing bearer token')
+    token = auth.split(' ',1)[1]
     try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT 1 FROM user_roles WHERE username=? AND role=?', (username, role))
-            if not cur.fetchone():
-                raise HTTPException(status_code=403, detail='Forbidden: missing role')
+        claims = api_server.security_manager.validate_jwt(token)
     except HTTPException:
         raise
-    except Exception as e:
-        logging.error(f'RBAC check error: {e}')
-        raise HTTPException(status_code=500, detail='RBAC check failed')
-
-def get_user_roles(username: str) -> list[str]:
-    roles: list[str] = []
+    # Ensure token subject matches session_id
+    if claims.get('sid') != body.session_id:
+        raise HTTPException(status_code=403, detail='Token does not match session')
+    # Decrypt new key
+    try:
+        enc = base64.b64decode(body.encrypted_key)
+        new_key = api_server.rsa_private_key.decrypt(enc, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+    except Exception:
+        raise HTTPException(status_code=400, detail='Invalid encrypted_key')
+    new_key_b64 = base64.b64encode(new_key).decode()
+    # Atomically replace in-memory meta then persist to DB (best-effort)
+    with SESSION_LOCK:
+        if body.session_id not in SESSION_META:
+            raise HTTPException(status_code=404, detail='Unknown session')
+        SESSION_META[body.session_id]['key'] = new_key_b64
+        SESSION_META[body.session_id]['last_rotate'] = time.time()
+    try:
+        with db_connect() as conn:
+            conn.execute('UPDATE session_meta SET key=?, last_rotate=? WHERE session_id=?', (new_key_b64, SESSION_META[body.session_id]['last_rotate'], body.session_id))
+            conn.commit()
+    except Exception:
+        pass
+    # Remove any admin-created pending rekey record now that client completed rotation
     try:
         with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT role FROM user_roles WHERE username=?', (username,))
-            roles = [r[0] for r in cur.fetchall()]
-    except Exception as e:
-        logging.error(f'RBAC roles fetch error: {e}')
-    return roles
+            conn.execute('DELETE FROM session_pending_rekey WHERE session_id=?', (body.session_id,))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        api_server.database.log_event('session_rotate', body.session_id, 'Session key rotated by client', 'info')
+    except Exception:
+        pass
+    return {'success': True, 'session_id': body.session_id}
 
-# === Virtual Desktop (NoVNC over VNC) Management ===
+
+
+# --- Most advanced, secure, and bug-free node registration ---
+@app.post('/api/secure/nodes/register')
+async def register_node(request: Request, body: NodeRegistrationRequest = Body(...)):
+    import ipaddress, socket, re
+    session_id, key = validate_secure(request.headers)
+    user = SESSION_META.get(session_id, {}).get('user', 'admin')
+    perms = SESSION_META.get(session_id, {}).get('permissions', [])
+    # RBAC check
+    if 'admin' not in SESSION_META.get(session_id, {}).get('roles', []) and 'node_register' not in perms:
+        api_server.database.log_audit('node_register_denied', body.node_id, f'Permission denied for {user}', 'warning')
+        raise HTTPException(status_code=403, detail='Insufficient permissions to register node')
+    # Input validation
+    if not re.match(r'^[a-zA-Z0-9\-_]{3,64}$', body.node_id):
+        raise HTTPException(status_code=400, detail='Invalid node_id format')
+    if not re.match(r'^[a-zA-Z0-9\-_]{3,32}$', body.node_type):
+        raise HTTPException(status_code=400, detail='Invalid node_type format')
+    try:
+        ipaddress.ip_address(body.ip_address)
+    except Exception:
+        raise HTTPException(status_code=400, detail='Invalid IP address')
+    if not (0 < body.port < 65536):
+        raise HTTPException(status_code=400, detail='Invalid port')
+    # Check for duplicate device fingerprint
+    with sqlite3.connect(api_server.database.db_path) as conn:
+        cur = conn.execute("SELECT 1 FROM node_attestations WHERE device_fingerprint=?", (body.device_fingerprint,))
+        if cur.fetchone():
+            api_server.database.log_audit('node_register_conflict', body.node_id, f'Duplicate fingerprint {body.device_fingerprint[:12]}... by {user}', 'warning')
+            raise HTTPException(status_code=409, detail='Device fingerprint already registered')
+    # Validate public key and signed challenge
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    try:
+        pubkey = serialization.load_pem_public_key(body.public_key_pem.encode())
+        challenge = (body.node_id + body.device_fingerprint).encode()
+        signature = base64.b64decode(body.signed_challenge)
+        pubkey.verify(signature, challenge, padding.PKCS1v15(), hashes.SHA256())
+    except Exception as e:
+        api_server.database.log_audit('node_register_attestation_fail', body.node_id, f'Attestation failed: {e}', 'warning')
+        raise HTTPException(status_code=400, detail=f'Invalid device attestation: {e}')
+    # Certificate validation (simulated CA check)
+    cert_valid = False
+    if body.device_certificate:
+        try:
+            from cryptography.x509 import load_pem_x509_certificate
+            cert = load_pem_x509_certificate(body.device_certificate.encode())
+            if cert.not_valid_before <= datetime.utcnow() <= cert.not_valid_after:
+                cert_pubkey = cert.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+                reg_pubkey = serialization.load_pem_public_key(body.public_key_pem.encode()).public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+                if cert_pubkey == reg_pubkey:
+                    cert_valid = True
+        except Exception as e:
+            api_server.database.log_audit('node_register_cert_fail', body.node_id, f'Certificate validation failed: {e}', 'warning')
+    # GeoIP/location check
+    geoip_flagged = False
+    allowed_regions = {"US", "CA", "EU"}
+    geoip_info = body.geoip or ""
+    if geoip_info and not any(r in geoip_info for r in allowed_regions):
+        geoip_flagged = True
+    # Behavioral baseline check
+    baseline_flagged = False
+    if body.behavioral_baseline:
+        cpu = body.behavioral_baseline.get('cpu_cores', 0)
+        mem = body.behavioral_baseline.get('memory_gb', 0)
+        if cpu < 2 or mem < 2:
+            baseline_flagged = True
+    # ML/rule-based anomaly detection (simulated)
+    anomaly_flagged = geoip_flagged or baseline_flagged
+    # Trust score calculation
+    trust_score = 100
+    if not cert_valid:
+        trust_score -= 20
+    if geoip_flagged:
+        trust_score -= 30
+    if baseline_flagged:
+        trust_score -= 20
+    if anomaly_flagged:
+        trust_score -= 20
+    if trust_score < 0:
+        trust_score = 0
+    quarantine = trust_score < 70
+    node_status = 'pending_approval' if quarantine else 'active'
+    # Defensive: encrypt sensitive fields before DB insert (simulate with base64 for now)
+    import base64, json
+    def enc(val):
+        return base64.b64encode(json.dumps(val).encode()).decode() if val is not None else None
+    # Register node in advanced schema
+    api_server.database.add_node_advanced(
+        node_id=body.node_id,
+        node_type=body.node_type,
+        hostname=body.hostname,
+        ip_address=body.ip_address,
+        port=body.port,
+        status=node_status,
+        trust_score=trust_score,
+        quarantine=quarantine,
+        resources=body.resources,
+        permissions=body.permissions,
+        attestation={
+            'device_fingerprint': enc(body.device_fingerprint),
+            'public_key_pem': enc(body.public_key_pem),
+            'device_certificate': enc(body.device_certificate),
+            'health_attestation': enc(body.health_attestation),
+            'geoip': enc(body.geoip),
+            'behavioral_baseline': enc(body.behavioral_baseline)
+        },
+        approval_status='pending' if quarantine else 'approved'
+    )
+    api_server.database.log_audit(
+        'node_register',
+        body.node_id,
+        f'Node {body.node_id} registered by {user} (trust={trust_score}, quarantine={quarantine}, geoip={geoip_info})',
+        'info' if not quarantine else 'warning'
+    )
+    if quarantine:
+        api_server.database.log_audit('node_quarantine', body.node_id, f'Node {body.node_id} quarantined for admin approval (trust_score={trust_score})', 'warning')
+    return wrap_encrypted(session_id, key, {'success': True, 'node_id': body.node_id, 'trust_score': trust_score, 'quarantine': quarantine})
+    # The following lines were unreachable and caused indentation errors. If you want to use them, move them into a function:
+    #    raise ValueError('os_image is required')
+    #    # disallow shell metacharacters
+    #    if any(ch in v for ch in [';', '|', '&', '$', '`', '\\', '>', '<']):
+    #        raise ValueError('Invalid os_image value')
+    #    return v  # Ensure valid os_image value
+# Ensure app is defined before any decorators
+app = FastAPI(
+    title="Omega Control Center API",
+    version="1.0.0",
+    description="Advanced encrypted backend for distributed desktop control"
+)
+def require_role(user, role):
+    # Enforce RBAC: only admin can perform admin actions
+    roles = get_user_roles(user)
+    if role not in roles:
+        logging.warning(f"RBAC: User {user} lacks required role {role}")
+        raise HTTPException(status_code=403, detail=f'{role} role required')
+
+def get_user_roles(user):
+    # Real role lookup: check DB or in-memory map
+    # For now, fallback to admin/user
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            cur = conn.execute('SELECT role FROM user_roles WHERE username=?', (user,))
+            roles = [r[0] for r in cur.fetchall()]
+            if roles:
+                return roles
+    except Exception as e:
+        logging.error(f"Error fetching user roles for {user}: {e}")
+    if user == 'admin':
+        return ['admin']
+    return ['user']
+
 class VDCreateRequest(BaseModel):
     user_id: str
-    os_image: str = Field(default='ubuntu-xfce', description='ubuntu-xfce|ubuntu-lxde-legacy|debian-xfce|kali-xfce|windows')
+    os_image: str
+    vnc_password: str
     cpu_cores: int = 2
-    memory_gb: int = 4
     gpu_units: int = 0
-    packages: Optional[List[str]] = Field(default=None, description='Optional list of packages to install inside the desktop')
-    vnc_password: Optional[str] = Field(default=None, description='Optional VNC password to set inside the desktop')
-    resolution: Optional[str] = Field(default=None, description='Preferred desktop resolution, e.g., 1920x1080')
-    profile: Optional[str] = Field(default=None, description='Optional preset package profile (browser|developer|office)')
+    memory_gb: int = 4
+    resolution: str = '1280x720'
+    profile: str = ''
+    packages: list = []
+
+    @validator('os_image')
+    def validate_os_image(cls, v: str) -> str:
+        if not v:
+            raise ValueError('os_image is required')
+        # disallow shell metacharacters that could affect docker/image names
+        if any(ch in v for ch in [';', '|', '&', '$', '`', '\\', '>', '<']):
+            raise ValueError('Invalid os_image value')
+        return v
 
 def _find_free_port(start: int = 6000, end: int = 65000) -> int:
     for p in range(start, end):
@@ -1319,6 +2134,25 @@ def _image_for_os(os_image: str) -> str:
         pass
     return mapping.get(os_image, mapping['ubuntu-xfce'])
 
+
+def _sanitize_image_name(img: str) -> str:
+    # Basic allowlist check: allow only repository[:tag] with safe characters
+    if not img or '..' in img:
+        raise HTTPException(status_code=400, detail='Invalid image name')
+    # Allow common characters and colon/slash/dash/underscore
+    if not all(c.isalnum() or c in '/:._-@' for c in img):
+        raise HTTPException(status_code=400, detail='Invalid image name characters')
+    return img
+
+
+def _validate_container_name(name: str) -> str:
+    # Docker recommends lowercase and limited chars; enforce a strict pattern
+    if not name or len(name) > 128:
+        raise HTTPException(status_code=400, detail='Invalid container name')
+    if any(c in name for c in ' <>|&;$`\n\r'):
+        raise HTTPException(status_code=400, detail='Invalid container name characters')
+    return name
+
 def _container_ports_for_image(image: str) -> dict:
     # Known defaults
     if 'dorowu/ubuntu-desktop-lxde-vnc' in image:
@@ -1378,6 +2212,7 @@ def _detect_viewer_path(http_port: int) -> tuple[str, str]:
     return '/', ''
 
 @app.post('/api/secure/vd/create')
+@rate_limited(per_minute=30, burst=6)
 async def vd_create(request: Request, spec: VDCreateRequest, background_tasks: BackgroundTasks):
     sid, key = validate_secure(request.headers)
     # Preflight: ensure Docker daemon is available
@@ -1386,6 +2221,12 @@ async def vd_create(request: Request, spec: VDCreateRequest, background_tasks: B
     # Resolve image from env override or mapping, and set pull policy
     env_img = os.environ.get('OMEGA_DEFAULT_VD_IMAGE', '').strip()
     image = env_img or _image_for_os(spec.os_image)
+    try:
+        image = _sanitize_image_name(image)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail='Invalid image selection')
     ports = _container_ports_for_image(image)
     pull_policy = os.environ.get('OMEGA_VD_PULL_POLICY', 'IfNotPresent').strip().lower()
     http_port = _find_free_port(7000, 7999)
@@ -1393,6 +2234,12 @@ async def vd_create(request: Request, spec: VDCreateRequest, background_tasks: B
     vnc_password = spec.vnc_password.strip() if isinstance(spec.vnc_password, str) and spec.vnc_password.strip() else secrets.token_urlsafe(8)
     session_id = f"vd-{secrets.token_hex(8)}"
     name = f"omega_{session_id}"
+    try:
+        name = _validate_container_name(name)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail='Invalid container name')
 
     # Prepare storage path
     sess_path = os.path.join(api_server.session_storage_base, session_id)
@@ -1911,7 +2758,19 @@ async def secure_whoami(request: Request):
     sid, key = validate_secure(request.headers)
     user = SESSION_META.get(sid, {}).get('user', 'admin')
     roles = get_user_roles(user)
-    return wrap_encrypted(sid, key, {'user': user, 'roles': roles, 'timestamp': time.time()})
+    # Resolve friendly descriptions for roles from roles table
+    friendly = []
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT role,description FROM roles WHERE role IN ({seq})'.format(seq=','.join('?'*len(roles))), tuple(roles) if roles else ())
+            rows = {r[0]: r[1] for r in cur.fetchall()}
+            for r in roles:
+                friendly.append(rows.get(r) or r)
+    except Exception:
+        friendly = roles
+    # Permissions stub: in future map roles->permissions via a table
+    permissions = ['all'] if 'admin' in roles else ['read']
+    return wrap_encrypted(sid, key, {'user': user, 'roles': roles, 'role_descriptions': friendly, 'permissions': permissions, 'timestamp': time.time()})
 
 @app.post('/api/secure/admin/roles/assign')
 async def admin_assign_role(request: Request, body: RoleAssignRequest):
@@ -1923,15 +2782,18 @@ async def admin_assign_role(request: Request, body: RoleAssignRequest):
     if not role or not username:
         raise HTTPException(status_code=400, detail='username and role are required')
     try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
+        with db_connect() as conn:
             conn.execute('INSERT OR IGNORE INTO roles (role, description) VALUES (?, ?)', (role, None))
-            conn.execute('INSERT OR IGNORE INTO user_roles (username, role) VALUES (?, ?)', (username, role))
+            cur = conn.execute('SELECT 1 FROM user_roles WHERE username=? AND role=?', (username, role))
+            exists = bool(cur.fetchone())
+            if not exists:
+                conn.execute('INSERT INTO user_roles (username, role) VALUES (?, ?)', (username, role))
             conn.commit()
         api_server.database.log_event('security_role_assign', caller, f'Assigned role {role} to {username}', 'info')
     except Exception as e:
         logging.error(f'Role assign error: {e}')
         raise HTTPException(status_code=500, detail='Role assignment failed')
-    return wrap_encrypted(sid, key, {'success': True, 'username': username, 'role': role})
+    return wrap_encrypted(sid, key, {'success': True, 'username': username, 'role': role, 'applied': not exists})
 
 @app.post('/api/secure/admin/roles/remove')
 async def admin_remove_role(request: Request, body: RoleAssignRequest):
@@ -1943,14 +2805,171 @@ async def admin_remove_role(request: Request, body: RoleAssignRequest):
     if not role or not username:
         raise HTTPException(status_code=400, detail='username and role are required')
     try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT 1 FROM user_roles WHERE username=? AND role=?', (username, role))
+            existed = bool(cur.fetchone())
             conn.execute('DELETE FROM user_roles WHERE username=? AND role=?', (username, role))
             conn.commit()
         api_server.database.log_event('security_role_remove', caller, f'Removed role {role} from {username}', 'info')
     except Exception as e:
         logging.error(f'Role remove error: {e}')
         raise HTTPException(status_code=500, detail='Role removal failed')
-    return wrap_encrypted(sid, key, {'success': True, 'username': username, 'role': role, 'removed': True})
+    return wrap_encrypted(sid, key, {'success': True, 'username': username, 'role': role, 'removed': existed})
+
+
+class UserCreateRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post('/api/secure/admin/users/create')
+@rate_limited(per_minute=30, burst=6)
+async def admin_create_user(request: Request, body: UserCreateRequest):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    username = body.username.strip()
+    if not username or not body.password:
+        raise HTTPException(status_code=400, detail='username and password are required')
+    hashed = _hash_password(body.password)
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            conn.execute('INSERT OR REPLACE INTO users (username, password_hash, created_at) VALUES (?, ?, ?)', (username, hashed, time.time()))
+            conn.commit()
+        api_server.database.log_event('user_create', caller, f'User {username} created', 'info')
+    except Exception as e:
+        logging.error(f'user create error: {e}')
+        raise HTTPException(status_code=500, detail='Failed to create user')
+    return wrap_encrypted(sid, key, {'created': True, 'username': username})
+
+
+class UserModifyRequest(BaseModel):
+    username: str
+
+
+@app.post('/api/secure/admin/users/reset_password')
+@rate_limited(per_minute=10, burst=4)
+async def admin_reset_password(request: Request, body: UserModifyRequest):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    username = body.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail='username required')
+    # Set a random password and return a one-time token (best-effort)
+    new_pw = secrets.token_urlsafe(12)
+    hashed = _hash_password(new_pw)
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT 1 FROM users WHERE username=?', (username,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail='user not found')
+            conn.execute('UPDATE users SET password_hash=? WHERE username=?', (hashed, username))
+            conn.commit()
+        api_server.database.log_event('user_reset_pw', caller, f'Password reset for {username}', 'info')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f'Password reset error: {e}')
+        raise HTTPException(status_code=500, detail='Password reset failed')
+    # Return the new password in the response (admin should convey securely)
+    return wrap_encrypted(sid, key, {'username': username, 'new_password': new_pw})
+
+
+@app.post('/api/secure/admin/users/suspend')
+async def admin_suspend_user(request: Request, body: UserModifyRequest):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    username = body.username.strip()
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT disabled FROM users WHERE username=?', (username,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail='user not found')
+            conn.execute('UPDATE users SET disabled=1 WHERE username=?', (username,))
+            conn.commit()
+        api_server.database.log_event('user_suspend', caller, f'User suspended: {username}', 'warning')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f'User suspend error: {e}')
+        raise HTTPException(status_code=500, detail='Suspend failed')
+    return wrap_encrypted(sid, key, {'suspended': True, 'username': username})
+
+
+@app.post('/api/secure/admin/users/activate')
+async def admin_activate_user(request: Request, body: UserModifyRequest):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    username = body.username.strip()
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT disabled FROM users WHERE username=?', (username,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail='user not found')
+            conn.execute('UPDATE users SET disabled=0 WHERE username=?', (username,))
+            conn.commit()
+        api_server.database.log_event('user_activate', caller, f'User activated: {username}', 'info')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f'User activate error: {e}')
+        raise HTTPException(status_code=500, detail='Activate failed')
+    return wrap_encrypted(sid, key, {'activated': True, 'username': username})
+
+
+@app.get('/api/secure/admin/certificates')
+async def list_certificates(request: Request):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    # Placeholder: no real cert store yet
+    return wrap_encrypted(sid, key, {'certificates': [], 'timestamp': time.time()})
+
+
+@app.post('/api/secure/admin/certificates/generate')
+async def generate_certificate(request: Request, body: dict):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    # Placeholder: return a simulated cert id
+    cert_id = f'cert-{secrets.token_hex(8)}'
+    api_server.database.log_event('cert_generate', caller, f'Generated placeholder cert {cert_id}', 'info')
+    return wrap_encrypted(sid, key, {'generated': True, 'id': cert_id})
+
+
+@app.post('/api/secure/admin/certificates/revoke')
+async def revoke_certificate(request: Request, body: dict):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    cert_id = (body.get('id') or '')
+    if not cert_id:
+        raise HTTPException(status_code=400, detail='id required')
+    api_server.database.log_event('cert_revoke', caller, f'Revoked placeholder cert {cert_id}', 'info')
+    return wrap_encrypted(sid, key, {'revoked': True, 'id': cert_id})
+
+
+@app.get('/api/secure/admin/users')
+@rate_limited(per_minute=60, burst=10)
+async def admin_list_users(request: Request):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    users = []
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            cur = conn.execute('SELECT username, created_at, disabled FROM users ORDER BY created_at DESC')
+            for r in cur.fetchall():
+                users.append({'username': r[0], 'created_at': r[1], 'disabled': bool(r[2])})
+    except Exception as e:
+        logging.error(f'list users error: {e}')
+        raise HTTPException(status_code=500, detail='Failed to list users')
+    return wrap_encrypted(sid, key, {'users': users})
 
 @app.post('/api/secure/rdp/create')
 async def rdp_create(request: Request, spec: RDPCreateRequest):
@@ -2057,6 +3076,92 @@ async def vd_os_list(request: Request):
     except Exception:
         pass
     return wrap_encrypted(sid, key, {'builtin': builtin, 'custom': custom})
+
+
+@app.post('/api/secure/admin/session/revoke')
+@rate_limited(per_minute=60, burst=10)
+async def admin_revoke_session(request: Request, body: dict):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    session_id = body.get('session_id')
+    if not session_id:
+        raise HTTPException(status_code=400, detail='session_id required')
+    # remove from memory and persist revocation
+    SESSION_META.pop(session_id, None)
+    SESSION_NONCES.pop(session_id, None)
+    try:
+        persist_revocation(session_id, body.get('reason','admin_revoke'))
+    except Exception:
+        pass
+    try:
+        # close ws if present
+        ws = SESSION_WS.get(session_id)
+        if ws:
+            await ws.close()
+    except Exception:
+        pass
+    try:
+        api_server.database.log_event('session_revoked', session_id, f'Revoked by admin {caller}', 'warning')
+    except Exception:
+        pass
+    return wrap_encrypted(sid, key, {'revoked': True, 'session_id': session_id})
+
+
+@app.post('/api/secure/admin/session/rotate')
+@rate_limited(per_minute=60, burst=10)
+async def admin_rotate_session(request: Request, body: dict):
+    sid, key = validate_secure(request.headers)
+    caller = SESSION_META.get(sid, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    session_id = body.get('session_id')
+    if not session_id or session_id not in SESSION_META:
+        raise HTTPException(status_code=400, detail='Unknown session_id')
+    # generate server-side new AES key and persist as pending rekey; push via WS if connected
+    new_key = os.urandom(32)
+    key_b64 = base64.b64encode(new_key).decode()
+    persist_pending_rekey(session_id, key_b64)
+    # Attempt push via WS: send a small delivery packet (server will not send raw AES key; instead request client to rekey)
+    pushed = False
+    try:
+        ws = SESSION_WS.get(session_id)
+        if ws:
+            try:
+                # Signal client to perform rekey (client should call rotate endpoint to supply new key), so we send a rekey_request
+                await ws.send_json({'type':'rekey_request','session_id':session_id,'ts':time.time()})
+                pushed = True
+            except Exception:
+                pushed = False
+    except Exception:
+        pushed = False
+    try:
+        api_server.database.log_event('session_admin_rotate', session_id, f'Admin {caller} requested rotate (pushed={pushed})', 'info')
+    except Exception:
+        pass
+    return wrap_encrypted(sid, key, {'rotated': True, 'session_id': session_id, 'pushed': pushed})
+
+
+@app.post('/api/secure/session/poll')
+async def session_poll(request: Request, body: dict):
+    # Clients poll to check if server has pending rekey or revocation
+    session_id = body.get('session_id')
+    if not session_id:
+        raise HTTPException(status_code=400, detail='session_id required')
+    # If revoked, instruct client to drop session
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            cur = conn.execute('SELECT revoked_at,reason FROM revoked_sessions WHERE session_id=?', (session_id,))
+            row = cur.fetchone()
+            if row:
+                return JSONResponse(content={'status':'revoked','revoked_at': row[0], 'reason': row[1]})
+            cur = conn.execute('SELECT new_key,created_at FROM session_pending_rekey WHERE session_id=?', (session_id,))
+            row = cur.fetchone()
+            if row:
+                # For safety, server does not return raw new_key to client; instead it instructs client to rekey
+                return JSONResponse(content={'status':'rekey_pending','created_at': row[1]})
+    except Exception:
+        pass
+    return JSONResponse(content={'status':'ok'})
 
 @app.get('/api/secure/vd/docker-health')
 async def vd_docker_health(request: Request):

@@ -50,6 +50,7 @@ from sqlalchemy.pool import QueuePool
 
 # Monitoring and metrics imports
 from prometheus_client import start_http_server, Counter, Gauge, Histogram, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest
+from utils.metrics import create_counter
 
 # Scientific computing and ML imports
 import numpy as np
@@ -81,6 +82,8 @@ except ImportError:
 
 # External service imports with enhanced connectivity
 try:
+    import os as _os
+    _os.environ.setdefault('PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION', 'python')
     import aiohttp
     import websockets
     import redis.asyncio as redis
@@ -105,7 +108,6 @@ except ImportError:
 try:
     import dpkt
     import scapy
-    from scapy.all import *
     NETWORK_OPTIMIZATION_AVAILABLE = True
 except ImportError:
     NETWORK_OPTIMIZATION_AVAILABLE = False
@@ -537,7 +539,7 @@ class LeaderElectionState:
     split_brain_detected: bool = False
 
 # Enhanced Prometheus Metrics for comprehensive monitoring
-REQUESTS_TOTAL = Counter('omega_requests_total', 'Total requests', ['method', 'endpoint', 'status'])
+REQUESTS_TOTAL = create_counter('omega_requests_total', 'Total requests', ['method', 'endpoint', 'status'])
 ACTIVE_SESSIONS = Gauge('omega_active_sessions', 'Number of active sessions', ['node_type'])
 NODE_COUNT = Gauge('omega_node_count', 'Number of registered nodes', ['type', 'status'])
 LATENCY_P95 = Gauge('omega_latency_p95_ms', 'P95 latency in milliseconds', ['node_id'])
@@ -545,9 +547,9 @@ RESOURCE_UTILIZATION = Gauge('omega_resource_utilization', 'Resource utilization
 FAULT_TOLERANCE_STATUS = Gauge('omega_fault_tolerance_status', 'Fault tolerance status', ['component'])
 
 # Leader election metrics
-LEADER_ELECTIONS_TOTAL = Counter('omega_leader_elections_total', 'Total leader elections')
+LEADER_ELECTIONS_TOTAL = create_counter('omega_leader_elections_total', 'Total leader elections')
 LEADER_ELECTION_DURATION = Histogram('omega_leader_election_duration_seconds', 'Leader election duration')
-SPLIT_BRAIN_INCIDENTS = Counter('omega_split_brain_incidents_total', 'Split brain incidents detected')
+SPLIT_BRAIN_INCIDENTS = create_counter('omega_split_brain_incidents_total', 'Split brain incidents detected')
 
 # Performance metrics
 TASK_EXECUTION_TIME = Histogram('omega_task_execution_seconds', 'Task execution time', ['task_type', 'node_type'])
@@ -562,7 +564,7 @@ STORAGE_TIER_UTILIZATION = Gauge('omega_storage_tier_utilization', 'Storage tier
 
 # Network metrics
 NETWORK_BANDWIDTH_UTILIZATION = Gauge('omega_network_bandwidth_utilization', 'Network bandwidth utilization', ['node_id', 'interface'])
-RDMA_OPERATIONS = Counter('omega_rdma_operations_total', 'RDMA operations', ['node_id', 'operation_type'])
+RDMA_OPERATIONS = create_counter('omega_rdma_operations_total', 'RDMA operations', ['node_id', 'operation_type'])
 
 # Enhanced in-memory metrics fallback with comprehensive tracking
 class SimpleMetrics:
@@ -2898,24 +2900,8 @@ except Exception as e:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Enhanced Redis Configuration for Distributed State
+# Redis client placeholder - will be initialized during app startup using utils.get_redis_client
 redis_client = None
-if EXTERNAL_SERVICES_AVAILABLE:
-    try:
-        import redis.asyncio as redis
-        redis_client = redis.from_url(
-            REDIS_URL,
-            decode_responses=True,
-            socket_connect_timeout=5,
-            socket_timeout=5,
-            retry_on_timeout=True,
-            max_connections=50
-        )
-        # Test connection asynchronously will be done during startup
-        print("✓ Redis client configured for distributed state")
-    except Exception as e:
-        print(f"Redis configuration failed: {e}")
-        redis_client = None
 
 # Enhanced etcd Configuration for Leader Election and Consensus
 etcd_client = None
@@ -3119,19 +3105,8 @@ if 'engine' not in locals():
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Redis Configuration for Distributed State
+# Redis will be initialized on startup via the central helper to support multiple redis libs
 redis_client = None
-if EXTERNAL_SERVICES_AVAILABLE:
-    try:
-        import redis
-        redis_url = os.getenv("OMEGA_REDIS_URL", "redis://localhost:6379")
-        redis_client = redis.from_url(redis_url, decode_responses=True, 
-                                     socket_connect_timeout=5, socket_timeout=5)
-        redis_client.ping()
-        print("✓ Using Redis for distributed state")
-    except Exception as e:
-        print(f"Redis connection failed: {e}")
-        redis_client = None
 
 # etcd Configuration for Leader Election
 etcd_client = None
@@ -4130,6 +4105,20 @@ async def lifespan(app: FastAPI):
         logging.info("Local control node registered successfully")
     except Exception as e:
         logging.error(f"Failed to register local control node: {e}")
+    # Initialize Redis via central helper to support multiple Redis libraries
+    try:
+        from utils.redis_helper import get_redis_client
+        redis_url = os.getenv("OMEGA_REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        # get_redis_client is async
+        global redis_client
+        try:
+            redis_client = await get_redis_client(redis_url)
+            logging.info("Redis client initialized in control node")
+        except Exception as e:
+            logging.warning(f"Redis helper failed to initialize client: {e}")
+            redis_client = None
+    except Exception:
+        logging.debug("Redis helper not available; proceeding without Redis")
     
     try:
         # Try to start Prometheus metrics server on an alternative port if 8000 is busy
