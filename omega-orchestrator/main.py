@@ -122,8 +122,12 @@ class OmegaOrchestrator:
     
     async def _init_database(self):
         """Initialize database schema"""
-        async with self.postgres_pool.acquire() as conn:
-            await conn.execute('''
+        if not self.postgres_pool:
+            self.logger.warning("Skipping database schema init - no persistence backend available")
+            return
+        try:
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute('''
                 CREATE TABLE IF NOT EXISTS nodes (
                     node_id VARCHAR(64) PRIMARY KEY,
                     node_type VARCHAR(32) NOT NULL,
@@ -151,6 +155,8 @@ class OmegaOrchestrator:
                 CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
                 CREATE INDEX IF NOT EXISTS idx_placement_session ON placement_decisions(session_id);
             ''')
+        except Exception as e:
+            self.logger.error(f"Database init failed (continuing without persistence): {e}")
     
     async def register_node(self, node_spec: NodeSpec) -> bool:
         """Register a new node in the cluster"""

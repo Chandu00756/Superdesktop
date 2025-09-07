@@ -20400,8 +20400,17 @@ class PredictiveStorageLayer:
         """Get comprehensive predictive analytics"""
         try:
             # Get individual component stats
-            ml_stats = await self.data_lifecycle_model.get_model_stats()
-            dedup_stats = await self.deduplication_engine.get_deduplication_stats()
+            ml_stats_raw = self.data_lifecycle_model.get_model_stats()
+            dedup_stats_raw = self.deduplication_engine.get_deduplication_stats()
+            # Support both async and sync implementations
+            if asyncio.iscoroutine(ml_stats_raw):
+                ml_stats = await ml_stats_raw
+            else:
+                ml_stats = ml_stats_raw
+            if asyncio.iscoroutine(dedup_stats_raw):
+                dedup_stats = await dedup_stats_raw
+            else:
+                dedup_stats = dedup_stats_raw
             
             # Calculate integrated metrics
             total_space_saved_mb = self.layer_stats['space_saved_total'] / (1024 * 1024)

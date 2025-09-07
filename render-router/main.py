@@ -16,27 +16,23 @@ Key Features:
 """
 
 import asyncio
-import json
 import logging
 import time
-import math
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any, Set
 from dataclasses import dataclass, asdict
 from enum import Enum
 import os
-import threading
-import queue
 import numpy as np
+from contextlib import asynccontextmanager
 
 # Core Dependencies
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, BackgroundTasks
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import aioredis
 import asyncpg
-import grpc
-from grpc import aio as aio_grpc
+# (gRPC imports removed – not currently used; add back when gRPC streaming implemented)
 
 # GPU and Graphics
 try:
@@ -46,13 +42,26 @@ except ImportError:
     NVML_AVAILABLE = False
     logging.warning("NVML not available - GPU monitoring disabled")
 
-# Image and Video Processing
-try:
-    import cv2
+# Image and Video Processing (optional OpenCV)
+# Import guarded so the service still runs if OpenCV isn't installed (headless deploys, minimal nodes)
+try:  # pragma: no cover - optional dependency
+    import cv2  # type: ignore
     OPENCV_AVAILABLE = True
-except ImportError:
+except Exception:
+    cv2 = None  # type: ignore
     OPENCV_AVAILABLE = False
-    logging.warning("OpenCV not available - some features disabled")
+    logging.warning("OpenCV not available - advanced frame processing disabled")
+
+def require_opencv(feature: str):
+    """Lightweight guard for endpoints/features that need OpenCV.
+
+    Raises HTTPException if OpenCV is not available. Avoids scattered checks.
+    """
+    if not OPENCV_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Feature '{feature}' requires OpenCV (package not installed)."
+        )
 
 # Monitoring
 import structlog
@@ -578,7 +587,16 @@ class EncodingOptimizer:
         return profile
 
 class RenderRouter:
-    """Main render routing service"""
+    """Main render routing service.
+
+    Responsibilities:
+    - GPU capability discovery & monitoring
+    - Stream lifecycle management
+    - Render task scheduling & simulated execution
+    - Encoding profile optimization
+    - Metrics / health state aggregation
+    - External resource (Redis / Postgres) optional integration
+    """
     
     def __init__(self):
         self.gpu_manager = GPUResourceManager()
@@ -586,25 +604,25 @@ class RenderRouter:
         self.active_streams: Dict[str, StreamConfiguration] = {}
         self.active_tasks: Dict[str, RenderTask] = {}
         self.frame_metrics: List[FrameMetrics] = []
-        
-        # External connections
+
+        # External connections (optional)
         self.redis_client: Optional[aioredis.Redis] = None
         self.postgres_pool: Optional[asyncpg.Pool] = None
-        
+
         # WebSocket connections for real-time updates
         self.websocket_connections: Set[WebSocket] = set()
-        
+
         # Background tasks
         self.monitoring_task: Optional[asyncio.Task] = None
         self.optimization_task: Optional[asyncio.Task] = None
-        
+
         # Performance tracking
         self.total_frames_rendered = 0
         self.total_frames_dropped = 0
         self.average_render_time_ms = 0.0
     
     async def initialize(self):
-        """Initialize the render router service"""
+        """Initialize the render router service (idempotent)."""
         try:
             # Initialize GPU manager
             await self.gpu_manager.initialize()
@@ -613,7 +631,7 @@ class RenderRouter:
             try:
                 from utils.redis_helper import get_redis_client
                 self.redis_client = await get_redis_client(os.getenv('REDIS_URL', 'redis://localhost:6379'))
-            except Exception as e:
+            except Exception as e:  # fallback stub
                 logger.warning(f"Redis helper failed in render-router, using in-memory stub: {e}")
                 class _InMemoryRedisStub:
                     def __init__(self):
@@ -624,22 +642,30 @@ class RenderRouter:
                         self._store.pop(key, None)
                     async def hgetall(self, key):
                         return self._store.get(key, {})
+                    async def close(self):  # parity with aioredis interface
+                        self._store.clear()
                 self.redis_client = _InMemoryRedisStub()
             
-            # PostgreSQL connection
-            self.postgres_pool = await asyncpg.create_pool(
-                host=os.getenv('POSTGRES_HOST', 'localhost'),
-                port=int(os.getenv('POSTGRES_PORT', '5432')),
-                user=os.getenv('POSTGRES_USER', 'omega'),
-                password=os.getenv('POSTGRES_PASSWORD', 'omega_secure_2025'),
-                database=os.getenv('POSTGRES_DB', 'omega_sessions'),
-                min_size=5,
-                max_size=20
-            )
+            # PostgreSQL connection (optional)
+            try:
+                self.postgres_pool = await asyncpg.create_pool(
+                    host=os.getenv('POSTGRES_HOST', 'localhost'),
+                    port=int(os.getenv('POSTGRES_PORT', '5432')),
+                    user=os.getenv('POSTGRES_USER', 'omega'),
+                    password=os.getenv('POSTGRES_PASSWORD', 'omega_secure_2025'),
+                    database=os.getenv('POSTGRES_DB', 'omega_sessions'),
+                    min_size=1,
+                    max_size=5
+                )
+            except Exception as db_err:
+                logger.warning(f"PostgreSQL unavailable for render-router ({db_err}); continuing without DB persistence")
+                self.postgres_pool = None
             
             # Start background tasks
-            self.monitoring_task = asyncio.create_task(self._monitoring_loop())
-            self.optimization_task = asyncio.create_task(self._optimization_loop())
+            if not self.monitoring_task or self.monitoring_task.done():
+                self.monitoring_task = asyncio.create_task(self._monitoring_loop())
+            if not self.optimization_task or self.optimization_task.done():
+                self.optimization_task = asyncio.create_task(self._optimization_loop())
             
             logger.info("Render router initialized successfully")
             
@@ -647,8 +673,15 @@ class RenderRouter:
             logger.error("Failed to initialize render router", error=str(e))
             raise
     
+    def _update_active_streams_gauge(self):
+        """Synchronize Prometheus gauge with current active streams count."""
+        try:
+            active_streams.set(len(self.active_streams))
+        except Exception:
+            pass
+
     async def create_render_stream(self, stream_config: StreamConfiguration) -> Dict[str, Any]:
-        """Create a new render stream"""
+        """Create a new render stream."""
         try:
             # Validate configuration
             if not stream_config.displays:
@@ -659,9 +692,7 @@ class RenderRouter:
             
             # Store stream configuration
             self.active_streams[stream_config.stream_id] = stream_config
-            
-            # Update metrics
-            active_streams.inc()
+            self._update_active_streams_gauge()
             
             # Notify via WebSocket
             await self._broadcast_stream_update("stream_created", stream_config.stream_id)
@@ -685,7 +716,7 @@ class RenderRouter:
             raise
     
     async def submit_render_task(self, render_task: RenderTask) -> Dict[str, Any]:
-        """Submit a rendering task"""
+        """Submit a rendering task."""
         try:
             start_time = time.time()
             
@@ -775,7 +806,7 @@ class RenderRouter:
         }
     
     async def get_stream_status(self, stream_id: str) -> Dict[str, Any]:
-        """Get status of a render stream"""
+        """Get status of a render stream."""
         if stream_id not in self.active_streams:
             raise HTTPException(status_code=404, detail="Stream not found")
         
@@ -816,7 +847,7 @@ class RenderRouter:
         }
     
     async def optimize_stream(self, stream_id: str) -> Dict[str, Any]:
-        """Optimize encoding parameters for a stream"""
+        """Optimize encoding parameters for a stream."""
         if stream_id not in self.active_streams:
             raise HTTPException(status_code=404, detail="Stream not found")
         
@@ -933,28 +964,77 @@ class RenderRouter:
         self.websocket_connections.discard(websocket)
     
     async def cleanup(self):
-        """Cleanup resources"""
+        """Cleanup resources gracefully."""
+        tasks = []
         if self.monitoring_task:
             self.monitoring_task.cancel()
-        
+            tasks.append(self.monitoring_task)
         if self.optimization_task:
             self.optimization_task.cancel()
-        
+            tasks.append(self.optimization_task)
+        if tasks:
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception:
+                pass
+
         if self.redis_client:
-            await self.redis_client.close()
-        
+            try:
+                await self.redis_client.close()
+            except Exception:
+                pass
         if self.postgres_pool:
-            await self.postgres_pool.close()
-        
+            try:
+                await self.postgres_pool.close()
+            except Exception:
+                pass
+
         logger.info("Render router cleanup completed")
 
-# FastAPI Application
+    async def remove_render_stream(self, stream_id: str) -> bool:
+        """Remove a render stream and update metrics.
+
+        Returns True if removed, False if not present.
+        """
+        removed = self.active_streams.pop(stream_id, None) is not None
+        # Remove any associated tasks lingering
+        to_delete = [tid for tid, t in self.active_tasks.items() if t.stream_id == stream_id]
+        for tid in to_delete:
+            self.active_tasks.pop(tid, None)
+        if removed:
+            self._update_active_streams_gauge()
+            await self._broadcast_stream_update("stream_removed", stream_id)
+        return removed
+
+"""FastAPI application factory using lifespan context."""
+
+# Global instance (created before lifespan so handlers can reference it)
+render_router = RenderRouter()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # pragma: no cover - framework integration
+    await render_router.initialize()
+    # Metrics server (separate thread) - configurable & idempotent
+    metrics_port = int(os.getenv("RENDER_ROUTER_METRICS_PORT", "8003"))
+    try:
+        start_http_server(metrics_port)
+        logger.info("Metrics server started", port=metrics_port)
+    except OSError:
+        # Port already in use (possibly another instance); continue without fatal error
+        logger.warning("Metrics server already running or port in use", port=metrics_port)
+    logger.info("Render router started successfully")
+    try:
+        yield
+    finally:
+        await render_router.cleanup()
+
 app = FastAPI(
     title="Omega Render Router",
     description="Advanced graphics rendering routing and optimization service",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -964,23 +1044,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global render router instance
-render_router = RenderRouter()
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the render router"""
-    await render_router.initialize()
-    
-    # Start Prometheus metrics server
-    start_http_server(8003)
-    logger.info("Render router started successfully")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    await render_router.cleanup()
 
 # API Endpoints
 @app.post("/streams", response_model=Dict[str, Any])
@@ -1071,6 +1134,31 @@ async def get_stream_status(stream_id: str) -> Dict[str, Any]:
     """Get render stream status"""
     return await render_router.get_stream_status(stream_id)
 
+@app.get("/streams")
+async def list_streams() -> Dict[str, Any]:
+    """List active streams with brief configuration summary."""
+    return {
+        "streams": [
+            {
+                "stream_id": sid,
+                "target_resolution": cfg.target_resolution,
+                "target_fps": cfg.target_fps,
+                "codec": cfg.encoding_codec.value,
+                "bitrate_mbps": getattr(cfg, 'bitrate_mbps', None)
+            }
+            for sid, cfg in render_router.active_streams.items()
+        ],
+        "count": len(render_router.active_streams)
+    }
+
+@app.delete("/streams/{stream_id}")
+async def delete_stream(stream_id: str) -> Dict[str, Any]:
+    """Delete (terminate) an active stream."""
+    removed = await render_router.remove_render_stream(stream_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Stream not found")
+    return {"stream_id": stream_id, "status": "removed"}
+
 @app.post("/streams/{stream_id}/optimize")
 async def optimize_stream(stream_id: str) -> Dict[str, Any]:
     """Optimize render stream"""
@@ -1111,6 +1199,10 @@ async def health_check():
         "total_frames_rendered": render_router.total_frames_rendered,
         "total_frames_dropped": render_router.total_frames_dropped,
         "available_gpus": len(render_router.gpu_manager.gpu_capabilities),
+        "redis_connected": render_router.redis_client is not None,
+        "postgres_connected": render_router.postgres_pool is not None,
+        "nvml_available": NVML_AVAILABLE,
+        "opencv_available": OPENCV_AVAILABLE,
         "version": "1.0.0"
     }
 
@@ -1135,10 +1227,11 @@ async def get_metrics():
     }
 
 if __name__ == "__main__":
+    service_port = int(os.getenv("RENDER_ROUTER_PORT", "8005"))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8005,
+        port=service_port,
         reload=False,
         access_log=True
     )

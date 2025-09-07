@@ -524,16 +524,20 @@ class PredictorService:
                         return self._store.get(key, {})
                 self.redis_client = _InMemoryRedisStub()
             
-            # PostgreSQL connection
-            self.postgres_pool = await asyncpg.create_pool(
-                host=os.getenv('POSTGRES_HOST', 'localhost'),
-                port=int(os.getenv('POSTGRES_PORT', '5432')),
-                user=os.getenv('POSTGRES_USER', 'omega'),
-                password=os.getenv('POSTGRES_PASSWORD', 'omega_secure_2025'),
-                database=os.getenv('POSTGRES_DB', 'omega_sessions'),
-                min_size=5,
-                max_size=20
-            )
+            # PostgreSQL connection (optional)
+            try:
+                self.postgres_pool = await asyncpg.create_pool(
+                    host=os.getenv('POSTGRES_HOST', 'localhost'),
+                    port=int(os.getenv('POSTGRES_PORT', '5432')),
+                    user=os.getenv('POSTGRES_USER', 'omega'),
+                    password=os.getenv('POSTGRES_PASSWORD', 'omega_secure_2025'),
+                    database=os.getenv('POSTGRES_DB', 'omega_sessions'),
+                    min_size=1,
+                    max_size=5
+                )
+            except Exception as db_err:
+                logger.warning(f"PostgreSQL unavailable for predictor-service ({db_err}); continuing without DB persistence")
+                self.postgres_pool = None
             
             # Load existing models
             await self.model_manager.load_models()
@@ -1119,13 +1123,27 @@ class PredictorService:
         
         logger.info("Predictor service cleanup completed")
 
-# FastAPI Application
+from contextlib import asynccontextmanager
+
+predictor_service = PredictorService()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # pragma: no cover - framework integration
+    await predictor_service.initialize()
+    start_http_server(8002)
+    logger.info("Predictor service started successfully")
+    try:
+        yield
+    finally:
+        await predictor_service.cleanup()
+
 app = FastAPI(
     title="Omega Predictor Service",
     description="AI-driven performance prediction and optimization service",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -1136,22 +1154,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global predictor service instance
-predictor_service = PredictorService()
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the predictor service"""
-    await predictor_service.initialize()
-    
-    # Start Prometheus metrics server
-    start_http_server(8002)
-    logger.info("Predictor service started successfully")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    await predictor_service.cleanup()
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "models_loaded": list(predictor_service.models.keys()),
+        "redis_connected": predictor_service.redis_client is not None,
+        "postgres_connected": predictor_service.postgres_pool is not None,
+        "prophet_available": PROPHET_AVAILABLE,
+        "version": "1.0.0"
+    }
 
 # API Endpoints
 @app.post("/predict", response_model=Dict[str, Any])
@@ -1295,10 +1308,12 @@ async def get_model_status():
     }
 
 if __name__ == "__main__":
+    # Use configurable port to avoid conflicts when multiple services run in same process
+    _port = int(os.getenv("PREDICTOR_SERVICE_PORT", "8010"))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8004,
+        port=_port,
         reload=False,
         access_log=True
     )

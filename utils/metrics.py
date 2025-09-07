@@ -1,98 +1,122 @@
-"""
-Safe Prometheus metrics helper.
+"""Utilities for safe Prometheus metric creation with de-duplication.
 
-Provides a create_counter function that avoids duplicate registration errors
-and handles slight API differences between prometheus_client versions.
+This module provides helper factories that:
+1. Avoid ValueError exceptions when a metric is registered multiple times
+2. Return the already-registered metric instance (cache + registry lookup)
+3. Preserve backward compatible function signatures used elsewhere
+
+Use create_counter/create_gauge/create_histogram instead of direct constructors.
 """
-from prometheus_client import CollectorRegistry, Counter
-from prometheus_client import REGISTRY as DEFAULT_REGISTRY
+from prometheus_client import Counter, Gauge, Histogram, REGISTRY as DEFAULT_REGISTRY
 import logging
 
 log = logging.getLogger(__name__)
 
+# In-process cache to short‑circuit second attempts before hitting the registry
+_METRIC_CACHE = {}
+
+
+def _key(kind: str, name: str, labelnames, buckets=None):
+    return (
+        kind,
+        name,
+        tuple(labelnames) if labelnames else tuple(),
+        tuple(buckets) if buckets else tuple(),
+    )
+
+
+def _find_existing(registry, name: str):
+    """Attempt to locate an already registered collector by metric name."""
+    try:
+        for collector in list(registry._collector_to_names.keys()):  # type: ignore[attr-defined]
+            try:
+                names = registry._collector_to_names.get(collector, [])  # type: ignore[attr-defined]
+            except Exception:
+                continue
+            if name in names:
+                return collector
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return None
+
 
 def create_counter(name: str, documentation: str, labelnames=None, registry=None):
-    """Create or return an existing Counter safely.
-
-    - name: metric name
-    - documentation: help text
-    - labelnames: list of label names, optional
-    - registry: CollectorRegistry instance (defaults to global)
-    """
     if registry is None:
         registry = DEFAULT_REGISTRY
-
-    labelnames = labelnames or []
-
-    # If a metric with the same name already exists, return it instead of creating a new one
+    key = _key("counter", name, labelnames)
+    if key in _METRIC_CACHE:
+        return _METRIC_CACHE[key]
     try:
-        # prometheus_client keeps collectors in registry._collector_to_names (internal),
-        # but we can catch ValueError on duplicate registration instead of introspecting.
-        if labelnames:
-            return Counter(name, documentation, labelnames, registry=registry)
-        else:
-            return Counter(name, documentation, registry=registry)
-    except ValueError as ve:
-        # Duplicate registered metric, try to find and return it
-        log.warning("Metric %s already registered, returning existing instance", name)
-        # Search registry for matching collector
-        for collector in list(registry._collector_to_names.keys()):
-            try:
-                names = registry._collector_to_names.get(collector, [])
-            except Exception:
-                names = []
-            if name in names:
-                # collector might be a Counter instance
-                try:
-                    return collector
-                except Exception:
-                    continue
-
-        # If we couldn't find it, re-raise the original error
+        metric = (
+            Counter(name, documentation, labelnames=labelnames, registry=registry)
+            if labelnames
+            else Counter(name, documentation, registry=registry)
+        )
+        _METRIC_CACHE[key] = metric
+        return metric
+    except ValueError:
+        existing = _find_existing(registry, name)
+        if existing:
+            log.debug("Counter %s already registered; returning existing", name)
+            _METRIC_CACHE[key] = existing
+            return existing
         raise
 
 
 def create_gauge(name: str, documentation: str, labelnames=None, registry=None):
-    """Create or return an existing Gauge safely."""
-    from prometheus_client import Gauge
     if registry is None:
         registry = DEFAULT_REGISTRY
-    labelnames = labelnames or []
+    key = _key("gauge", name, labelnames)
+    if key in _METRIC_CACHE:
+        return _METRIC_CACHE[key]
     try:
-        if labelnames:
-            return Gauge(name, documentation, labelnames, registry=registry)
-        else:
-            return Gauge(name, documentation, registry=registry)
+        metric = (
+            Gauge(name, documentation, labelnames=labelnames, registry=registry)
+            if labelnames
+            else Gauge(name, documentation, registry=registry)
+        )
+        _METRIC_CACHE[key] = metric
+        return metric
     except ValueError:
-        log.warning("Metric %s already registered, returning existing instance", name)
-        for collector in list(registry._collector_to_names.keys()):
-            try:
-                names = registry._collector_to_names.get(collector, [])
-            except Exception:
-                names = []
-            if name in names:
-                return collector
+        existing = _find_existing(registry, name)
+        if existing:
+            log.debug("Gauge %s already registered; returning existing", name)
+            _METRIC_CACHE[key] = existing
+            return existing
         raise
 
 
 def create_histogram(name: str, documentation: str, labelnames=None, registry=None, buckets=None):
-    """Create or return an existing Histogram safely."""
-    from prometheus_client import Histogram
     if registry is None:
         registry = DEFAULT_REGISTRY
-    labelnames = labelnames or []
+    key = _key("histogram", name, labelnames, buckets)
+    if key in _METRIC_CACHE:
+        return _METRIC_CACHE[key]
     try:
-        if labelnames:
-            return Histogram(name, documentation, labelnames, registry=registry, buckets=buckets) if buckets else Histogram(name, documentation, labelnames, registry=registry)
-        else:
-            return Histogram(name, documentation, registry=registry, buckets=buckets) if buckets else Histogram(name, documentation, registry=registry)
+        metric = (
+            Histogram(
+                name,
+                documentation,
+                labelnames=labelnames,
+                buckets=buckets,
+                registry=registry,
+            )
+            if labelnames
+            else Histogram(name, documentation, buckets=buckets, registry=registry)
+        )
+        _METRIC_CACHE[key] = metric
+        return metric
     except ValueError:
-        log.warning("Metric %s already registered, returning existing instance", name)
-        for collector in list(registry._collector_to_names.keys()):
-            try:
-                names = registry._collector_to_names.get(collector, [])
-            except Exception:
-                names = []
-            if name in names:
-                return collector
+        existing = _find_existing(registry, name)
+        if existing:
+            log.debug("Histogram %s already registered; returning existing", name)
+            _METRIC_CACHE[key] = existing
+            return existing
         raise
+
+
+__all__ = [
+    "create_counter",
+    "create_gauge",
+    "create_histogram",
+]

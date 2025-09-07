@@ -479,26 +479,25 @@ class SessionDaemon:
 
 
 # FastAPI app
-app = FastAPI(title="Omega Session Daemon", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-
 session_daemon = SessionDaemon()
 
+from contextlib import asynccontextmanager
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # pragma: no cover
     await session_daemon.initialize()
-    # start prometheus metrics server on a side port
     try:
         start_http_server(8001)
     except Exception:
-        logger.debug("Could not start prometheus HTTP server; perhaps running under another process")
+        logger.debug("Prometheus metrics server already running or unavailable")
     logger.info("Session daemon started")
+    try:
+        yield
+    finally:
+        await session_daemon.shutdown()
 
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await session_daemon.shutdown()
+app = FastAPI(title="Omega Session Daemon", version="1.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/health")

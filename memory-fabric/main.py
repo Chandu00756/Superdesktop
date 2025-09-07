@@ -542,16 +542,20 @@ class MemoryFabricService:
                         return self._store.get(key, {})
                 self.redis_client = _InMemoryRedisStub()
             
-            # PostgreSQL connection
-            self.postgres_pool = await asyncpg.create_pool(
-                host=os.getenv('POSTGRES_HOST', 'localhost'),
-                port=int(os.getenv('POSTGRES_PORT', '5432')),
-                user=os.getenv('POSTGRES_USER', 'omega'),
-                password=os.getenv('POSTGRES_PASSWORD', 'omega_secure_2025'),
-                database=os.getenv('POSTGRES_DB', 'omega_sessions'),
-                min_size=5,
-                max_size=20
-            )
+            # PostgreSQL connection (optional). If it fails (e.g., role missing) continue without persistence.
+            try:
+                self.postgres_pool = await asyncpg.create_pool(
+                    host=os.getenv('POSTGRES_HOST', 'localhost'),
+                    port=int(os.getenv('POSTGRES_PORT', '5432')),
+                    user=os.getenv('POSTGRES_USER', 'omega'),
+                    password=os.getenv('POSTGRES_PASSWORD', 'omega_secure_2025'),
+                    database=os.getenv('POSTGRES_DB', 'omega_sessions'),
+                    min_size=1,
+                    max_size=5
+                )
+            except Exception as db_err:
+                logger.warning(f"PostgreSQL unavailable for memory fabric ({db_err}); running with in-memory persistence only")
+                self.postgres_pool = None
             
             # Start background tasks
             self.monitoring_task = asyncio.create_task(self._monitoring_loop())
@@ -1031,13 +1035,28 @@ class MemoryFabricService:
         
         logger.info("Memory fabric service cleanup completed")
 
-# FastAPI Application
+from contextlib import asynccontextmanager
+
+# Global instance
+memory_fabric_service = MemoryFabricService()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # pragma: no cover - lifecycle wrapper
+    await memory_fabric_service.initialize()
+    start_http_server(8004)
+    logger.info("Memory fabric service started successfully")
+    try:
+        yield
+    finally:
+        await memory_fabric_service.cleanup()
+
 app = FastAPI(
     title="Omega Memory Fabric Service",
     description="Advanced memory management and fabric orchestration service",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -1048,22 +1067,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global memory fabric service instance
-memory_fabric_service = MemoryFabricService()
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the memory fabric service"""
-    await memory_fabric_service.initialize()
-    
-    # Start Prometheus metrics server
-    start_http_server(8004)
-    logger.info("Memory fabric service started successfully")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    await memory_fabric_service.cleanup()
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "allocations": len(memory_fabric_service.allocations),
+        "fabric_nodes": len(memory_fabric_service.fabric_controller.fabric_nodes) if memory_fabric_service.fabric_controller else 0,
+        "version": "1.0.0"
+    }
 
 # API Endpoints
 @app.post("/allocate", response_model=Dict[str, Any])

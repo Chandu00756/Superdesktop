@@ -612,6 +612,23 @@ class SimpleMetrics:
 
 metrics = SimpleMetrics()
 
+# Helper functions to safely set/update gauges with labels even if values are None
+def safe_set(gauge, **labels_and_value):
+    """Safely set a gauge with labels; if any label missing, skip to avoid exceptions."""
+    try:
+        value = labels_and_value.pop('_value', None)
+        if value is None:
+            # Accept 'value' key alternative
+            value = labels_and_value.pop('value', 0)
+        # Ensure no None labels
+        for k,v in list(labels_and_value.items()):
+            if v is None:
+                labels_and_value[k] = 'unknown'
+        gauge.labels(**labels_and_value).set(value)
+    except Exception as e:
+        logging.debug(f"safe_set gauge failed: {e}")
+
+
 # Machine Learning Components for Intelligent Optimization
 class MLPlacementOptimizer:
     """Machine learning-based placement optimization"""
@@ -3479,7 +3496,10 @@ class OmegaResourceOrchestrator:
         
     def register_node(self, node_info: NodeInfo):
         self.nodes[node_info.node_id] = node_info
-        NODE_COUNT.set(len(self.nodes))
+        try:
+            NODE_COUNT.labels(type="aggregate", status="active").set(len(self.nodes))
+        except Exception:
+            pass
         
         # Store in database
         db = SessionLocal()
@@ -4636,7 +4656,10 @@ async def deregister_node(node_id: str, user_id: str = Depends(verify_token)):
                 redis_client.delete(f"node:{node_id}")
             except Exception as e:
                 logging.warning(f"Failed to delete node from Redis: {e}")
-        NODE_COUNT.set(len(orchestrator.nodes))
+        try:
+            NODE_COUNT.labels(type="aggregate", status="active").set(len(orchestrator.nodes))
+        except Exception:
+            pass
         return {"status": "deregistered"}
     raise HTTPException(status_code=404, detail="Node not found")
 
@@ -4669,7 +4692,10 @@ async def create_session(request: SessionRequest, user_id: str = Depends(verify_
     }
     
     orchestrator.sessions[session_id] = session_data
-    ACTIVE_SESSIONS.set(len(orchestrator.sessions))
+    try:
+        ACTIVE_SESSIONS.labels(node_type="aggregate").set(len(orchestrator.sessions))
+    except Exception:
+        pass
     
     # Store in database
     db = SessionLocal()
@@ -4768,7 +4794,10 @@ async def create_session(session_request: SessionRequest, db: Session = Depends(
         session.status = "RUNNING"
         db.commit()
         
-        ACTIVE_SESSIONS.set(db.query(SessionRecord).filter(SessionRecord.status.in_(["RUNNING", "PAUSED", "SUSPENDED"])).count())
+        try:
+            ACTIVE_SESSIONS.labels(node_type="aggregate").set(db.query(SessionRecord).filter(SessionRecord.status.in_(["RUNNING", "PAUSED", "SUSPENDED"])).count())
+        except Exception:
+            pass
         
         return convert_session_to_response(session)
         
@@ -4839,7 +4868,10 @@ async def session_action(session_id: str, action: SessionAction, db: Session = D
             
         result = await execute_session_action(session, action, db)
         
-        ACTIVE_SESSIONS.set(db.query(SessionRecord).filter(SessionRecord.status.in_(["RUNNING", "PAUSED", "SUSPENDED"])).count())
+        try:
+            ACTIVE_SESSIONS.labels(node_type="aggregate").set(db.query(SessionRecord).filter(SessionRecord.status.in_(["RUNNING", "PAUSED", "SUSPENDED"])).count())
+        except Exception:
+            pass
         
         return {"status": "success", "message": f"Action {action.action} completed", "result": result}
         
@@ -5003,7 +5035,10 @@ async def terminate_session(session_id: str, db: Session = Depends(get_db)):
         action = SessionAction(action="terminate", force=True)
         result = await execute_session_action(session, action, db)
         
-        ACTIVE_SESSIONS.set(db.query(SessionRecord).filter(SessionRecord.status.in_(["RUNNING", "PAUSED", "SUSPENDED"])).count())
+        try:
+            ACTIVE_SESSIONS.labels(node_type="aggregate").set(db.query(SessionRecord).filter(SessionRecord.status.in_(["RUNNING", "PAUSED", "SUSPENDED"])).count())
+        except Exception:
+            pass
         
         return {"status": "terminated", "session_id": session_id, "result": result}
         
@@ -5078,7 +5113,10 @@ async def get_task_status(task_id: str, user_id: str = Depends(verify_token)):
 @app.post("/api/v1/metrics/latency")
 async def report_latency(metrics: LatencyMetric, user_id: str = Depends(verify_token)):
     # Update prometheus metrics
-    LATENCY_P95.set(metrics.input_to_pixel_ms)
+    try:
+        LATENCY_P95.labels(node_id="aggregate").set(metrics.input_to_pixel_ms)
+    except Exception:
+        pass
     
     # Store in Redis for real-time monitoring
     if redis_client:

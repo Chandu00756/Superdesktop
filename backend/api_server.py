@@ -41,6 +41,26 @@ async def health_check():
 async def api_ping():
     return {'pong': True, 'ts': time.time()}
 
+# ---------------------------------------------------------------------------
+# Backward compatibility shim: legacy agents still POST to /api/nodes/register
+# Newer secured path moved under /api/secure/nodes/register (with auth + crypto)
+# Provide a minimal passthrough that returns 410 or forwards to secure flow.
+# ---------------------------------------------------------------------------
+@app.post('/api/nodes/register', include_in_schema=False)
+async def legacy_nodes_register(request: Request):
+    """Legacy endpoint shim. Returns informative 410 Gone so agents can upgrade.
+    Optionally could forward into secure path if we detect a compatible JSON body.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    return JSONResponse(status_code=410, content={
+        'error': 'deprecated_endpoint',
+        'detail': 'Use /api/secure/nodes/register with secure session established',
+        'received': body or {}
+    })
+
 # CORS middleware (added early). Configure via OMEGA_CORS_ORIGINS.
 # SECURITY: In production (OMEGA_ENV=prod|production) do not default to wildcard.
 _cors_origins_env = os.environ.get('OMEGA_CORS_ORIGINS')
@@ -400,6 +420,46 @@ class DatabaseManager:
                     FOREIGN KEY (node_id) REFERENCES nodes(node_id)
                 )
             """)
+            # Re-add essential tables that may be missing if DB was deleted
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    node_id TEXT,
+                    application TEXT,
+                    cpu_cores INTEGER,
+                    gpu_units INTEGER,
+                    memory_gb INTEGER,
+                    status TEXT,
+                    created_at REAL,
+                    last_activity REAL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id TEXT,
+                    cpu_usage REAL,
+                    memory_usage REAL,
+                    gpu_usage REAL,
+                    network_rx INTEGER,
+                    network_tx INTEGER,
+                    temperature REAL,
+                    power_consumption REAL,
+                    timestamp REAL,
+                    FOREIGN KEY (node_id) REFERENCES nodes(node_id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT,
+                    source TEXT,
+                    message TEXT,
+                    severity TEXT,
+                    timestamp REAL
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS node_approvals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -419,6 +479,21 @@ class DatabaseManager:
                     severity TEXT DEFAULT 'info',
                     timestamp REAL DEFAULT (julianday('now') * 86400),
                     hash_chain TEXT
+                )
+            """)
+            # RBAC tables (may be missing if DB recreated) - keep minimal schema
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS roles (
+                    role TEXT PRIMARY KEY,
+                    description TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_roles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    UNIQUE(username, role)
                 )
             """)
             # RBAC, users, sessions, metrics, etc. (as before)
@@ -477,6 +552,15 @@ class DatabaseManager:
                 conn.commit()
             except Exception as e:
                 logging.debug(f"node_protocol_health table ensure failed: {e}")
+
+            # Seed default RBAC roles/admin user mapping if tables exist (idempotent)
+            try:
+                conn.execute("INSERT OR IGNORE INTO roles (role, description) VALUES (?, ?)", ("admin", "Administrator"))
+                conn.execute("INSERT OR IGNORE INTO roles (role, description) VALUES (?, ?)", ("user", "Standard User"))
+                conn.execute("INSERT OR IGNORE INTO user_roles (username, role) VALUES (?, ?)", ("admin", "admin"))
+                conn.commit()
+            except Exception as e:
+                logging.error(f"RBAC init error: {e}")
 
     def add_node_advanced(self, node_id, node_type, hostname, ip_address, port, status, trust_score, quarantine, resources, permissions, attestation, approval_status):
         with self.lock:
@@ -988,11 +1072,54 @@ class OmegaAPIServer:
             now=time.time()
             with SESSION_LOCK:
                 for r in rows:
-                    sid, key_hex, user, created, last_rotate, counter, expires_at = r
+                    sid, key_col, user, created, last_rotate, counter, expires_at = r
                     if expires_at and expires_at <= now:
                         continue
-                    SESSION_META[sid]={'key':bytes.fromhex(key_hex),'user':user,'created_at':created,'last_rotate':last_rotate,'counter':counter,'expires_at':expires_at}
-                    loaded+=1
+                    # Keys may be stored as:
+                    # 1) raw hex (legacy)
+                    # 2) base64 of raw bytes
+                    # 3) base64-wrapped Fernet ciphertext of raw bytes (current)
+                    raw_bytes = None
+                    if isinstance(key_col, str):
+                        k = key_col.strip()
+                        # Try hex first (legacy)
+                        try:
+                            if all(c in '0123456789abcdefABCDEF' for c in k) and len(k) % 2 == 0:
+                                raw_bytes = bytes.fromhex(k)
+                        except Exception:
+                            raw_bytes = None
+                        # Try base64 decode (may be raw 32 bytes or Fernet ciphertext)
+                        if raw_bytes is None:
+                            import base64, binascii
+                            try:
+                                decoded = base64.b64decode(k)
+                                # Heuristic: if looks like Fernet token (has two dots when decoded to str) skip direct use
+                                if len(decoded) in (32, 44):  # 32 raw bytes or typical length after base64
+                                    raw_bytes = decoded
+                            except (binascii.Error, ValueError):
+                                pass
+                        # Attempt Fernet decrypt if still not usable and cipher available
+                        if raw_bytes is None and hasattr(self.security_manager, 'cipher_suite'):
+                            try:
+                                import base64
+                                dec = self.security_manager.cipher_suite.decrypt(base64.b64decode(k))
+                                if len(dec) == 32:
+                                    raw_bytes = dec
+                            except Exception:
+                                pass
+                    if raw_bytes is None:
+                        # Skip malformed key but continue
+                        logging.debug(f"Skipping session {sid}: unrecognized key format")
+                        continue
+                    SESSION_META[sid]={
+                        'key': raw_bytes,
+                        'user': user,
+                        'created_at': created,
+                        'last_rotate': last_rotate,
+                        'counter': counter,
+                        'expires_at': expires_at
+                    }
+                    loaded += 1
             logging.info(f"Loaded {loaded} persisted sessions")
         except Exception as e:
             logging.warning(f"load_persisted_sessions failed: {e}")
@@ -1169,11 +1296,18 @@ _RATE_LOCK = threading.Lock()
 
 def rate_limited(per_minute: int = 60, burst: int = 120):
     """Decorator to rate-limit endpoints per-client IP using a token-bucket.
+    NOTE: Preserve the original function signature so FastAPI can correctly
+    perform request body validation (fixes 422 responses introduced when the
+    wrapper obscured the endpoint's parameters).
     - per_minute: refill rate
     - burst: bucket capacity
     """
     refill_per_sec = per_minute / 60.0
     def _decorator(func):
+        import inspect
+        from functools import wraps
+
+        @wraps(func)
         async def _wrapped(*args, **kwargs):
             # Attempt to extract Request from args or kwargs
             req = None
@@ -1193,7 +1327,7 @@ def rate_limited(per_minute: int = 60, burst: int = 120):
             now = time.time()
             with _RATE_LOCK:
                 bucket = _RATE_BUCKETS[ip]
-                # refill
+                # refill tokens based on elapsed time
                 elapsed = now - bucket['last']
                 bucket['tokens'] = min(burst, bucket['tokens'] + elapsed * refill_per_sec)
                 bucket['last'] = now
@@ -1202,6 +1336,12 @@ def rate_limited(per_minute: int = 60, burst: int = 120):
                 bucket['tokens'] -= 1
 
             return await func(*args, **kwargs)
+
+        # Copy the original callable signature so FastAPI sees expected params
+        try:
+            _wrapped.__signature__ = inspect.signature(func)  # type: ignore[attr-defined]
+        except Exception:
+            pass
         return _wrapped
     return _decorator
 
@@ -2555,7 +2695,7 @@ class SecureSessionStart(BaseModel):
 
 @app.get('/api/secure/public_key')
 @rate_limited(per_minute=120, burst=40)
-async def secure_public_key():
+async def secure_public_key(request: Request, t: Optional[str] = None):  # request for rate limiter IP; t is optional cache-buster
     # Return server RSA public key PEM so clients can perform RSA-OAEP encryption for session key handshake
     try:
         # Lazy-init if key attributes not yet created (import ordering safety)
@@ -2568,6 +2708,9 @@ async def secure_public_key():
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode()
+        # Minimal debug trace (can be toggled with OMEGA_DEBUG=1)
+        if os.environ.get('OMEGA_DEBUG','0') in ('1','true','yes'):
+            logging.debug('secure_public_key served to %s (t=%s)', getattr(getattr(request,'client',None),'host','?'), t)
         return JSONResponse(content={'public_key_pem': pub_pem})
     except Exception as e:
         logging.error(f'secure_public_key error: {e}')
