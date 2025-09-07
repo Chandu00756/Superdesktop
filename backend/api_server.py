@@ -1,7 +1,9 @@
 from fastapi import Body
 from fastapi import Request
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 from pydantic import BaseModel
+import os, logging
 
 class NodeRegistrationRequest(BaseModel):
     node_id: str
@@ -12,76 +14,57 @@ class NodeRegistrationRequest(BaseModel):
     resources: dict
     permissions: Optional[list] = []
     description: Optional[str] = None
-    device_fingerprint: str  # e.g. hash of hardware UUID, MAC, TPM, etc
-    public_key_pem: str      # Device public key PEM
-    signed_challenge: str    # Registration challenge signed by device private key
-    health_attestation: Optional[dict] = None  # TPM/secure boot, OS patch, malware scan, etc
-    device_certificate: Optional[str] = None   # PEM, signed by CA
-    geoip: Optional[str] = None                # GeoIP/location info
-    behavioral_baseline: Optional[dict] = None # Baseline resource/usage profile
+    device_fingerprint: str
+    public_key_pem: str
+    signed_challenge: str
+    health_attestation: Optional[dict] = None
+    device_certificate: Optional[str] = None
+    geoip: Optional[str] = None
+    behavioral_baseline: Optional[dict] = None
 
 from fastapi import FastAPI
-# Ensure app is defined before any decorators
+# Single FastAPI app instance (duplicates removed below in file)
 app = FastAPI(
     title="Omega Control Center API",
     version="1.0.0",
     description="Advanced encrypted backend for distributed desktop control"
 )
 
-@app.post('/api/secure/nodes/register')
-async def register_node(request: Request, body: NodeRegistrationRequest = Body(...)):
-    session_id, key = validate_secure(request.headers)
-    user = SESSION_META.get(session_id, {}).get('user', 'admin')
-    perms = SESSION_META.get(session_id, {}).get('permissions', [])
-    if 'admin' not in SESSION_META.get(session_id, {}).get('roles', []) and 'node_register' not in perms:
-        raise HTTPException(status_code=403, detail='Insufficient permissions to register node')
-    # Validate device fingerprint uniqueness
-    existing_nodes = api_server.database.get_nodes()
-    for n in existing_nodes:
-        res = n.get('resources')
-        if res:
-            try:
-                res_obj = json.loads(res) if isinstance(res, str) else res
-                if res_obj.get('device_fingerprint') == body.device_fingerprint:
-                    raise HTTPException(status_code=409, detail='Device fingerprint already registered')
-            except Exception as e:
-                logging.error(f"Error checking device fingerprint uniqueness: {e}")
-    # Validate public key and signed challenge (anti-spoof)
-    import base64, hashlib
-    from cryptography.hazmat.primitives import serialization, hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-    try:
-        pubkey = serialization.load_pem_public_key(body.public_key_pem.encode())
-        challenge = (body.node_id + body.device_fingerprint).encode()
-        signature = base64.b64decode(body.signed_challenge)
-        pubkey.verify(signature, challenge, padding.PKCS1v15(), hashes.SHA256())
-    except (ValueError, TypeError) as e:
-        logging.debug(f"Invalid public key or signature: {e}")
-        raise HTTPException(status_code=400, detail=f'Invalid device attestation: {e}')
-    except Exception as e:
-        logging.error(f"Unexpected error during device attestation: {e}")
-        raise HTTPException(status_code=400, detail='Unexpected error during device attestation')
-    # Register node in DB with all advanced fields
-    node_resources = {
-        **body.resources,
-        'permissions': body.permissions,
-        'description': body.description,
-        'device_fingerprint': body.device_fingerprint,
-        'public_key_pem': body.public_key_pem,
-        'health_attestation': body.health_attestation,
-        'registered_by': user,
-        'registered_at': time.time()
-    }
-    api_server.database.add_node(
-        node_id=body.node_id,
-        node_type=body.node_type,
-        hostname=body.hostname,
-        ip_address=body.ip_address,
-        port=body.port,
-        resources=node_resources
+# Lightweight health/readiness endpoint (unauthenticated) so frontend can quickly
+# detect backend availability before attempting secure session bootstrap.
+@app.get('/health', include_in_schema=False)
+async def health_check():
+    return {'status': 'ok'}
+
+# Simple unauthenticated ping used by discovery logic and external scripts
+@app.get('/api/ping', include_in_schema=False)
+async def api_ping():
+    return {'pong': True, 'ts': time.time()}
+
+# CORS middleware (added early). Configure via OMEGA_CORS_ORIGINS.
+# SECURITY: In production (OMEGA_ENV=prod|production) do not default to wildcard.
+_cors_origins_env = os.environ.get('OMEGA_CORS_ORIGINS')
+_env = os.environ.get('OMEGA_ENV','dev').lower()
+if _cors_origins_env:
+    _cors_origins = [o.strip() for o in _cors_origins_env.split(',') if o.strip()]
+else:
+    if _env in ('prod','production'):
+        _cors_origins = ['http://localhost:8000','http://127.0.0.1:8000','http://localhost:8443','http://127.0.0.1:8443']
+    else:
+        _cors_origins = ['*']  # dev convenience
+try:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+        max_age=600,
     )
-    api_server.database.log_event('node_register', body.node_id, f'Node {body.node_id} registered by {user} (fingerprint={body.device_fingerprint[:12]}...)', 'info')
-    return wrap_encrypted(session_id, key, {'success': True, 'node_id': body.node_id, 'trust_score': 100, 'quarantine': 0})
+except Exception as e:
+    logging.warning(f"Failed adding CORS middleware: {e}")
+
 """
 Omega Control Center Backend API Server
 Advanced encrypted communication with real-time data integration
@@ -358,6 +341,8 @@ class DatabaseManager:
         self.db_path = db_path or os.path.join(os.path.dirname(__file__), 'omega_control.db')
         self.lock = threading.Lock()
         self.init_database()
+        # Simple in-memory protocol health cache: {node_id: {protocol: status}}
+        self.protocol_health = {}
 
     def init_database(self):
         with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
@@ -378,7 +363,10 @@ class DatabaseManager:
                     status TEXT DEFAULT 'active',
                     trust_score INTEGER DEFAULT 0,
                     quarantine INTEGER DEFAULT 0,
-                    created_at REAL DEFAULT (julianday('now') * 86400)
+                    last_heartbeat REAL,
+                    last_protocol_check REAL,
+                    created_at REAL DEFAULT (julianday('now') * 86400),
+                    device_class TEXT DEFAULT 'generic'
                 )
             """)
             conn.execute("""
@@ -436,6 +424,59 @@ class DatabaseManager:
             # RBAC, users, sessions, metrics, etc. (as before)
             # ...existing code...
             conn.commit()
+            # Opportunistic migrations (add columns if upgrading from earlier schema)
+            try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
+                # Add new columns (backward compatibility with older DB files)
+                if 'trust_score' not in cols:
+                    try:
+                        conn.execute('ALTER TABLE nodes ADD COLUMN trust_score INTEGER DEFAULT 0')
+                        cols.add('trust_score')
+                        logging.info('Migrated: added trust_score column to nodes')
+                    except Exception as me:
+                        logging.error(f'migration add trust_score failed: {me}')
+                if 'quarantine' not in cols:
+                    try:
+                        conn.execute('ALTER TABLE nodes ADD COLUMN quarantine INTEGER DEFAULT 0')
+                        cols.add('quarantine')
+                        logging.info('Migrated: added quarantine column to nodes')
+                    except Exception as me:
+                        logging.error(f'migration add quarantine failed: {me}')
+                if 'status' not in cols:
+                    try:
+                        conn.execute("ALTER TABLE nodes ADD COLUMN status TEXT DEFAULT 'active'")
+                        cols.add('status')
+                        logging.info('Migrated: added status column to nodes')
+                    except Exception as me:
+                        logging.error(f'migration add status failed: {me}')
+                if 'device_class' not in cols:
+                    try:
+                        conn.execute("ALTER TABLE nodes ADD COLUMN device_class TEXT DEFAULT 'generic'")
+                        cols.add('device_class')
+                        logging.info('Migrated: added device_class column to nodes')
+                    except Exception as me:
+                        logging.error(f'migration add device_class failed: {me}')
+                if 'last_heartbeat' not in cols:
+                    conn.execute('ALTER TABLE nodes ADD COLUMN last_heartbeat REAL')
+                if 'last_protocol_check' not in cols:
+                    conn.execute('ALTER TABLE nodes ADD COLUMN last_protocol_check REAL')
+                conn.commit()
+            except Exception as e:
+                logging.debug(f"nodes table migration skipped/failed: {e}")
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS node_protocol_health (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        node_id TEXT NOT NULL,
+                        protocol TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        checked_at REAL DEFAULT (julianday('now') * 86400),
+                        FOREIGN KEY(node_id) REFERENCES nodes(node_id)
+                    )
+                """)
+                conn.commit()
+            except Exception as e:
+                logging.debug(f"node_protocol_health table ensure failed: {e}")
 
     def add_node_advanced(self, node_id, node_type, hostname, ip_address, port, status, trust_score, quarantine, resources, permissions, attestation, approval_status):
         with self.lock:
@@ -476,18 +517,57 @@ class DatabaseManager:
             try:
                 with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
                     conn.execute(
-                        "INSERT OR REPLACE INTO nodes (node_id, node_type, hostname, ip_address, port, resources, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (node_id, node_type, hostname, ip_address, port, json.dumps(resources), time.time())
+                        "INSERT OR REPLACE INTO nodes (node_id, node_type, hostname, ip_address, port, status, trust_score, quarantine, last_heartbeat, last_protocol_check, created_at) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT status FROM nodes WHERE node_id=?),'active'), COALESCE((SELECT trust_score FROM nodes WHERE node_id=?),0), COALESCE((SELECT quarantine FROM nodes WHERE node_id=?),0), ?, COALESCE((SELECT last_protocol_check FROM nodes WHERE node_id=?),NULL), COALESCE((SELECT created_at FROM nodes WHERE node_id=?),?))",
+                        (node_id, node_type, hostname, ip_address, port, node_id, node_id, node_id, time.time(), node_id, node_id, time.time())
                     )
                     conn.commit()
             except Exception as e:
                 logging.error(f"Error adding node to database: {e}")
+
+    def update_node_heartbeat(self, node_id: str, online: bool):
+        try:
+            with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
+                conn.execute('UPDATE nodes SET status=?, last_heartbeat=? WHERE node_id=?', ('online' if online else 'offline', time.time(), node_id))
+                conn.commit()
+        except Exception as e:
+            logging.debug(f"update_node_heartbeat failed for {node_id}: {e}")
+
+    def record_protocol_health(self, node_id: str, protocol: str, status: str):
+        with self.lock:
+            try:
+                with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
+                    conn.execute('INSERT INTO node_protocol_health (node_id, protocol, status, checked_at) VALUES (?,?,?,?)', (node_id, protocol, status, time.time()))
+                    conn.execute('UPDATE nodes SET last_protocol_check=? WHERE node_id=?', (time.time(), node_id))
+                    conn.commit()
+                self.protocol_health.setdefault(node_id, {})[protocol] = status
+            except Exception as e:
+                logging.debug(f"record_protocol_health failed for {node_id} {protocol}: {e}")
 
     def get_nodes(self) -> List[Dict]:
         with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
             cursor = conn.execute("SELECT * FROM nodes")
             columns = [description[0] for description in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def set_quarantine(self, node_id: str, quarantine: bool):
+        try:
+            with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
+                conn.execute('UPDATE nodes SET quarantine=?, status=? WHERE node_id=?', (1 if quarantine else 0, 'quarantined' if quarantine else 'active', node_id))
+                conn.commit()
+        except Exception as e:
+            logging.debug(f"set_quarantine failed for {node_id}: {e}")
+
+    def remove_node(self, node_id: str):
+        try:
+            with sqlite3.connect(self.db_path, timeout=30, check_same_thread=False) as conn:
+                conn.execute('DELETE FROM node_attestations WHERE node_id=?', (node_id,))
+                conn.execute('DELETE FROM node_permissions WHERE node_id=?', (node_id,))
+                conn.execute('DELETE FROM node_resources WHERE node_id=?', (node_id,))
+                conn.execute('DELETE FROM node_approvals WHERE node_id=?', (node_id,))
+                conn.execute('DELETE FROM nodes WHERE node_id=?', (node_id,))
+                conn.commit()
+        except Exception as e:
+            logging.debug(f"remove_node failed for {node_id}: {e}")
 
     def add_session(self, session: SessionInfo):
         with self.lock:
@@ -853,30 +933,29 @@ class OmegaAPIServer:
         except Exception as e:
             logging.error(f"Failed ensuring revoked/pending tables: {e}")
 
+    # --- Background task orchestration ---
     async def start_background_tasks(self):
         asyncio.create_task(self.metrics_collector())
         asyncio.create_task(self.health_monitor())
         asyncio.create_task(self.broadcast_updates())
-        # Session maintenance: cleanup expired sessions and persist housekeeping
         asyncio.create_task(self.session_maintenance())
+        # Global monitors (module-level coroutines)
+        asyncio.create_task(node_heartbeat_monitor())
+        asyncio.create_task(protocol_health_monitor())
 
     async def session_maintenance(self):
-        """Background task that expires sessions and cleans stale entries from memory and DB.
-        Runs periodically (interval configurable via OMEGA_SESSION_MAINT_INTERVAL seconds).
-        """
+        """Periodic cleanup of expired sessions from memory & DB."""
         interval = int(os.environ.get('OMEGA_SESSION_MAINT_INTERVAL', '60'))
         while True:
             try:
                 now = time.time()
                 expired = []
-                # Collect expired sessions under lock
                 with SESSION_LOCK:
                     for sid, meta in list(SESSION_META.items()):
                         try:
-                            if 'expires_at' in meta and meta['expires_at'] and meta['expires_at'] <= now:
+                            if meta.get('expires_at') and meta['expires_at'] <= now:
                                 expired.append(sid)
-                        except Exception as e:
-                            logging.debug(f"session_maintenance: error inspecting session {sid}: {e}")
+                        except Exception:
                             continue
                     if expired:
                         try:
@@ -886,84 +965,135 @@ class OmegaAPIServer:
                                     SESSION_NONCES.pop(sid, None)
                                     try:
                                         conn.execute('DELETE FROM session_meta WHERE session_id=?', (sid,))
-                                    except sqlite3.DatabaseError as e:
-                                        logging.error(f"session_maintenance: DB error deleting session_meta for {sid}: {e}")
                                     except Exception as e:
-                                        logging.error(f"session_maintenance: unexpected error deleting session_meta for {sid}: {e}")
+                                        logging.error(f'session_maintenance delete error {sid}: {e}')
                                 conn.commit()
                         except Exception as e:
-                            logging.error(f"session_maintenance DB cleanup error: {e}")
-                # log removal
+                            logging.error(f'session_maintenance DB cleanup error: {e}')
                 for sid in expired:
                     try:
-                        self.database.log_event('session_expired', sid, 'Session expired and removed by maintenance', 'info')
-                    except Exception as e:
-                        logging.error(f"session_maintenance: failed logging session_expired for {sid}: {e}")
+                        self.database.log_event('session_expired', sid, 'Expired & removed', 'info')
+                    except Exception:
+                        pass
             except Exception as e:
-                logging.error(f"session_maintenance error: {e}")
+                logging.error(f'session_maintenance loop error: {e}')
             await asyncio.sleep(interval)
 
     def load_persisted_sessions(self):
-        """Load non-expired persisted session metadata from the DB into in-memory structures.
-        This makes sessions survive server restarts (best-effort). Expired sessions are skipped and removed.
-        """
         try:
             with sqlite3.connect(self.database.db_path) as conn:
                 cur = conn.execute('SELECT session_id,key,user,created_at,last_rotate,counter,expires_at FROM session_meta')
                 rows = cur.fetchall()
-        except sqlite3.DatabaseError as e:
-            logging.warning(f"Failed to load persisted sessions (DB error): {e}")
-            return
+            loaded=0
+            now=time.time()
+            with SESSION_LOCK:
+                for r in rows:
+                    sid, key_hex, user, created, last_rotate, counter, expires_at = r
+                    if expires_at and expires_at <= now:
+                        continue
+                    SESSION_META[sid]={'key':bytes.fromhex(key_hex),'user':user,'created_at':created,'last_rotate':last_rotate,'counter':counter,'expires_at':expires_at}
+                    loaded+=1
+            logging.info(f"Loaded {loaded} persisted sessions")
         except Exception as e:
-            logging.warning(f"Failed to load persisted sessions: {e}")
-            return
-        now = time.time()
-        loaded = 0
-        removed = 0
-        for r in rows:
-            try:
-                sid, key_b64_stored, user, created_at, last_rotate, counter, expires_at = r
-                if expires_at and expires_at <= now:
-                    # expired: remove from DB
-                    try:
-                        with sqlite3.connect(self.database.db_path) as conn:
-                            conn.execute('DELETE FROM session_meta WHERE session_id=?', (sid,))
-                            conn.commit()
-                        removed += 1
-                    except sqlite3.DatabaseError as e:
-                        logging.error(f"load_persisted_sessions: DB error removing expired session {sid}: {e}")
-                    except Exception as e:
-                        logging.error(f"load_persisted_sessions: unexpected error removing expired session {sid}: {e}")
-                    continue
-                # attempt to decrypt stored key (it may be an encrypted envelope or raw base64)
-                key_b64 = key_b64_stored
-                try:
-                    decoded = base64.b64decode(key_b64_stored)
-                except (binascii.Error, TypeError) as e:
-                    logging.debug(f"load_persisted_sessions: stored key {sid} not valid base64: {e}")
-                else:
-                    # Try to decrypt using master Fernet
-                    try:
-                        raw_key = api_server.security_manager.cipher_suite.decrypt(decoded)
-                        key_b64 = base64.b64encode(raw_key).decode()
-                    except Exception as e:
-                        logging.debug(f"load_persisted_sessions: could not decrypt stored key for {sid}, treating as raw: {e}")
+            logging.warning(f"load_persisted_sessions failed: {e}")
 
-                with SESSION_LOCK:
-                    SESSION_META[sid] = {
-                        'created': created_at or now,
-                        'last_rotate': last_rotate or now,
-                        'key': key_b64,
-                        'counter': int(counter or 0),
-                        'expires_at': expires_at or (now + (6 * 3600)),
-                        'user': user
-                    }
-                    SESSION_NONCES[sid] = deque(maxlen=NONCE_WINDOW)
-                loaded += 1
+    async def metrics_collector(self):
+        while True:
+            try:
+                cpu_usage = psutil.cpu_percent(interval=1)
+                memory = psutil.virtual_memory()
+                disk = psutil.disk_usage('/')
+                network = psutil.net_io_counters()
+                control_metrics = NodeMetrics(
+                    node_id="control-primary",
+                    cpu_usage=cpu_usage,
+                    memory_usage=memory.percent,
+                    gpu_usage=0.0,
+                    network_rx=network.bytes_recv,
+                    network_tx=network.bytes_sent,
+                    temperature=45.0 + (cpu_usage / 100) * 20,
+                    power_consumption=150.0 + (cpu_usage / 100) * 50,
+                    timestamp=time.time()
+                )
+                self.database.add_metrics(control_metrics)
+                self.system_stats = {
+                    "cpu_usage": cpu_usage,
+                    "memory_usage": memory.percent,
+                    "disk_usage": disk.percent,
+                    "network_rx": network.bytes_recv,
+                    "network_tx": network.bytes_sent,
+                    "timestamp": time.time()
+                }
             except Exception as e:
-                logging.debug(f"load_persisted_sessions: skipping row due to error: {e}")
-                continue
-        logging.info(f"Loaded {loaded} persisted sessions from DB, removed {removed} expired entries")
+                logging.error(f"Metrics collection error: {e}")
+            await asyncio.sleep(2)
+
+    async def health_monitor(self):
+        while True:
+            try:
+                nodes = self.database.get_nodes()
+                current_time = time.time()
+                for node in nodes:
+                    if current_time - node.get('last_heartbeat', 0) > 30:
+                        self.database.log_event(
+                            "node_offline",
+                            node['node_id'],
+                            f"Node {node['node_id']} has not sent heartbeat for 30+ seconds",
+                            "warning"
+                        )
+            except Exception as e:
+                logging.error(f"Health monitor error: {e}")
+            await asyncio.sleep(10)
+
+    async def broadcast_updates(self):
+        """Periodic lightweight push placeholder (reserved for websocket broadcasting)."""
+        while True:
+            try:
+                # Future: iterate self.connected_clients and send deltas
+                await asyncio.sleep(5)
+            except Exception:
+                await asyncio.sleep(5)
+
+# Instantiate global API server instance
+api_server = OmegaAPIServer()
+
+# --- Background monitors (module-level) ---
+async def node_heartbeat_monitor():
+    interval = int(os.environ.get('OMEGA_HEARTBEAT_INTERVAL','20'))
+    offline_after = int(os.environ.get('OMEGA_OFFLINE_THRESHOLD','120'))
+    while True:
+        try:
+            nodes = api_server.database.get_nodes()
+            now = time.time()
+            for n in nodes:
+                last = n.get('last_heartbeat') or n.get('created_at') or now
+                online = (now - float(last)) < offline_after
+                api_server.database.update_node_heartbeat(n['node_id'], online)
+        except Exception as e:
+            logging.debug(f"node_heartbeat_monitor iteration failed: {e}")
+        await asyncio.sleep(interval)
+
+async def protocol_health_monitor():
+    interval = int(os.environ.get('OMEGA_PROTOCOL_HEALTH_INTERVAL','60'))
+    while True:
+        try:
+            nodes = api_server.database.get_nodes()
+            for n in nodes:
+                host = n.get('ip_address')
+                if not host:
+                    continue
+                status = 'down'
+                try:
+                    import socket
+                    with socket.create_connection((host, int(n.get('port',8443))), timeout=0.4):
+                        status = 'up'
+                except Exception:
+                    pass
+                for proto in SUPPORTED_PROTOCOLS:
+                    api_server.database.record_protocol_health(n['node_id'], proto, status if proto.startswith('gRPC') else 'unknown')
+        except Exception as e:
+            logging.debug(f"protocol_health_monitor iteration failed: {e}")
+        await asyncio.sleep(interval)
     
     async def metrics_collector(self):
         while True:
@@ -1020,58 +1150,13 @@ class OmegaAPIServer:
                 logging.error(f"Health monitor error: {e}")
             
             await asyncio.sleep(10)
-    
-    async def broadcast_updates(self):
-        while True:
-            try:
-                if self.connected_clients:
-                    update_data = {
-                        "type": "system_update",
-                        "timestamp": time.time(),
-                        "system_stats": self.system_stats,
-                        "node_count": len(self.database.get_nodes()),
-                        "session_count": len([s for s in self.database.get_sessions() if s['status'] == 'running'])
-                    }
-                    
-                    encrypted_message = self.security_manager.encrypt_data(json.dumps(update_data))
-                    
-                    disconnected_clients = set()
-                    for client in list(self.connected_clients):
-                        try:
-                            await client.send_json(asdict(encrypted_message))
-                        except Exception as e:
-                            logging.debug(f"Removing disconnected client due to send error: {e}")
-                            disconnected_clients.add(client)
-                    
-                    self.connected_clients -= disconnected_clients
-                    
-            except Exception as e:
-                logging.error(f"Broadcast error: {e}")
-            
-            await asyncio.sleep(1)
 
-
-api_server = OmegaAPIServer()
-
-app = FastAPI(
-    title="Omega Control Center API",
-    version="1.0.0",
-    description="Advanced encrypted backend for distributed desktop control"
-)
-
-# Configurable CORS (default: allow all; set OMEGA_CORS_ORIGINS to comma-separated list to restrict)
-_cors_env = os.environ.get('OMEGA_CORS_ORIGINS')
-_allow_origins = [o.strip() for o in _cors_env.split(',')] if _cors_env else ["*"]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allow_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Warn about permissive CORS in non-development environments
+# CORS configuration warning helper
+_allow_origins = os.environ.get('OMEGA_CORS_ORIGINS')
+if _allow_origins:
+    _allow_origins = [o.strip() for o in _allow_origins.split(',') if o.strip()]
+else:
+    _allow_origins = ['*']
 if _allow_origins == ['*'] and os.environ.get('OMEGA_ENV','').lower() not in ('dev','development','local'):
     logging.warning('CORS is configured with allow_origins="*". In production set OMEGA_CORS_ORIGINS to a trusted domain list')
 
@@ -1353,6 +1438,19 @@ class ActionRequest(BaseModel):
 
 SECURE_ACTIONS = {'discover_nodes','run_benchmark','health_check','restart_node'}
 
+# In-memory per-node advanced state (protocols, policies) - can be persisted later
+NODE_PROTOCOL_STATE: dict[str, str] = {}
+NODE_POLICIES: dict[str, dict[str,str]] = {}
+SUPPORTED_PROTOCOLS = ['gRPC/QUIC','gRPC/HTTP2','ZeroMQ','RDMA']
+
+# Fallback minimal discovery (in case full implementation below fails early during import)
+async def action_discover_nodes():  # lightweight placeholder (shadowed by full version later if defined again)
+    try:
+        nodes = api_server.database.get_nodes()
+        return {'success': True, 'discovered': 0, 'nodes': [n['node_id'] for n in nodes], 'scanned': 0, 'placeholder': True}
+    except Exception:
+        return {'success': True, 'discovered': 0, 'nodes': [], 'scanned': 0, 'placeholder': True}
+
 @app.post('/api/secure/action')
 async def secure_action(request: Request, body: ActionRequest):
     session_id, key = validate_secure(request.headers)
@@ -1379,40 +1477,448 @@ async def secure_action(request: Request, body: ActionRequest):
         nonces.append(body.nonce)
         # advance stored counter conservatively to the max seen so far
         meta['counter'] = max(meta.get('counter', 0), body.ctr)
-    # Execute action
-    if body.action == 'discover_nodes':
-        result_enc = await action_discover_nodes()
-    elif body.action == 'run_benchmark':
-        result_enc = await action_run_benchmark()
-    elif body.action == 'health_check':
-        result_enc = await action_health_check()
-    elif body.action == 'restart_node':
-        # simple simulation
-        await asyncio.sleep(1)
-        result_enc = api_server.security_manager.encrypt_data(json.dumps({'success':True,'message':'Node restart initiated','node': body.params.get('node_id') if body.params else None}))
-    else:
-        raise HTTPException(status_code=400, detail='Unhandled action')
+    # Execute action with robust error handling
+    result_data=None
+    result_enc=None
+    try:
+        if body.action == 'discover_nodes':
+            # returns raw dict (not encrypted) now
+            result_data = await action_discover_nodes()
+        elif body.action == 'run_benchmark':
+            result_enc = await action_run_benchmark()
+        elif body.action == 'health_check':
+            result_enc = await action_health_check()
+        elif body.action == 'restart_node':
+            await asyncio.sleep(1)
+            result_enc = api_server.security_manager.encrypt_data(json.dumps({'success':True,'message':'Node restart initiated','node': body.params.get('node_id') if body.params else None}))
+        else:
+            raise HTTPException(status_code=400, detail='Unhandled action')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"secure_action error action={body.action}: {e}")
+        if body.action == 'discover_nodes':
+            result_data={'success':False,'error':str(e)}
+        else:
+            # wrap generic error
+            result_data={'success':False,'error':str(e)}
+            # ensure encryption path below works by converting to encrypted stub
+            result_enc = api_server.security_manager.encrypt_data(json.dumps(result_data))
     # decrypt intermediate encrypted payload
-    payload = api_server.security_manager.decrypt_data(EncryptedMessage(**result_enc))
-    data = json.loads(payload)
+    if body.action == 'discover_nodes':
+        data = result_data
+    else:
+        # result_enc is an encrypted mapping
+        if isinstance(result_enc, EncryptedMessage):
+            payload = api_server.security_manager.decrypt_data(result_enc)
+        else:
+            # expect dict-like
+            payload = api_server.security_manager.decrypt_data(EncryptedMessage(**result_enc))
+        data = json.loads(payload)
     return wrap_encrypted(session_id, key, {'action': body.action, 'result': data, 'ok': True})
 
+@app.post('/api/secure/discover')
+async def secure_discover(request: Request):
+    """Dedicated discovery endpoint returning encrypted payload; never 501."""
+    session_id, key = validate_secure(request.headers)
+    try:
+        result = await action_discover_nodes()
+        if 'success' not in result:
+            result['success']=True
+    except Exception as e:
+        logging.error(f"secure_discover error: {e}")
+        result={'success':False,'error':str(e)}
+    return wrap_encrypted(session_id, key, {'action':'discover_nodes','result':result,'ok':True})
+
+@app.get('/api/secure/nodes/{node_id}/protocol/health')
+async def get_protocol_health(node_id: str, request: Request):
+    session_id, key = validate_secure(request.headers)
+    # Return recent protocol health statuses
+    rec = api_server.database.protocol_health.get(node_id, {})
+    return wrap_encrypted(session_id, key, {'node_id': node_id, 'protocol_health': rec})
+
+class Heartbeat(BaseModel):
+    node_id: str
+    status: Optional[str] = 'online'
+    cpu_usage: Optional[float] = None
+    memory_usage: Optional[float] = None
+
+@app.post('/api/secure/nodes/heartbeat')
+async def secure_heartbeat(body: Heartbeat, request: Request):
+    session_id, key = validate_secure(request.headers)
+    api_server.database.update_node_heartbeat(body.node_id, body.status == 'online')
+    # Persist lightweight metrics sample if provided
+    try:
+        if (body.cpu_usage is not None) or (body.memory_usage is not None):
+            nm = NodeMetrics(
+                node_id=body.node_id,
+                cpu_usage=float(body.cpu_usage or 0.0),
+                memory_usage=float(body.memory_usage or 0.0),
+                gpu_usage=0.0,
+                network_rx=0.0,
+                network_tx=0.0,
+                temperature=0.0,
+                power_consumption=0.0,
+                timestamp=time.time()
+            )
+            api_server.database.add_metrics(nm)
+    except Exception as e:
+        logging.debug(f"heartbeat metrics insert failed for {body.node_id}: {e}")
+    api_server.database.log_event('node_heartbeat', body.node_id, f"Heartbeat {body.status}")
+    return wrap_encrypted(session_id, key, {'ok': True})
+
+@app.post('/api/secure/nodes/{node_id}/probe')
+async def secure_probe(node_id: str, request: Request):
+    session_id, key = validate_secure(request.headers)
+    node = next((n for n in api_server.database.get_nodes() if n['node_id']==node_id), None)
+    if not node:
+        raise HTTPException(status_code=404, detail='node not found')
+    host=node.get('ip_address'); port=int(node.get('port',8443));
+    results={}
+    # gRPC/QUIC placeholder: attempt TCP connect
+    import socket
+    for proto in SUPPORTED_PROTOCOLS:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                status='up'
+        except Exception:
+            status='down'
+        api_server.database.record_protocol_health(node_id, proto, status if proto.startswith('gRPC') else 'unknown')
+        results[proto]=status if proto.startswith('gRPC') else 'unknown'
+    return wrap_encrypted(session_id, key, {'node_id': node_id, 'probe': results})
+
+class QuarantineReq(BaseModel):
+    node_id: str
+    enable: bool
+
+@app.post('/api/secure/nodes/quarantine')
+async def secure_quarantine(body: QuarantineReq, request: Request):
+    session_id, key = validate_secure(request.headers)
+    api_server.database.set_quarantine(body.node_id, body.enable)
+    api_server.database.log_event('node_quarantine', body.node_id, f"Quarantine={'on' if body.enable else 'off'}")
+    return wrap_encrypted(session_id, key, {'node_id': body.node_id, 'quarantine': body.enable})
+
+class RemoveReq(BaseModel):
+    node_id: str
+
+@app.post('/api/secure/nodes/remove')
+async def secure_remove(body: RemoveReq, request: Request):
+    session_id, key = validate_secure(request.headers)
+    api_server.database.remove_node(body.node_id)
+    api_server.database.log_event('node_remove', body.node_id, 'Node removed')
+    return wrap_encrypted(session_id, key, {'removed': body.node_id})
+
+class VdStartRequest(BaseModel):
+    node_id: str
+    image: Optional[str] = 'ubuntu-xfce'
+    cpu_cores: int = 2
+    memory_gb: int = 4
+
+@app.post('/api/secure/vd/start')
+async def vd_start(body: VdStartRequest, request: Request):
+    session_id, key = validate_secure(request.headers)
+    # Placeholder: allocate a pseudo session id
+    vd_sid = f"vd-{secrets.token_hex(6)}"
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            conn.execute('INSERT OR IGNORE INTO sessions (session_id, user_id, node_id, application, cpu_cores, gpu_units, memory_gb, status, created_at, last_activity) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                         (vd_sid, SESSION_META.get(session_id,{}).get('user','admin'), body.node_id, 'virtual-desktop', body.cpu_cores, 0, body.memory_gb, 'starting', time.time(), time.time()))
+            conn.commit()
+        api_server.database.log_event('vd_start', vd_sid, f"Requested on {body.node_id}", 'info')
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Failed start: {e}')
+    # Simulate connect URL
+    connect_url = f"http://localhost:7000/?session={vd_sid}"
+    return wrap_encrypted(session_id, key, {'success': True, 'session_id': vd_sid, 'connect_url': connect_url})
+
+@app.get('/api/secure/vd/list')
+async def vd_list(request: Request):
+    session_id, key = validate_secure(request.headers)
+    sessions = []
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            cur = conn.execute("SELECT session_id,node_id,application,status,created_at FROM sessions WHERE application='virtual-desktop' ORDER BY created_at DESC LIMIT 100")
+            sessions = [{'session_id':r[0], 'node_id':r[1], 'application':r[2], 'status':r[3], 'created_at':r[4]} for r in cur.fetchall()]
+    except Exception:
+        pass
+    return wrap_encrypted(session_id, key, {'sessions': sessions})
+
 async def action_discover_nodes():
-    # Example discovery: enumerate local network interfaces; treat each as a node if not yet recorded
+    """Advanced adaptive discovery.
+    Methods (toggle via env OMEGA_DISCOVERY_METHODS= tcp,icmp,arp,mdns ):
+      tcp  : (always on) bounded /24 TCP port scan of candidate subnets.
+      icmp : single "ping" (system ping utility) for additional liveness if no tcp port open.
+      arp  : parse local ARP cache to seed additional IPs (no active probe cost).
+      mdns : (placeholder) send one multicast query to collect responders (future hook).
+    Enhancements:
+      - Optionally include controller host itself (OMEGA_DISCOVERY_INCLUDE_SELF=1) so UI shows local node.
+      - Records which method produced each discovery (metadata only, not persisted yet).
+      - Respects existing caps (per-interface 256, global 1024) + overall timeout window.
+      - Environment controls: OMEGA_* vars documented below.
+    Returns: success, discovered, nodes (ids), scanned, methods_used, self_added, disabled flags.
+    """
+    if os.environ.get('OMEGA_ENABLE_DISCOVERY','1').lower() not in ('1','true','yes','on'):  # fast escape
+        return {'success':True,'discovered':0,'nodes':[],'disabled':True}
+    import ipaddress, socket, asyncio, subprocess, json as _json
+    methods_env = os.environ.get('OMEGA_DISCOVERY_METHODS','tcp,arp').lower().replace(' ','')
+    enabled_methods = {m for m in methods_env.split(',') if m}
+    ports = [int(p) for p in os.environ.get('OMEGA_DISCOVERY_PORTS','8443,22').split(',') if p.strip().isdigit()] or [8443,22]
+    timeout = float(os.environ.get('OMEGA_DISCOVERY_TIMEOUT','0.35'))
+    include_self = os.environ.get('OMEGA_DISCOVERY_INCLUDE_SELF','1').lower() in ('1','true','yes','on')
+
     nets = psutil.net_if_addrs()
-    new_nodes=[]
-    for i,(name,addr_list) in enumerate(nets.items()):
-        ip = next((a.address for a in addr_list if a.family.name in ('AF_INET','AddressFamily.AF_INET')), None)
-        if not ip or ip.startswith('127.'):
+    host_ips=set()
+    interface_ips=[]
+    for name, addr_list in nets.items():
+        addr = next((a for a in addr_list if getattr(a.family,'name',str(a.family)) in ('AF_INET','AddressFamily.AF_INET')), None)
+        if not addr: continue
+        ip = addr.address
+        if ip.startswith('127.') or ip.startswith('169.254.'):
             continue
-        node_id=f'auto-{name}'
-        existing=[n for n in api_server.database.get_nodes() if n['node_id']==node_id]
-        if existing: continue
-        api_server.database.add_node(node_id,'compute',name,ip,8000,{'cpu_cores': psutil.cpu_count(logical=True), 'memory_gb': round(psutil.virtual_memory().total/1024**3,2)})
-        new_nodes.append(node_id)
-    payload={'success':True,'discovered':len(new_nodes),'nodes':new_nodes}
-    enc = api_server.security_manager.encrypt_data(json.dumps(payload))
-    return enc
+        interface_ips.append(ip)
+        netmask = getattr(addr,'netmask', None) or '255.255.255.0'
+        try:
+            network = ipaddress.ip_network(f"{ip}/{netmask}", strict=False)
+        except ValueError:
+            continue
+        if network.prefixlen < 24:  # bound to /24 window
+            host_ip = ipaddress.ip_address(ip)
+            base_int = int(host_ip) & 0xFFFFFF00
+            network = ipaddress.ip_network((base_int, 24))
+        candidates=[str(h) for h in network.hosts()][:256]
+        for h in candidates:
+            if h!=ip:
+                host_ips.add(h)
+
+    # ARP seeding (no active probe). Parse `arp -a` output (best-effort, ignore errors)
+    arp_mac_map={}
+    if 'arp' in enabled_methods:
+        try:
+            arp_out = subprocess.run(['arp','-a'], capture_output=True, text=True, timeout=1).stdout
+            for line in arp_out.splitlines():
+                # typical: ? (192.168.1.34) at xx:xx:.. on en0 ifscope [ethernet]
+                if '(' in line and ')' in line:
+                    ip=line.split('(')[1].split(')')[0].strip()
+                    if ip and all(not ip.startswith(pref) for pref in ('127.','169.254.')):
+                        host_ips.add(ip)
+                        parts=line.split()
+                        mac=None
+                        if ' at ' in line:
+                            try:
+                                mac=line.split(' at ')[1].split(' ')[0].strip()
+                            except Exception:
+                                mac=None
+                        if mac:
+                            arp_mac_map[ip]=mac.lower()
+        except Exception:
+            pass
+
+    # Optional mDNS service discovery (zeroconf) to find additional hosts (e.g., mobile devices)
+    if 'mdns' in enabled_methods:
+        try:
+            # Optional dependency (install via pip install zeroconf). Marked type ignore to avoid analyzer error if missing.
+            from zeroconf import Zeroconf, ServiceBrowser  # type: ignore
+            mdns_hosts=set()
+            class _Listener:
+                def add_service(self, zc, t, name):
+                    try:
+                        info=zc.get_service_info(t,name)
+                        if info and info.addresses:
+                            for a in info.addresses:
+                                import ipaddress as _ip
+                                try:
+                                    ip_str=str(_ip.ip_address(a))
+                                    if ip_str and not ip_str.startswith('127.'):
+                                        mdns_hosts.add(ip_str)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                def update_service(self, *args, **kwargs):
+                    pass
+                def remove_service(self, *args, **kwargs):
+                    pass
+            zc=Zeroconf()
+            listener=_Listener()
+            # Common service types to browse quickly (short window)
+            service_types=['_http._tcp.local.','_workstation._tcp.local.','_ssh._tcp.local.']
+            browsers=[ServiceBrowser(zc, st, listener) for st in service_types]
+            await asyncio.sleep(min(1.5, timeout*4))
+            zc.close()
+            for ipx in mdns_hosts:
+                host_ips.add(ipx)
+            if mdns_hosts:
+                enabled_methods.add('mdns')
+        except Exception:
+            # silently ignore if zeroconf not installed
+            pass
+
+    candidates=list(host_ips)[:1024]
+    methods_used=set()
+    results=[]
+    sem = asyncio.Semaphore(64)
+    loop=asyncio.get_event_loop()
+
+    def _tcp_probe(host,port,timeout):
+        try:
+            with socket.create_connection((host,port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    async def tcp_probe(host):
+        found=[]
+        for p in ports:
+            try:
+                async with sem:
+                    fut = loop.run_in_executor(None, lambda: _tcp_probe(host,p,timeout))
+                    ok = await asyncio.wait_for(fut, timeout=timeout+0.15)
+                if ok:
+                    found.append(p)
+            except Exception:
+                pass
+        return found
+
+    def icmp_ping(host):  # uses system ping (works unprivileged on mac/linux)
+        try:
+            # macOS: -c 1 count, -W timeout (linux); macOS uses -W for packet timeout in ms? Fallback with small overall timeout
+            cmd=['ping','-c','1','-W','1',host]
+            res=subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.2)
+            return res.returncode==0
+        except Exception:
+            return False
+
+    async def probe(host):
+        host_methods=[]
+        ports_found=[]
+        if 'tcp' in enabled_methods:
+            ports_found = await tcp_probe(host)
+            if ports_found:
+                host_methods.append('tcp')
+        omega=False
+        if 8443 in ports_found:
+            try:
+                import urllib.request
+                with urllib.request.urlopen(f"http://{host}:8443/api/ping", timeout=timeout) as r:
+                    if r.status==200:
+                        omega=True; host_methods.append('ping')
+            except Exception:
+                pass
+        # If nothing via TCP and icmp enabled -> try icmp to mark liveness
+        if not ports_found and 'icmp' in enabled_methods:
+            if await loop.run_in_executor(None, lambda: icmp_ping(host)):
+                host_methods.append('icmp')
+        if not host_methods:
+            return None
+        methods_used.update(host_methods)
+        return {'host':host,'ports':ports_found,'omega':omega,'methods':host_methods}
+
+    # Launch probes
+    if candidates:
+        tasks=[probe(h) for h in candidates]
+        for coro in asyncio.as_completed(tasks, timeout=min(25, timeout*len(tasks)+5)):
+            try:
+                res = await coro
+                if res: results.append(res)
+            except Exception:
+                pass
+
+    # Existing node IP map
+    existing_nodes = {n['ip_address']: n for n in api_server.database.get_nodes() if n.get('ip_address')}
+    new_ids=[]
+    # MAC vendor heuristics for classification
+    mobile_ouis={'34:15:9e','d8:bb:2c','28:16:ad','dc:a9:04','f8:ff:c2','3c:2e:f9','b8:53:ac','1c:1b:0d','ac:37:43','b4:0f:3b'}  # sample handful
+    apple_ouis={'b8:27:eb','f0:18:98','a4:5e:60','0c:74:c2','60:f8:1d','d0:03:4b'}
+    android_indicators={'samsung','oneplus','pixel','android','xiaomi','redmi','huawei','oppo'}
+    def classify_device(ip):
+        mac=arp_mac_map.get(ip,'')
+        prefix=':'.join(mac.split(':')[:3]) if mac else ''
+        if prefix in apple_ouis:
+            return 'mobile-ios'
+        if prefix in mobile_ouis:
+            return 'mobile'
+        host_lower=ip
+        # Additional placeholder heuristics could go here
+        return 'generic'
+    for r in results:
+        if r['host'] in existing_nodes:
+            continue
+        node_id = f"disc-{r['host'].replace('.','-')}"
+        ntype = 'omega' if r['omega'] else ('alive' if r['ports'] else 'generic')
+        api_server.database.add_node(node_id, ntype, node_id, r['host'], r['ports'][0] if r['ports'] else 0, {'cpu_cores': None, 'memory_gb': None})
+        # classify & update device_class
+        try:
+            klass=classify_device(r['host'])
+            with sqlite3.connect(api_server.database.db_path) as conn:
+                conn.execute('UPDATE nodes SET device_class=? WHERE node_id=?', (klass, node_id))
+                conn.commit()
+        except Exception:
+            pass
+        new_ids.append(node_id)
+
+    self_added=[]
+    if include_self:
+        # Add controller host(s) if not in DB
+        controller_nodes = api_server.database.get_nodes()
+        existing_ids={n['node_id'] for n in controller_nodes}
+        for ip in interface_ips:
+            sid=f"self-{ip.replace('.','-')}"
+            if sid not in existing_ids:
+                api_server.database.add_node(sid,'controller',sid,ip,8443, {'cpu_cores': psutil.cpu_count(), 'memory_gb': round(psutil.virtual_memory().total/1024**3,1)})
+                self_added.append(sid)
+                new_ids.append(sid)
+
+    payload={
+        'success':True,
+        'discovered':len(new_ids),
+        'nodes':new_ids,
+        'scanned':len(candidates),
+        'methods_used':sorted(methods_used),
+        'self_added':self_added,
+        'config':{
+            'ports':ports,
+            'timeout':timeout,
+            'include_self':include_self,
+            'enabled_methods':sorted(enabled_methods)
+        }
+    }
+    return payload
+
+# ---- Low latency link scaffolding ----
+class LatencyStartReq(BaseModel):
+    node_id: str
+
+@app.post('/api/secure/nodes/latency/start')
+async def latency_start(body: LatencyStartReq, request: Request):
+    session_id, key = validate_secure(request.headers)
+    # Generate ephemeral token & record (placeholder, real negotiation later)
+    token = secrets.token_hex(16)
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS latency_links (id INTEGER PRIMARY KEY AUTOINCREMENT, node_id TEXT, token TEXT, created_at REAL, protocol TEXT, status TEXT, FOREIGN KEY(node_id) REFERENCES nodes(node_id))")
+            conn.execute('INSERT INTO latency_links (node_id, token, created_at, protocol, status) VALUES (?,?,?,?,?)', (body.node_id, token, time.time(), 'negotiation', 'pending'))
+            conn.commit()
+    except Exception as e:
+        logging.error(f'latency_start record error: {e}')
+    # Determine available protocols (QUIC if aioquic importable)
+    protocols=['websocket']
+    try:
+        import aioquic  # type: ignore
+        protocols.append('quic')
+    except Exception:
+        pass
+    payload={'success':True,'token':token,'protocols':protocols,'recommended':protocols[-1],'node_id':body.node_id}
+    return wrap_encrypted(session_id, key, payload)
+
+@app.get('/api/secure/nodes/latency/measure')
+async def latency_measure(node_id: str, request: Request):
+    session_id, key = validate_secure(request.headers)
+    # Placeholder synthetic latency measurement
+    import random
+    base=random.uniform(3,12)  # ms
+    jitter=random.uniform(0.2,1.5)
+    payload={'success':True,'node_id':node_id,'latency_ms':round(base,2),'jitter_ms':round(jitter,2),'method':'synthetic'}
+    return wrap_encrypted(session_id, key, payload)
 
 async def action_run_benchmark():
     # Simple real benchmark: measure CPU busy loop for 0.2s
@@ -1530,8 +2036,141 @@ async def secure_nodes(request: Request):
         latest_metrics_map.setdefault(m['node_id'], m)
     for n in nodes:
         n['metrics'] = latest_metrics_map.get(n['node_id'])
+        # attach active protocol (in-memory) and simple mtls flag placeholder
+        n['protocol'] = NODE_PROTOCOL_STATE.get(n['node_id'],'gRPC/QUIC')
+        n['mtls'] = True
     payload = {'nodes': nodes, 'timestamp': time.time()}
     return wrap_encrypted(session_id, key, payload)
+
+# --- Advanced Node Endpoints ---
+@app.get('/api/secure/nodes/{node_id}/protocol')
+async def node_protocol_get(request: Request, node_id: str):
+    sid, key = validate_secure(request.headers)
+    active = NODE_PROTOCOL_STATE.get(node_id, 'gRPC/QUIC')
+    return wrap_encrypted(sid, key, {'node_id': node_id, 'active': active, 'supported': SUPPORTED_PROTOCOLS})
+
+class ProtocolSetRequest(BaseModel):
+    protocol: str
+
+@app.post('/api/secure/nodes/{node_id}/protocol')
+async def node_protocol_set(request: Request, node_id: str, body: ProtocolSetRequest):
+    sid, key = validate_secure(request.headers)
+    proto = body.protocol.strip()
+    if proto not in SUPPORTED_PROTOCOLS:
+        raise HTTPException(status_code=400, detail='Unsupported protocol')
+    NODE_PROTOCOL_STATE[node_id] = proto
+    try:
+        api_server.database.log_event('node_protocol_switch', node_id, f'Switched to {proto}', 'info')
+    except Exception:
+        pass
+    return wrap_encrypted(sid, key, {'node_id': node_id, 'active': proto})
+
+@app.get('/api/secure/nodes/{node_id}/telemetry')
+async def node_telemetry(request: Request, node_id: str, limit: int = 60):
+    sid, key = validate_secure(request.headers)
+    limit = max(5, min(240, limit))
+    data = api_server.database.get_latest_metrics(node_id=node_id, limit=limit)
+    # reverse chronological currently; sort ascending by timestamp
+    data = sorted(data, key=lambda x: x['timestamp'])
+    series = {
+        'cpu': [round(d.get('cpu_usage') or 0,2) for d in data],
+        'mem': [round(d.get('memory_usage') or 0,2) for d in data],
+        'ts': [d.get('timestamp') for d in data]
+    }
+    return wrap_encrypted(sid, key, {'node_id': node_id, 'series': series})
+
+@app.get('/api/secure/nodes/{node_id}/policies')
+async def node_policies_get(request: Request, node_id: str):
+    sid, key = validate_secure(request.headers)
+    pol = NODE_POLICIES.get(node_id, {})
+    return wrap_encrypted(sid, key, {'node_id': node_id, 'policies': pol})
+
+class PolicySetRequest(BaseModel):
+    key: str
+    value: str | None = ''
+
+@app.post('/api/secure/nodes/{node_id}/policies')
+async def node_policies_set(request: Request, node_id: str, body: PolicySetRequest):
+    sid, key = validate_secure(request.headers)
+    if not body.key.strip():
+        raise HTTPException(status_code=400, detail='key required')
+    NODE_POLICIES.setdefault(node_id, {})[body.key.strip()] = body.value or ''
+    try:
+        api_server.database.log_event('node_policy_set', node_id, f"{body.key}={body.value}", 'info')
+    except Exception:
+        pass
+    return wrap_encrypted(sid, key, {'ok': True, 'policies': NODE_POLICIES[node_id]})
+
+@app.delete('/api/secure/nodes/{node_id}/policies/{pkey}')
+async def node_policies_delete(request: Request, node_id: str, pkey: str):
+    sid, key = validate_secure(request.headers)
+    pol = NODE_POLICIES.setdefault(node_id, {})
+    if pkey in pol:
+        pol.pop(pkey, None)
+        try:
+            api_server.database.log_event('node_policy_delete', node_id, f"{pkey}", 'info')
+        except Exception:
+            pass
+    return wrap_encrypted(sid, key, {'ok': True, 'policies': pol})
+
+@app.get('/api/secure/nodes/{node_id}/trust')
+async def node_trust_get(request: Request, node_id: str):
+    sid, key = validate_secure(request.headers)
+    # look up in nodes table
+    trust_score = 0
+    quarantine = 0
+    status = 'unknown'
+    try:
+        for n in api_server.database.get_nodes():
+            if n['node_id']==node_id:
+                trust_score = n.get('trust_score') or 0
+                quarantine = n.get('quarantine') or 0
+                status = n.get('status')
+                break
+    except Exception:
+        pass
+    return wrap_encrypted(sid, key, {'node_id': node_id, 'trust_score': trust_score, 'quarantine': bool(quarantine), 'status': status})
+
+class DiagnosticsRequest(BaseModel):
+    level: str = 'basic'
+
+@app.post('/api/secure/nodes/{node_id}/diagnostics')
+async def node_diagnostics(request: Request, node_id: str, body: DiagnosticsRequest):
+    sid, key = validate_secure(request.headers)
+    # Simple simulated diagnostics leveraging latest metrics
+    metrics = api_server.database.get_latest_metrics(node_id=node_id, limit=1)
+    m = metrics[0] if metrics else {}
+    result = {
+        'node_id': node_id,
+        'level': body.level,
+        'checks': {
+            'cpu': 'OK' if (m.get('cpu_usage',0) < 90) else 'HIGH',
+            'memory': 'OK' if (m.get('memory_usage',0) < 90) else 'HIGH',
+            'heartbeat': 'OK'
+        },
+        'timestamp': time.time()
+    }
+    try:
+        api_server.database.log_event('node_diagnostics', node_id, f"diag level={body.level}", 'info')
+    except Exception:
+        pass
+    return wrap_encrypted(sid, key, {'diagnostics': result})
+
+class OTARequest(BaseModel):
+    action: str  # update | rollback
+    version: str | None = None
+
+@app.post('/api/secure/nodes/{node_id}/ota')
+async def node_ota(request: Request, node_id: str, body: OTARequest):
+    sid, key = validate_secure(request.headers)
+    if body.action not in ('update','rollback'):
+        raise HTTPException(status_code=400, detail='invalid action')
+    msg = f"OTA {body.action} triggered" + (f" target={body.version}" if body.version else '')
+    try:
+        api_server.database.log_event('node_ota', node_id, msg, 'info')
+    except Exception:
+        pass
+    return wrap_encrypted(sid, key, {'ok': True, 'action': body.action, 'version': body.version})
 
 @app.get('/api/secure/sessions')
 async def secure_sessions(request: Request):
@@ -1651,6 +2290,117 @@ async def ws_secure_realtime(ws: WebSocket):
             logging.error(f"ws_secure_realtime: failed removing websocket for {session_id}: {e}")
 
 
+# --- Compatibility (non-secure) /api/v1 endpoints for legacy frontend calls ---
+def _is_admin_request(req: Request) -> bool:
+    # Accept either an X-Admin-Token matching env or a valid JWT in Authorization header
+    try:
+        adm = os.environ.get('OMEGA_ADMIN_TOKEN')
+        hdr = req.headers.get('x-admin-token') or req.headers.get('X-Admin-Token') or req.headers.get('X-Admin-Token'.lower())
+        if adm and hdr and hdr == adm:
+            return True
+    except Exception:
+        pass
+    # try JWT validation (best-effort)
+    try:
+        auth = req.headers.get('authorization','')
+        if auth and auth.lower().startswith('bearer '):
+            tok = auth.split(' ',1)[1]
+            claims = api_server.security_manager.validate_jwt(tok)
+            # admin if subject or roles indicate admin
+            if claims.get('sub') == 'admin' or claims.get('sid') in SESSION_META:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+@app.post('/api/v1/nodes/register')
+async def v1_register_node(request: Request, body: NodeRegistration):
+    # Legacy registration endpoint used by older frontends; requires admin token or valid session
+    if not _is_admin_request(request):
+        raise HTTPException(status_code=403, detail='admin token required')
+    try:
+        api_server.database.add_node(body.node_id, body.node_type, body.hostname, body.ip_address, body.port, body.resources or {})
+        api_server.database.log_event('v1_node_register', body.node_id, f'Legacy v1 register by {request.client.host if request.client else "local"}', 'info')
+        return JSONResponse(content={'success': True, 'node_id': body.node_id})
+    except Exception as e:
+        logging.error(f'v1_register_node error: {e}')
+        raise HTTPException(status_code=500, detail='registration failed')
+
+
+@app.get('/api/v1/nodes/list')
+async def v1_nodes_list():
+    try:
+        nodes = api_server.database.get_nodes()
+        return JSONResponse(content={'nodes': nodes})
+    except Exception as e:
+        logging.error(f'v1_nodes_list error: {e}')
+        raise HTTPException(status_code=500, detail='failed to list nodes')
+
+
+@app.get('/api/v1/nodes/pending')
+async def v1_nodes_pending(request: Request):
+    if not _is_admin_request(request):
+        raise HTTPException(status_code=403, detail='admin token required')
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            cur = conn.execute('SELECT node_id, approved_by, approved_at, status FROM node_approvals WHERE status=?', ('pending',))
+            pending = [{'node_id': r[0], 'approved_by': r[1], 'approved_at': r[2], 'status': r[3]} for r in cur.fetchall()]
+        return JSONResponse(content={'pending': pending})
+    except Exception as e:
+        logging.error(f'v1_nodes_pending error: {e}')
+        raise HTTPException(status_code=500, detail='failed to fetch pending')
+
+
+@app.post('/api/v1/nodes/approve')
+async def v1_nodes_approve(request: Request, body: dict = Body(...)):
+    if not _is_admin_request(request):
+        raise HTTPException(status_code=403, detail='admin token required')
+    node_id = body.get('node_id')
+    if not node_id:
+        raise HTTPException(status_code=400, detail='node_id required')
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            conn.execute('UPDATE node_approvals SET status=?, approved_by=?, approved_at=? WHERE node_id=?', ('approved', 'admin', time.time(), node_id))
+            conn.execute('UPDATE nodes SET status=? WHERE node_id=?', ('active', node_id))
+            conn.commit()
+        api_server.database.log_event('v1_node_approve', node_id, f'Approved via v1 by admin', 'info')
+        return JSONResponse(content={'success': True, 'node_id': node_id})
+    except Exception as e:
+        logging.error(f'v1_nodes_approve error: {e}')
+        raise HTTPException(status_code=500, detail='approve failed')
+
+
+@app.post('/api/v1/nodes/deny')
+async def v1_nodes_deny(request: Request, body: dict = Body(...)):
+    if not _is_admin_request(request):
+        raise HTTPException(status_code=403, detail='admin token required')
+    node_id = body.get('node_id')
+    if not node_id:
+        raise HTTPException(status_code=400, detail='node_id required')
+    try:
+        with sqlite3.connect(api_server.database.db_path) as conn:
+            conn.execute('UPDATE node_approvals SET status=?, approved_by=?, approved_at=? WHERE node_id=?', ('denied', 'admin', time.time(), node_id))
+            conn.execute('UPDATE nodes SET status=? WHERE node_id=?', ('denied', node_id))
+            conn.commit()
+        api_server.database.log_event('v1_node_deny', node_id, f'Denied via v1 by admin', 'warning')
+        return JSONResponse(content={'success': True, 'node_id': node_id})
+    except Exception as e:
+        logging.error(f'v1_nodes_deny error: {e}')
+        raise HTTPException(status_code=500, detail='deny failed')
+
+
+@app.get('/api/v1/nodes/discovered')
+async def v1_nodes_discovered():
+    # Best-effort: reuse discovery action to attempt local discovery and return a small set
+    try:
+        # lightweight discovery: return empty list or run psutil network scanning in background
+        return JSONResponse(content={'discovered': []})
+    except Exception as e:
+        logging.error(f'v1_nodes_discovered error: {e}')
+        return JSONResponse(content={'discovered': []})
+
+
 def persist_revocation(session_id: str, reason: str = ''):
     try:
         with db_connect() as conn:
@@ -1680,28 +2430,24 @@ def _hash_password(password: str) -> str:
 
 
 def _verify_password(password: str, hashed: str) -> bool:
+    """Constant-time verification supporting bcrypt or PBKDF2 fallback."""
+    if not hashed:
+        return False
     if _HAS_BCRYPT:
         try:
             return bcrypt.checkpw(password.encode(), hashed.encode())
         except Exception:
             return False
-    else:
-        try:
-            # If bcrypt not available, hashed is salt+dk base64
-            raw = base64.b64decode(hashed)
-            salt = raw[:16]
-            dk = raw[16:]
-            dk2 = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 200000)
-            return hmac.compare_digest(dk, dk2)
-        except Exception as e:
-            logging.debug(f"_verify_password fallback error: {e}")
-            return False
     try:
         raw = base64.b64decode(hashed)
-        salt, dk = raw[:16], raw[16:]
-        new = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 200000)
-        return hmac.compare_digest(new, dk)
-    except Exception:
+        if len(raw) < 48:  # 16 salt + 32 dk
+            return False
+        salt = raw[:16]
+        dk_stored = raw[16:]
+        dk_calc = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 200000)
+        return hmac.compare_digest(dk_stored, dk_calc)
+    except Exception as e:
+        logging.debug(f"_verify_password fallback error: {e}")
         return False
 
 
@@ -1803,43 +2549,34 @@ class SecureSessionStart(BaseModel):
     # RSA-encrypted AES session key (base64)
     encrypted_key: Optional[str] = None
 
-@app.post('/api/secure/session/start')
-@rate_limited(per_minute=30, burst=10)
-async def secure_session_start(body: SecureSessionStart):
-    # Issue a fresh AES-256-GCM session
-    session_id = f"sid-{secrets.token_hex(12)}"
-    # Expect client to provide RSA-encrypted AES key to avoid transmitting plaintext keys from server
-    if not body.encrypted_key:
-        raise HTTPException(status_code=400, detail='encrypted_key is required')
+"""(Deprecated early definition of secure_session_start removed in security hardening pass)"""
+# (Intentionally left blank)
+
+
+@app.get('/api/secure/public_key')
+@rate_limited(per_minute=120, burst=40)
+async def secure_public_key():
+    # Return server RSA public key PEM so clients can perform RSA-OAEP encryption for session key handshake
     try:
-        encrypted_key_bytes = base64.b64decode(body.encrypted_key)
-        # Decrypt with server RSA private key
-        key = api_server.rsa_private_key.decrypt(
-            encrypted_key_bytes,
-            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
-        )
+        # Lazy-init if key attributes not yet created (import ordering safety)
+        if not hasattr(api_server, 'rsa_private_key') or api_server.rsa_private_key is None:
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            api_server.rsa_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        if not hasattr(api_server, 'rsa_public_key') or api_server.rsa_public_key is None:
+            api_server.rsa_public_key = api_server.rsa_private_key.public_key()
+        pub_pem = api_server.rsa_public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode()
+        return JSONResponse(content={'public_key_pem': pub_pem})
     except Exception as e:
-        raise HTTPException(status_code=400, detail='Invalid encrypted_key')
-    key_b64 = base64.b64encode(key).decode()
-    register_session_meta(session_id, key_b64)
-    # Track requesting user for RBAC and ownership checks (atomic)
-    try:
-        with SESSION_LOCK:
-            if session_id in SESSION_META:
-                SESSION_META[session_id]['user'] = body.user_id or 'admin'
-            else:
-                SESSION_META[session_id] = {'user': body.user_id or 'admin', 'key': key_b64, 'created': time.time(), 'last_rotate': time.time(), 'counter': 0}
-    except Exception:
-        pass
-    payload = {'session_id': session_id, 'issued_at': time.time(), 'expires_in': 6*3600}
-    # Do NOT return session_key. Key material is stored server-side and was provided by client on handshake.
-    # Issue a short-lived JWT for Authorization so clients don't need to include raw key material
-    try:
-        jwt = api_server.security_manager.issue_jwt(session_id, user=SESSION_META.get(session_id, {}).get('user','admin'), ttl=6*3600)
-        payload['token'] = jwt
-    except Exception:
-        pass
-    return payload
+        logging.error(f'secure_public_key error: {e}')
+        raise HTTPException(status_code=500, detail='failed to export public key')
+
+@app.get('/api/public_info')
+async def public_ping():
+    """Public minimal info (renamed from /api/ping to avoid duplicate route)."""
+    return {'service':'omega-backend','version':'2.0','ts':time.time()}
 
 
 class SecureSessionRotate(BaseModel):
@@ -2020,18 +2757,73 @@ async def register_node(request: Request, body: NodeRegistrationRequest = Body(.
     #    if any(ch in v for ch in [';', '|', '&', '$', '`', '\\', '>', '<']):
     #        raise ValueError('Invalid os_image value')
     #    return v  # Ensure valid os_image value
-# Ensure app is defined before any decorators
-app = FastAPI(
-    title="Omega Control Center API",
-    version="1.0.0",
-    description="Advanced encrypted backend for distributed desktop control"
-)
+# (Removed duplicate FastAPI app redefinition; using single instance declared at top)
 def require_role(user, role):
     # Enforce RBAC: only admin can perform admin actions
     roles = get_user_roles(user)
     if role not in roles:
         logging.warning(f"RBAC: User {user} lacks required role {role}")
         raise HTTPException(status_code=403, detail=f'{role} role required')
+
+# --- FINAL ROUTE OVERRIDES (ensure correct handlers not shadowed by earlier wrappers) ---
+# Re-register secure session start AFTER generic wrappers that changed signature.
+# First, remove any previously registered POST route for this path so the override actually takes effect
+try:
+    _target_path = '/api/secure/session/start'
+    _method = 'POST'
+    to_remove = []
+    for _r in list(app.router.routes):  # type: ignore[attr-defined]
+        try:
+            if getattr(_r, 'path', None) == _target_path and _method in getattr(_r, 'methods', set()):
+                to_remove.append(_r)
+        except Exception:
+            continue
+    for _r in to_remove:
+        try:
+            app.router.routes.remove(_r)  # type: ignore[attr-defined]
+            logging.info('Removed previous wrapped route for %s', _target_path)
+        except Exception:
+            pass
+except Exception as _e:  # pragma: no cover - non-critical
+    logging.error(f"Failed pruning old secure_session_start route: {_e}")
+@app.post('/api/secure/session/start', summary='Secure Session Start', tags=['secure'])
+@rate_limited(per_minute=30, burst=10)
+async def secure_session_start_override(body: SecureSessionStart = Body(...)):
+    """Initiate an AES-GCM secure session (final override).
+    Client supplies RSA-OAEP encrypted 32-byte key (base64). Dev fallback allowed if env OMEGA_ALLOW_INSECURE_HANDSHAKE set.
+    Returns: { session_id, token, issued_at, expires_in }
+    """
+    session_id = f"sid-{secrets.token_hex(12)}"
+    allow_dev = os.environ.get('OMEGA_ALLOW_INSECURE_HANDSHAKE','0').lower() in ('1','true','yes')
+    key=None
+    if body.encrypted_key:
+        try:
+            encrypted_key_bytes = base64.b64decode(body.encrypted_key)
+            key = api_server.rsa_private_key.decrypt(
+                encrypted_key_bytes,
+                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+            )
+        except Exception:
+            if not allow_dev:
+                raise HTTPException(status_code=400, detail='Invalid encrypted_key')
+    if key is None:
+        if not allow_dev:
+            raise HTTPException(status_code=400, detail='encrypted_key is required')
+        key = os.urandom(32)
+    key_b64 = base64.b64encode(key).decode()
+    register_session_meta(session_id, key_b64)
+    with SESSION_LOCK:
+        if session_id in SESSION_META:
+            SESSION_META[session_id]['user'] = body.user_id or 'admin'
+        else:
+            SESSION_META[session_id] = {'user': body.user_id or 'admin', 'key': key_b64, 'created': time.time(), 'last_rotate': time.time(), 'counter': 0}
+    payload = {'session_id': session_id, 'issued_at': time.time(), 'expires_in': 6*3600}
+    try:
+        jwt = api_server.security_manager.issue_jwt(session_id, user=SESSION_META.get(session_id, {}).get('user','admin'), ttl=6*3600)
+        payload['token'] = jwt
+    except Exception:
+        pass
+    return payload
 
 def get_user_roles(user):
     # Real role lookup: check DB or in-memory map
@@ -2940,6 +3732,58 @@ async def generate_certificate(request: Request, body: dict):
     cert_id = f'cert-{secrets.token_hex(8)}'
     api_server.database.log_event('cert_generate', caller, f'Generated placeholder cert {cert_id}', 'info')
     return wrap_encrypted(sid, key, {'generated': True, 'id': cert_id})
+
+
+def issue_node_certificate(node_id: str, public_key_pem: str, days: int = 1) -> str:
+    """Issue a short-lived X.509 certificate for a node, signed by server RSA key.
+    Returns PEM-encoded certificate as string.
+    """
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        pubkey = load_pem_public_key(public_key_pem.encode())
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, node_id)])
+        issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"Omega Controller CA")])
+        now = datetime.utcnow()
+        builder = x509.CertificateBuilder()
+        builder = builder.subject_name(subject)
+        builder = builder.issuer_name(issuer)
+        builder = builder.public_key(pubkey)
+        builder = builder.serial_number(x509.random_serial_number())
+        builder = builder.not_valid_before(now - timedelta(minutes=1))
+        builder = builder.not_valid_after(now + timedelta(days=days))
+        builder = builder.add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        cert = builder.sign(private_key=api_server.rsa_private_key, algorithm=hashes.SHA256())
+        return cert.public_bytes(serialization.Encoding.PEM).decode()
+    except Exception as e:
+        logging.error(f'issue_node_certificate error for {node_id}: {e}')
+        raise
+
+
+@app.post('/api/secure/nodes/{node_id}/issue_cert')
+async def secure_issue_node_cert(request: Request, node_id: str, body: dict = Body(...)):
+    """Issue a node certificate for the given node_id using provided public_key_pem.
+    Protected endpoint: requires a secure session and admin role.
+    Request body: { "public_key_pem": "-----BEGIN PUBLIC KEY...", "days": 1 }
+    """
+    session_id, key = validate_secure(request.headers)
+    caller = SESSION_META.get(session_id, {}).get('user', 'admin')
+    require_role(caller, 'admin')
+    public_key_pem = body.get('public_key_pem')
+    days = int(body.get('days', 1)) if body.get('days') else 1
+    if not public_key_pem:
+        raise HTTPException(status_code=400, detail='public_key_pem required')
+    try:
+        cert_pem = issue_node_certificate(node_id, public_key_pem, days=days)
+        api_server.database.log_event('issue_node_cert', node_id, f'Issued node cert (days={days}) to {caller}', 'info')
+        return wrap_encrypted(session_id, key, {'certificate_pem': cert_pem})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f'secure_issue_node_cert error: {e}')
+        raise HTTPException(status_code=500, detail='failed to issue certificate')
 
 
 @app.post('/api/secure/admin/certificates/revoke')
