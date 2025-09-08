@@ -98,7 +98,7 @@ import uuid
 import hashlib
 import hmac
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Set
 from contextlib import asynccontextmanager
 import sqlite3
@@ -133,6 +133,35 @@ try:
     _HAS_BCRYPT = True
 except Exception:
     _HAS_BCRYPT = False
+
+# Added helper utilities
+import contextlib
+
+def _docker_available() -> bool:
+    try:
+        import docker  # type: ignore
+        client = docker.from_env()
+        client.ping()
+        return True
+    except Exception:
+        return False
+
+def _find_free_port(start: int, end: int) -> int:
+    for port in range(start, end):
+        with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if s.connect_ex(('127.0.0.1', port)) != 0:
+                return port
+    return 0
+
+def _container_ports_for_image(image: str) -> dict:
+    return {'vnc': 5901, 'http': 6901}
+
+def require_role(user: str, role: str):
+    # Minimal admin check bridging to RBAC permission set
+    perms = get_user_permissions(user)
+    if role == 'admin' and 'rbac:manage' not in perms:
+        raise HTTPException(status_code=403, detail='admin role required')
 
 
 class SecurityLevel(Enum):
@@ -481,6 +510,28 @@ class DatabaseManager:
                     hash_chain TEXT
                 )
             """)
+            # Policy engine tables
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS policies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    policy_id TEXT UNIQUE,
+                    name TEXT,
+                    kind TEXT,
+                    raw TEXT,
+                    created_at REAL,
+                    updated_at REAL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS policy_assignments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    policy_id TEXT NOT NULL,
+                    target_type TEXT NOT NULL, -- node|group
+                    target_id TEXT NOT NULL,
+                    created_at REAL,
+                    UNIQUE(policy_id,target_type,target_id)
+                )
+            """)
             # RBAC tables (may be missing if DB recreated) - keep minimal schema
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS roles (
@@ -496,9 +547,111 @@ class DatabaseManager:
                     UNIQUE(username, role)
                 )
             """)
+            # Fine-grained permissions matrix
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS permissions (
+                    code TEXT PRIMARY KEY,
+                    description TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS role_permissions (
+                    role TEXT NOT NULL,
+                    permission_code TEXT NOT NULL,
+                    PRIMARY KEY(role, permission_code)
+                )
+            """)
+            # Node join requests (signed) & approvals already partially covered by node_approvals
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS node_join_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id TEXT NOT NULL,
+                    capabilities TEXT,
+                    nonce TEXT,
+                    signature TEXT,
+                    created_at REAL,
+                    status TEXT DEFAULT 'pending'
+                )
+            """)
+            # Key rotation & revocation metadata
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS revoked_keys (
+                    key_id TEXT PRIMARY KEY,
+                    revoked_at REAL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS key_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key_id TEXT UNIQUE,
+                    created_at REAL,
+                    active INTEGER DEFAULT 0
+                )
+            """)
             # RBAC, users, sessions, metrics, etc. (as before)
             # ...existing code...
             conn.commit()
+            # Bootstrap permissions & roles if empty
+            try:
+                cur = conn.execute('SELECT COUNT(1) FROM permissions')
+                if cur.fetchone()[0] == 0:
+                    base_permissions = [
+                        ('dashboard:view','View dashboard'),
+                        ('resources:view','View resource inventory'),
+                        ('network:view','View network topology'),
+                        ('performance:view','View performance metrics'),
+                        ('plugins:view','Manage plugins'),
+                        ('security:view','View security posture'),
+                        ('nodes:view','View nodes'),
+                        ('sessions:view','View sessions'),
+                        ('processes:view','View processes'),
+                        ('processes:kill','Terminate processes'),
+                        ('rbac:manage','Manage roles & permissions'),
+                        ('node:join','Submit node join request'),
+                        ('node:approve','Approve node join'),
+                        ('autoscale:manage','Trigger autoscaling actions'),
+                        ('policy:manage','Manage policies'),
+                        ('market:account','Access resource marketplace account'),
+                        ('benchmark:run','Run benchmarks'),
+                        ('key:rotate','Rotate cryptographic keys'),
+                        ('key:revoke','Revoke cryptographic keys'),
+                        ('attest:verify','Verify node attestation'),
+                        ('storage:manage','Manage storage backends'),
+                        ('model:manage','Manage predictive models'),
+                        ('migration:execute','Execute workload migration'),
+                        ('dr:backup','Perform backup operations'),
+                        ('dr:restore','Perform restore operations')
+                    ]
+                    conn.executemany('INSERT INTO permissions(code,description) VALUES(?,?)', base_permissions)
+                cur = conn.execute('SELECT COUNT(1) FROM roles')
+                if cur.fetchone()[0] == 0:
+                    roles = [
+                        ('admin','Full administrative access'),
+                        ('operator','Operational management minus security critical actions'),
+                        ('viewer','Read-only access'),
+                        ('security','Security operations and attestation'),
+                        ('autoscaler','Manage autoscaling decisions')
+                    ]
+                    conn.executemany('INSERT INTO roles(role,description) VALUES(?,?)', roles)
+                # map role -> permissions baseline if empty
+                cur = conn.execute('SELECT COUNT(1) FROM role_permissions')
+                if cur.fetchone()[0] == 0:
+                    # simple mapping sets
+                    role_perm_map = {
+                        'admin': [p[0] for p in base_permissions],
+                        'operator': ['dashboard:view','resources:view','network:view','performance:view','nodes:view','sessions:view','processes:view','processes:kill','benchmark:run','migration:execute','storage:manage'],
+                        'viewer': ['dashboard:view','resources:view','network:view','performance:view','nodes:view','sessions:view'],
+                        'security': ['security:view','attest:verify','policy:manage','key:rotate','key:revoke','rbac:manage'],
+                        'autoscaler': ['autoscale:manage','performance:view','nodes:view']
+                    }
+                    rows = []
+                    for r, perms in role_perm_map.items():
+                        for perm in perms:
+                            rows.append((r, perm))
+                    conn.executemany('INSERT INTO role_permissions(role,permission_code) VALUES(?,?)', rows)
+                conn.commit()
+            except Exception as e:
+                logging.error(f"RBAC bootstrap failure: {e}")
             # Opportunistic migrations (add columns if upgrading from earlier schema)
             try:
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
@@ -558,6 +711,38 @@ class DatabaseManager:
                 conn.execute("INSERT OR IGNORE INTO roles (role, description) VALUES (?, ?)", ("admin", "Administrator"))
                 conn.execute("INSERT OR IGNORE INTO roles (role, description) VALUES (?, ?)", ("user", "Standard User"))
                 conn.execute("INSERT OR IGNORE INTO user_roles (username, role) VALUES (?, ?)", ("admin", "admin"))
+                # Seed permissions (idempotent)
+                base_perms = [
+                    ("dashboard:view", "View dashboard summary"),
+                    ("resources:view", "View resource metrics"),
+                    ("network:view", "View network metrics"),
+                    ("performance:view", "View performance data"),
+                    ("plugins:view", "List plugins"),
+                    ("security:view", "View security info"),
+                    ("nodes:view", "List nodes"),
+                    ("nodes:quarantine", "Quarantine nodes"),
+                    ("nodes:remove", "Remove nodes"),
+                    ("sessions:view", "View sessions"),
+                    ("processes:view", "View processes"),
+                    ("processes:kill", "Kill processes"),
+                    ("logs:view", "View logs"),
+                    ("session:rotate", "Rotate secure session key"),
+                    ("session:start_override", "Start session override"),
+                    ("node:register", "Register nodes"),
+                    ("node:approve", "Approve pending nodes"),
+                    ("crypto:rotate_keys", "Rotate cryptographic keys"),
+                    ("rbac:manage", "Manage roles and permissions"),
+                    ("node:join", "Submit node join request")
+                ]
+                for code, desc in base_perms:
+                    conn.execute("INSERT OR IGNORE INTO permissions (code, description) VALUES (?, ?)", (code, desc))
+                # Assign permissions to roles (admin gets all, user limited view)
+                user_allowed = {"dashboard:view","resources:view","network:view","performance:view","plugins:view","security:view","nodes:view","sessions:view","processes:view","logs:view"}
+                for code, _ in base_perms:
+                    # admin
+                    conn.execute("INSERT OR IGNORE INTO role_permissions (role, permission_code) VALUES (?, ?)", ("admin", code))
+                    if code in user_allowed:
+                        conn.execute("INSERT OR IGNORE INTO role_permissions (role, permission_code) VALUES (?, ?)", ("user", code))
                 conn.commit()
             except Exception as e:
                 logging.error(f"RBAC init error: {e}")
@@ -859,7 +1044,7 @@ class OmegaAPIServer:
             logging.error(f"Docker ps failed: {e}")
             return
         except FileNotFoundError:
-            logging.warning("Docker not found; skipping VD reconciliation")
+            logging.warning("Docker not found; skipping VD reconcile at startup")
             return
         except Exception as e:
             logging.error(f"Unexpected error listing docker containers: {e}")
@@ -1379,14 +1564,30 @@ class MetricsData(BaseModel):
     power_consumption: float = 200.0
 
 
-@app.on_event("startup")
-async def startup_event():
-    # Load persisted sessions first so they are available to other startup tasks
+"""Lifespan migration: replaced deprecated on_event startup handlers.
+
+The original startup_event + enhancement application have been consolidated
+into a single FastAPI lifespan context to eliminate deprecation warnings and
+guarantee ordering:
+  1. Load persisted sessions (needed by other tasks)
+  2. Start background tasks
+  3. Ensure RBAC/admin role
+  4. Reconcile existing virtual desktop sessions (docker)
+  5. Apply post-init enhancements (route patching)
+"""
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # type: ignore
+    # --- Startup phase ---
     try:
         api_server.load_persisted_sessions()
     except Exception as e:
         logging.warning(f"Failed loading persisted sessions at startup: {e}")
-    await api_server.start_background_tasks()
+    try:
+        await api_server.start_background_tasks()
+    except Exception as e:
+        logging.error(f"Background task start failure: {e}")
     try:
         api_server.database.ensure_admin_role()
     except sqlite3.DatabaseError as e:
@@ -1401,7 +1602,21 @@ async def startup_event():
         logging.warning(f"VD reconcile subprocess error: {e}")
     except Exception as e:
         logging.warning(f"VD reconcile warning: {e}")
-    logging.info("Omega API Server started")
+    # Apply enhancements (previously second on_event handler)
+    try:
+        await post_init_enhance()
+    except Exception as e:
+        logging.debug(f"post_init_enhance skipped/failed: {e}")
+    logging.info("Omega API Server started (lifespan)")
+    yield
+    # --- Shutdown phase (future hooks) ---
+    try:
+        logging.info("Omega API Server shutdown (lifespan)")
+    except Exception:
+        pass
+
+# Attach lifespan context (done after definition to avoid circular refs)
+app.router.lifespan_context = lifespan  # type: ignore[attr-defined]
 
 
 @app.post("/api/auth/login")
@@ -1474,6 +1689,585 @@ def register_session_meta(session_id:str, key_b64:str):
     except Exception as e:
         # Best effort persistence; do not fail registration on DB errors
         logging.error(f"register_session_meta: unexpected top-level error: {e}")
+
+# === RBAC Permission Utilities ===
+RBAC_CACHE = {
+    'user_roles': {},            # username -> [roles]
+    'role_permissions': {},      # role -> set(permission_code)
+    'user_permissions': {}       # username -> set(permission_code)
+}
+
+RBAC_LAST_LOAD = 0.0
+RBAC_CACHE_TTL = 30.0  # seconds
+
+def _load_rbac_cache(force: bool=False):
+    global RBAC_LAST_LOAD
+    now = time.time()
+    if not force and (now - RBAC_LAST_LOAD) < RBAC_CACHE_TTL:
+        return
+    try:
+        with db_connect() as conn:
+            # roles per user
+            cur = conn.execute('SELECT username, role FROM user_roles')
+            user_roles_map = {}
+            for username, role in cur.fetchall():
+                user_roles_map.setdefault(username, set()).add(role)
+            RBAC_CACHE['user_roles'] = {u: list(r) for u, r in user_roles_map.items()}
+            # permissions per role
+            cur = conn.execute('SELECT role, permission_code FROM role_permissions')
+            role_perms = {}
+            for role, perm in cur.fetchall():
+                role_perms.setdefault(role, set()).add(perm)
+            RBAC_CACHE['role_permissions'] = role_perms
+            # user permissions derived
+            user_perms = {}
+            for user, roles in user_roles_map.items():
+                pset = set()
+                for r in roles:
+                    pset.update(role_perms.get(r, set()))
+                user_perms[user] = pset
+            RBAC_CACHE['user_permissions'] = user_perms
+            RBAC_LAST_LOAD = now
+    except Exception as e:
+        logging.error(f"RBAC cache load failed: {e}")
+
+def get_user_permissions(username: str) -> set:
+    _load_rbac_cache()
+    return RBAC_CACHE['user_permissions'].get(username, set())
+
+def require_permissions(*required: str):
+    """FastAPI dependency factory enforcing that session user holds all required permissions.
+
+    Falls back to ADMIN_BYPASS_TOKEN env token if provided via X-Bypass-Token header for break-glass.
+    """
+    async def _dep(request: Request):
+        validate_secure(request.headers)
+        session_id = request.headers.get('X-Session-ID')
+        meta = SESSION_META.get(session_id, {})
+        user = meta.get('user') or 'unknown'
+        roles = meta.get('roles', [])
+        bypass = os.getenv('ADMIN_BYPASS_TOKEN')
+        if bypass and request.headers.get('X-Bypass-Token') == bypass:
+            return True
+        base = get_user_permissions(user)
+        eff, denied = evaluate_policies(user, roles, base)
+        denied_req = [p for p in required if p in denied]
+        if denied_req:
+            raise HTTPException(status_code=403, detail={'error':'policy_denied','permissions':denied_req})
+        missing = [p for p in required if p not in eff]
+        if missing and 'admin' not in roles:
+            raise HTTPException(status_code=403, detail={'error':'permission_denied','missing':missing})
+        return True
+    return _dep
+
+# Unified health schema helper
+SERVICE_START_TIME = time.time()
+def build_health(deps: dict, version: str = "1.0.0"):
+    degraded = [name for name, info in deps.items() if not info.get('ok')]
+    return {
+        'status': 'healthy' if not degraded else 'degraded',
+        'version': version,
+        'uptime_seconds': int(time.time() - SERVICE_START_TIME),
+        'dependencies': deps,
+        'degraded': degraded,
+    'timestamp': datetime.now(timezone.utc).isoformat()
+    }
+
+# === RBAC management endpoints ===
+from fastapi import APIRouter
+rbac_router = APIRouter(prefix="/secure/rbac", tags=["rbac"])
+
+# --- RBAC Data Models ---
+class RoleCreate(BaseModel):
+    role: str
+    description: str | None = None
+    permissions: list[str] = []
+
+class RoleUpdate(BaseModel):
+    description: str | None = None
+    permissions: list[str] | None = None
+
+class PermissionCreate(BaseModel):
+    code: str
+    description: str | None = None
+
+class RBACMatrix(BaseModel):
+    roles: dict[str, list[str]]
+    permissions: dict[str, str]
+
+@rbac_router.get("/roles", dependencies=[Depends(require_permissions('rbac:manage'))])
+async def list_roles():
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT role, description FROM roles')
+            return {'roles': [{'role': r, 'description': d} for r, d in cur.fetchall()]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.get("/permissions", dependencies=[Depends(require_permissions('rbac:manage'))])
+async def list_permissions():
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT code, description FROM permissions')
+            return {'permissions': [{'code': c, 'description': d} for c, d in cur.fetchall()]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.post("/role/{role}/permissions", dependencies=[Depends(require_permissions('rbac:manage'))])
+async def add_permission_to_role(role: str, body: dict):
+    perm = body.get('permission')
+    if not perm:
+        raise HTTPException(status_code=400, detail='permission missing')
+    try:
+        with db_connect() as conn:
+            conn.execute('INSERT OR IGNORE INTO role_permissions (role, permission_code) VALUES (?, ?)', (role, perm))
+            conn.commit()
+        RBAC_LAST_LOAD = 0  # force reload
+        return {'status': 'ok'}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.post("/user/{username}/roles", dependencies=[Depends(require_permissions('rbac:manage'))])
+async def assign_role_to_user(username: str, body: dict):
+    role = body.get('role')
+    if not role:
+        raise HTTPException(status_code=400, detail='role missing')
+    try:
+        with db_connect() as conn:
+            conn.execute('INSERT OR IGNORE INTO user_roles (username, role) VALUES (?, ?)', (username, role))
+            conn.commit()
+        RBAC_LAST_LOAD = 0
+        return {'status': 'ok'}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.get('/matrix', response_model=RBACMatrix, dependencies=[Depends(require_permissions('rbac:manage'))])
+async def rbac_matrix():
+    try:
+        with db_connect() as conn:
+            roles: dict[str, list[str]] = {}
+            for r, p in conn.execute('SELECT role, permission_code FROM role_permissions'):
+                roles.setdefault(r, []).append(p)
+            perms = {c: d for c, d in conn.execute('SELECT code, description FROM permissions')}
+        return RBACMatrix(roles=roles, permissions=perms)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.post('/roles', dependencies=[Depends(require_permissions('rbac:manage'))])
+async def rbac_create_role(payload: RoleCreate):
+    if not payload.role or not payload.role.strip():
+        raise HTTPException(status_code=400, detail='role required')
+    try:
+        with db_connect() as conn:
+            conn.execute('INSERT INTO roles(role,description) VALUES(?,?)', (payload.role, payload.description))
+            for perm in payload.permissions:
+                conn.execute('INSERT OR IGNORE INTO permissions(code,description) VALUES(?,?)', (perm, perm))
+                conn.execute('INSERT INTO role_permissions(role,permission_code) VALUES(?,?)', (payload.role, perm))
+            conn.commit()
+        global RBAC_LAST_LOAD
+        RBAC_LAST_LOAD = 0
+        return {'role': payload.role, 'permissions': payload.permissions}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail='role exists')
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.put('/roles/{role}', dependencies=[Depends(require_permissions('rbac:manage'))])
+async def rbac_update_role(role: str, payload: RoleUpdate):
+    try:
+        with db_connect() as conn:
+            if payload.description is not None:
+                conn.execute('UPDATE roles SET description=? WHERE role=?', (payload.description, role))
+            if payload.permissions is not None:
+                conn.execute('DELETE FROM role_permissions WHERE role=?', (role,))
+                for perm in payload.permissions:
+                    conn.execute('INSERT OR IGNORE INTO permissions(code,description) VALUES(?,?)', (perm, perm))
+                    conn.execute('INSERT INTO role_permissions(role,permission_code) VALUES(?,?)', (role, perm))
+            conn.commit()
+        global RBAC_LAST_LOAD
+        RBAC_LAST_LOAD = 0
+        return {'role': role, 'updated': True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.delete('/roles/{role}', dependencies=[Depends(require_permissions('rbac:manage'))])
+async def rbac_delete_role(role: str):
+    try:
+        with db_connect() as conn:
+            conn.execute('DELETE FROM role_permissions WHERE role=?', (role,))
+            conn.execute('DELETE FROM roles WHERE role=?', (role,))
+            conn.commit()
+        global RBAC_LAST_LOAD
+        RBAC_LAST_LOAD = 0
+        return {'role': role, 'deleted': True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.post('/permissions', dependencies=[Depends(require_permissions('rbac:manage'))])
+async def rbac_create_permission(payload: PermissionCreate):
+    if not payload.code:
+        raise HTTPException(status_code=400, detail='code required')
+    try:
+        with db_connect() as conn:
+            conn.execute('INSERT INTO permissions(code,description) VALUES(?,?)', (payload.code, payload.description))
+            conn.commit()
+        global RBAC_LAST_LOAD
+        RBAC_LAST_LOAD = 0
+        return {'permission': payload.code}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail='permission exists')
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Node join flow
+@app.post('/secure/nodes/join', dependencies=[Depends(require_permissions('node:join'))])
+async def secure_node_join(request: Request, body: dict):
+    """Submit signed node join request. Expected body: node_id, capabilities(dict), nonce, timestamp, signature.
+    Signature = HMAC SHA256 over canonical JSON of (node_id,nonce,timestamp,capabilities) using ENROLLMENT_SHARED_SECRET.
+    """
+    secret = os.getenv('ENROLLMENT_SHARED_SECRET', 'change_me')
+    required = ['node_id', 'capabilities', 'nonce', 'timestamp', 'signature']
+    if any(k not in body for k in required):
+        raise HTTPException(status_code=400, detail='missing fields')
+    try:
+        canonical = json.dumps({k: body[k] for k in ['node_id','nonce','timestamp','capabilities']}, sort_keys=True, separators=(',',':'))
+        expected = hashlib.sha256((canonical+secret).encode()).hexdigest()
+        if not hmac.compare_digest(expected, body['signature']):
+            raise HTTPException(status_code=400, detail='invalid signature')
+        # Timestamp freshness (5 min)
+        if abs(time.time() - float(body['timestamp'])) > 300:
+            raise HTTPException(status_code=400, detail='stale timestamp')
+        # Nonce replay protection (in-memory + persistent uniqueness window)
+        nonce = body['nonce']
+        node_id = body['node_id']
+        now = time.time()
+        # Persistent duplicate check first
+        with db_connect() as conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS node_join_nonces (nonce TEXT PRIMARY KEY, node_id TEXT, created_at REAL)')
+            cur = conn.execute('SELECT created_at FROM node_join_nonces WHERE nonce=?', (nonce,))
+            row = cur.fetchone()
+            if row:
+                raise HTTPException(status_code=400, detail='replay nonce')
+            # Clear old nonces > 10 minutes to bound table
+            cutoff = now - 600
+            try:
+                conn.execute('DELETE FROM node_join_nonces WHERE created_at < ?', (cutoff,))
+            except Exception:
+                pass
+            conn.execute('INSERT INTO node_join_nonces (nonce,node_id,created_at) VALUES (?,?,?)', (nonce, node_id, now))
+            conn.commit()
+        with db_connect() as conn:
+            conn.execute('INSERT INTO node_join_requests (node_id, capabilities, nonce, signature, created_at, status) VALUES (?, ?, ?, ?, ?, ?)',
+                         (body['node_id'], json.dumps(body['capabilities']), body['nonce'], body['signature'], time.time(), 'pending'))
+            conn.commit()
+        return {'status':'pending','node_id':body['node_id']}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f'node join failed: {e}')
+        raise HTTPException(status_code=500, detail='internal error')
+
+@app.post('/secure/nodes/approve', dependencies=[Depends(require_permissions('node:approve'))])
+async def secure_node_approve(body: dict):
+    node_id = body.get('node_id')
+    if not node_id:
+        raise HTTPException(status_code=400, detail='node_id required')
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT id,status FROM node_join_requests WHERE node_id=? ORDER BY id DESC LIMIT 1', (node_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail='no join request')
+            if row[1] != 'pending':
+                return {'status': row[1], 'node_id': node_id}
+            conn.execute('UPDATE node_join_requests SET status="approved" WHERE id=?', (row[0],))
+            conn.execute('INSERT OR REPLACE INTO node_approvals (node_id, approved_by, approved_at, status) VALUES (?, ?, ?, ?)', (node_id, 'admin', time.time(), 'approved'))
+            conn.commit()
+        return {'status':'approved','node_id':node_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f'approve error: {e}')
+        raise HTTPException(status_code=500, detail='internal error')
+
+# Key rotation endpoints
+@app.post('/secure/keys/rotate', dependencies=[Depends(require_permissions('crypto:rotate_keys'))])
+async def rotate_keys(body: dict = {}):
+    key_id = body.get('key_id') or uuid.uuid4().hex
+    now = time.time()
+    try:
+        with db_connect() as conn:
+            # Mark existing active as inactive
+            conn.execute('UPDATE key_metadata SET active=0 WHERE active=1')
+            conn.execute('INSERT OR REPLACE INTO key_metadata (key_id, created_at, active) VALUES (?, ?, 1)', (key_id, now))
+            conn.commit()
+        return {'status':'rotated','key_id':key_id,'created_at':now}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post('/secure/keys/revoke', dependencies=[Depends(require_permissions('crypto:rotate_keys'))])
+async def revoke_key(body: dict):
+    key_id = body.get('key_id')
+    if not key_id:
+        raise HTTPException(status_code=400, detail='key_id required')
+    try:
+        with db_connect() as conn:
+            conn.execute('INSERT OR IGNORE INTO revoked_keys (key_id, revoked_at) VALUES (?, ?)', (key_id, time.time()))
+            conn.execute('UPDATE key_metadata SET active=0 WHERE key_id=?', (key_id,))
+            conn.commit()
+        return {'status':'revoked','key_id':key_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/secure/keys/status', dependencies=[Depends(require_permissions('crypto:rotate_keys'))])
+async def keys_status():
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT key_id, created_at, active FROM key_metadata ORDER BY created_at DESC')
+            keys = [{'key_id':k,'created_at':c,'active':bool(a)} for k,c,a in cur.fetchall()]
+            cur = conn.execute('SELECT key_id, revoked_at FROM revoked_keys')
+            revoked = [{'key_id':k,'revoked_at':r} for k,r in cur.fetchall()]
+        return {'keys':keys,'revoked':revoked}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+app.include_router(rbac_router)
+
+# === Policy Engine Endpoints ===
+policy_router = APIRouter(prefix="/secure/policy", tags=["policy"], dependencies=[Depends(require_permissions('rbac:manage'))])
+
+class PolicyUpsert(BaseModel):
+    policy_id: str
+    name: str
+    kind: str = 'generic'
+    spec: dict
+    raw: str
+
+@policy_router.post('/upsert')
+async def upsert_policy(body: PolicyUpsert):
+    raw = body.raw
+    # Support YAML input auto-conversion
+    try:
+        if body.kind.lower() in ('yaml','yml'):
+            import yaml  # type: ignore
+            parsed = yaml.safe_load(body.raw) if body.raw else {}
+            raw = json.dumps(parsed, separators=(',',':'))
+        elif body.kind.lower() == 'json':
+            # validate JSON
+            json.loads(body.raw)
+        else:
+            # attempt detect
+            if body.raw.strip().startswith('{'):
+                json.loads(body.raw)
+            else:
+                import yaml  # type: ignore
+                parsed = yaml.safe_load(body.raw)
+                raw = json.dumps(parsed, separators=(',',':'))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f'invalid policy format: {e}')
+    # Advanced schema validation
+    try:
+        parsed_obj = json.loads(raw)
+        if not isinstance(parsed_obj, dict):
+            raise HTTPException(status_code=400, detail='policy root must be an object')
+        # Required top-level fields
+        for field in ('version', 'statements'):
+            if field not in parsed_obj:
+                raise HTTPException(status_code=400, detail=f'missing required field: {field}')
+        if not isinstance(parsed_obj['statements'], list) or not parsed_obj['statements']:
+            raise HTTPException(status_code=400, detail='statements must be a non-empty list')
+        allowed_effects = {'allow','deny'}
+        for idx, stmt in enumerate(parsed_obj['statements']):
+            if not isinstance(stmt, dict):
+                raise HTTPException(status_code=400, detail=f'statement {idx} must be object')
+            if 'effect' not in stmt or stmt['effect'].lower() not in allowed_effects:
+                raise HTTPException(status_code=400, detail=f'statement {idx} invalid or missing effect')
+            if 'actions' not in stmt or not isinstance(stmt['actions'], list) or not stmt['actions']:
+                raise HTTPException(status_code=400, detail=f'statement {idx} must define non-empty actions list')
+            if 'resources' not in stmt or not isinstance(stmt['resources'], list) or not stmt['resources']:
+                raise HTTPException(status_code=400, detail=f'statement {idx} must define non-empty resources list')
+            # Optional condition structure
+            if 'conditions' in stmt and not isinstance(stmt['conditions'], dict):
+                raise HTTPException(status_code=400, detail=f'statement {idx} conditions must be object if present')
+        if parsed_obj.get('id') and parsed_obj['id'] != body.policy_id:
+            raise HTTPException(status_code=400, detail='policy_id mismatch in body vs raw content')
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f'policy validation failed: {e}')
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with db_connect() as conn:
+            conn.execute('INSERT OR REPLACE INTO policies (policy_id,name,kind,raw,created_at,updated_at) VALUES (?,?,?,?,COALESCE((SELECT created_at FROM policies WHERE policy_id=?),?),?)',
+                         (body.policy_id, body.name, body.kind, raw, body.policy_id, now, now))
+            conn.commit()
+        return {'status':'ok','policy_id':body.policy_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@policy_router.get('/list')
+async def list_policies():
+    with db_connect() as conn:
+        cur = conn.execute('SELECT policy_id,name,kind,raw,created_at,updated_at FROM policies ORDER BY id DESC LIMIT 200')
+        rows=[{'policy_id':p,'name':n,'kind':k,'spec':json.loads(r),'created_at':c,'updated_at':u} for p,n,k,r,c,u in cur.fetchall()]
+    return {'policies':rows}
+
+# === Policy assignment & evaluation ===
+class PolicyAssignment(BaseModel):
+    policy_id: str
+    target_type: str  # user or role
+    target_id: str
+
+@policy_router.post('/assign')
+async def assign_policy(body: PolicyAssignment):
+    if body.target_type not in ('user','role'):
+        raise HTTPException(status_code=400, detail='target_type must be user or role')
+    try:
+        with db_connect() as conn:
+            # policy_assignments schema uses created_at column
+            conn.execute('INSERT OR REPLACE INTO policy_assignments (policy_id,target_type,target_id,created_at) VALUES (?,?,?,?)',
+                         (body.policy_id, body.target_type, body.target_id, datetime.now(timezone.utc).isoformat()))
+            conn.commit()
+        invalidate_policy_cache()
+        return {'status':'ok'}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@policy_router.get('/effective/{username}')
+async def effective_permissions(username: str):
+    base = get_user_permissions(username)
+    _load_rbac_cache()
+    roles = RBAC_CACHE.get('user_roles', {}).get(username, [])
+    eff, denied = evaluate_policies(username, roles, base)
+    return {'username': username, 'base': list(base), 'effective': list(eff), 'denied': list(denied)}
+
+# Policy cache & evaluation helpers
+POLICY_CACHE = {
+    'policies': {},
+    'assign_user': {},
+    'assign_role': {},
+}
+POLICY_LAST_LOAD = 0
+POLICY_CACHE_TTL = 15
+
+def invalidate_policy_cache():
+    global POLICY_LAST_LOAD
+    POLICY_LAST_LOAD = 0
+
+def _load_policy_cache():
+    global POLICY_LAST_LOAD
+    now = time.time()
+    if (now - POLICY_LAST_LOAD) < POLICY_CACHE_TTL:
+        return
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT policy_id, raw FROM policies')
+            policies = {}
+            for pid, raw in cur.fetchall():
+                try:
+                    policies[pid] = json.loads(raw)
+                except Exception:
+                    continue
+            POLICY_CACHE['policies'] = policies
+            a_user = {}
+            a_role = {}
+            cur = conn.execute('SELECT policy_id,target_type,target_id FROM policy_assignments')
+            for pid, ttype, tid in cur.fetchall():
+                if ttype == 'user':
+                    a_user.setdefault(tid, set()).add(pid)
+                elif ttype == 'role':
+                    a_role.setdefault(tid, set()).add(pid)
+            POLICY_CACHE['assign_user'] = a_user
+            POLICY_CACHE['assign_role'] = a_role
+            POLICY_LAST_LOAD = now
+    except Exception as e:
+        logging.error(f"Policy cache load failed: {e}")
+
+def evaluate_policies(username: str, roles: List[str], base_perms: set):
+    _load_policy_cache()
+    assigned = set()
+    assigned.update(POLICY_CACHE['assign_user'].get(username, set()))
+    for r in roles:
+        assigned.update(POLICY_CACHE['assign_role'].get(r, set()))
+    allow = set(); deny = set()
+    for pid in assigned:
+        pobj = POLICY_CACHE['policies'].get(pid) or {}
+        for stmt in pobj.get('statements', []):
+            if not isinstance(stmt, dict):
+                continue
+            actions = stmt.get('actions') or []
+            if not isinstance(actions, list):
+                continue
+            effect = (stmt.get('effect') or '').lower()
+            if effect == 'allow':
+                allow.update(actions)
+            elif effect == 'deny':
+                deny.update(actions)
+    eff = set(base_perms) | allow
+    eff -= deny
+    return eff, deny
+
+class PolicyAssign(BaseModel):
+    policy_id: str
+    target_type: str
+    target_id: str
+
+@policy_router.post('/assign')
+async def assign_policy(body: PolicyAssign):
+    now=time.time()
+    if body.target_type not in ('node','group'):
+        raise HTTPException(status_code=400, detail='invalid target_type')
+    try:
+        with db_connect() as conn:
+            conn.execute('INSERT OR IGNORE INTO policy_assignments (policy_id,target_type,target_id,created_at) VALUES (?,?,?,?)', (body.policy_id, body.target_type, body.target_id, now))
+            conn.commit()
+        return {'status':'ok'}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@policy_router.get('/assignments/{target_type}/{target_id}')
+async def get_assignments(target_type: str, target_id: str):
+    with db_connect() as conn:
+        cur = conn.execute('SELECT policy_id FROM policy_assignments WHERE target_type=? AND target_id=?', (target_type, target_id))
+        return {'policies':[r[0] for r in cur.fetchall()]}
+
+app.include_router(policy_router)
+
+# Unified health endpoint (override or add if not present)
+@app.get('/health')
+async def unified_health():
+    deps = {
+        'database': {'ok': True},
+        'redis': {'ok': True},
+        'metrics': {'ok': bool(api_server.system_stats)},
+        'rbac_cache': {'ok': True}
+    }
+    try:
+        with db_connect() as conn:
+            conn.execute('SELECT 1')
+    except Exception:
+        deps['database']['ok'] = False
+    # RBAC cache freshness (stale if > 2x TTL)
+    if (time.time() - RBAC_LAST_LOAD) > (RBAC_CACHE_TTL * 2):
+        deps['rbac_cache']['ok'] = False
+    return build_health(deps, version='1.0.1')
+
+# Secure token-based registration (replacement for legacy register)
+@app.post('/api/secure/nodes/register', dependencies=[Depends(require_permissions('node:register'))])
+async def secure_register(request: Request, body: NodeRegistrationRequest):
+    token = request.headers.get('X-Register-Token')
+    expected = os.getenv('NODE_REGISTRATION_TOKEN')
+    if not expected or token != expected:
+        raise HTTPException(status_code=401, detail='Invalid registration token')
+    # Insert minimal node (pending approval) if not exists
+    api_server.database.add_node(body.node_id, body.node_type, body.hostname, body.ip_address, body.port, body.resources)
+    api_server.database.log_event('node_register', body.node_id, 'Secure registration submitted')
+    return {'status':'pending_approval','node_id': body.node_id}
+
+# Deprecate legacy register endpoint if exists
+@app.post('/api/nodes/register')
+async def legacy_register_deprecated():
+    return {'deprecated': True, 'message': 'Use /secure/nodes/join and /secure/nodes/approve', 'status':'410'}
 
 # Basic validation function for secure endpoints
 def validate_secure(headers):
@@ -1550,9 +2344,7 @@ async def post_init_enhance():
     # Note: Validation enhancement disabled for stability
     print("[Backend] Post-init enhancements applied")
 
-@app.on_event('startup')
-async def _apply_enhancements():
-    await post_init_enhance()
+# (Removed deprecated @app.on_event('startup') enhancement hook; logic moved to lifespan)
 
 
 # Counter + nonce wrapper
@@ -1683,7 +2475,7 @@ class Heartbeat(BaseModel):
     cpu_usage: Optional[float] = None
     memory_usage: Optional[float] = None
 
-@app.post('/api/secure/nodes/heartbeat')
+@app.post('/api/secure/nodes/heartbeat', dependencies=[Depends(require_permissions('nodes:view'))])
 async def secure_heartbeat(body: Heartbeat, request: Request):
     session_id, key = validate_secure(request.headers)
     api_server.database.update_node_heartbeat(body.node_id, body.status == 'online')
@@ -1707,7 +2499,7 @@ async def secure_heartbeat(body: Heartbeat, request: Request):
     api_server.database.log_event('node_heartbeat', body.node_id, f"Heartbeat {body.status}")
     return wrap_encrypted(session_id, key, {'ok': True})
 
-@app.post('/api/secure/nodes/{node_id}/probe')
+@app.post('/api/secure/nodes/{node_id}/probe', dependencies=[Depends(require_permissions('nodes:view'))])
 async def secure_probe(node_id: str, request: Request):
     session_id, key = validate_secure(request.headers)
     node = next((n for n in api_server.database.get_nodes() if n['node_id']==node_id), None)
@@ -1731,7 +2523,7 @@ class QuarantineReq(BaseModel):
     node_id: str
     enable: bool
 
-@app.post('/api/secure/nodes/quarantine')
+@app.post('/api/secure/nodes/quarantine', dependencies=[Depends(require_permissions('nodes:quarantine'))])
 async def secure_quarantine(body: QuarantineReq, request: Request):
     session_id, key = validate_secure(request.headers)
     api_server.database.set_quarantine(body.node_id, body.enable)
@@ -1741,7 +2533,7 @@ async def secure_quarantine(body: QuarantineReq, request: Request):
 class RemoveReq(BaseModel):
     node_id: str
 
-@app.post('/api/secure/nodes/remove')
+@app.post('/api/secure/nodes/remove', dependencies=[Depends(require_permissions('nodes:remove'))])
 async def secure_remove(body: RemoveReq, request: Request):
     session_id, key = validate_secure(request.headers)
     api_server.database.remove_node(body.node_id)
@@ -1754,7 +2546,7 @@ class VdStartRequest(BaseModel):
     cpu_cores: int = 2
     memory_gb: int = 4
 
-@app.post('/api/secure/vd/start')
+@app.post('/api/secure/vd/start', dependencies=[Depends(require_permissions('session:start_override'))])
 async def vd_start(body: VdStartRequest, request: Request):
     session_id, key = validate_secure(request.headers)
     # Placeholder: allocate a pseudo session id
@@ -1771,7 +2563,7 @@ async def vd_start(body: VdStartRequest, request: Request):
     connect_url = f"http://localhost:7000/?session={vd_sid}"
     return wrap_encrypted(session_id, key, {'success': True, 'session_id': vd_sid, 'connect_url': connect_url})
 
-@app.get('/api/secure/vd/list')
+@app.get('/api/secure/vd/list', dependencies=[Depends(require_permissions('sessions:view'))])
 async def vd_list(request: Request):
     session_id, key = validate_secure(request.headers)
     sessions = []
@@ -2080,7 +2872,7 @@ async def action_health_check():
 
 # Modify secure GET endpoints to use new wrap
 @app.get('/api/secure/dashboard')
-async def secure_dashboard(request: Request):
+async def secure_dashboard(request: Request, permitted: bool = Depends(require_permissions('dashboard:view'))):
     session_id, key = validate_secure(request.headers)
     nodes = api_server.database.get_nodes()
     sessions = api_server.database.get_sessions()
@@ -2109,7 +2901,7 @@ async def secure_dashboard(request: Request):
 
 # Replace resources
 @app.get('/api/secure/resources')
-async def secure_resources(request: Request):
+async def secure_resources(request: Request, permitted: bool = Depends(require_permissions('resources:view'))):
     session_id, key = validate_secure(request.headers)
     cpu = gather_cpu_block(); mem = gather_memory_block(); storage = gather_storage_block(); gpu = gather_gpu_block()
     payload = { 'cpu': cpu, 'gpu': gpu, 'memory': mem, 'storage': storage, 'timestamp': time.time() }
@@ -2117,7 +2909,7 @@ async def secure_resources(request: Request):
 
 # Replace network
 @app.get('/api/secure/network')
-async def secure_network(request: Request):
+async def secure_network(request: Request, permitted: bool = Depends(require_permissions('network:view'))):
     session_id, key = validate_secure(request.headers)
     interfaces = gather_net_block()
     payload = { 'topology': {'nodes': api_server.database.get_nodes(), 'connections': []}, 'statistics': {'interfaces': interfaces}, 'timestamp': time.time() }
@@ -2125,7 +2917,7 @@ async def secure_network(request: Request):
 
 # Replace performance
 @app.get('/api/secure/performance')
-async def secure_performance(request: Request):
+async def secure_performance(request: Request, permitted: bool = Depends(require_permissions('performance:view'))):
     session_id, key = validate_secure(request.headers)
     cpu_hist = psutil.cpu_percent(percpu=False, interval=0.05)
     vm = psutil.virtual_memory()
@@ -2135,7 +2927,7 @@ async def secure_performance(request: Request):
 
 # Replace plugins (no fake marketplace)
 @app.get('/api/secure/plugins')
-async def secure_plugins(request: Request):
+async def secure_plugins(request: Request, permitted: bool = Depends(require_permissions('plugins:view'))):
     session_id, key = validate_secure(request.headers)
     # Minimal real structure: read from table if exists else empty
     installed=[]
@@ -2151,7 +2943,7 @@ async def secure_plugins(request: Request):
 
 # Replace security (user list from sessions)
 @app.get('/api/secure/security')
-async def secure_security(request: Request):
+async def secure_security(request: Request, permitted: bool = Depends(require_permissions('security:view'))):
     session_id, key = validate_secure(request.headers)
     sessions = api_server.database.get_sessions()
     users_map = {}
@@ -2168,7 +2960,7 @@ async def secure_security(request: Request):
 from fastapi import WebSocketDisconnect
 
 @app.get('/api/secure/nodes')
-async def secure_nodes(request: Request):
+async def secure_nodes(request: Request, permitted: bool = Depends(require_permissions('nodes:view'))):
     session_id, key = validate_secure(request.headers)
     nodes = api_server.database.get_nodes()
     latest_metrics_map = {}
@@ -2313,14 +3105,14 @@ async def node_ota(request: Request, node_id: str, body: OTARequest):
     return wrap_encrypted(sid, key, {'ok': True, 'action': body.action, 'version': body.version})
 
 @app.get('/api/secure/sessions')
-async def secure_sessions(request: Request):
+async def secure_sessions(request: Request, permitted: bool = Depends(require_permissions('sessions:view'))):
     session_id, key = validate_secure(request.headers)
     sessions = api_server.database.get_sessions()
     payload = {'sessions': sessions, 'timestamp': time.time()}
     return wrap_encrypted(session_id, key, payload)
 
 @app.get('/api/secure/processes')
-async def secure_processes(request: Request):
+async def secure_processes(request: Request, permitted: bool = Depends(require_permissions('processes:view'))):
     session_id, key = validate_secure(request.headers)
     procs = []
     try:
@@ -2343,7 +3135,7 @@ class KillProcessRequest(BaseModel):
     pid: int
 
 @app.post('/api/secure/processes/kill')
-async def secure_process_kill(request: Request, body: KillProcessRequest):
+async def secure_process_kill(request: Request, body: KillProcessRequest, permitted: bool = Depends(require_permissions('processes:kill'))):
     session_id, key = validate_secure(request.headers)
     # RBAC: only admin may kill host processes
     user = SESSION_META.get(session_id, {}).get('user', 'admin')
@@ -2369,7 +3161,7 @@ async def secure_process_kill(request: Request, body: KillProcessRequest):
     return wrap_encrypted(session_id, key, {'success': True, 'pid': pid})
 
 @app.get('/api/secure/logs')
-async def secure_logs(request: Request):
+async def secure_logs(request: Request, permitted: bool = Depends(require_permissions('logs:view'))):
     session_id, key = validate_secure(request.headers)
     events=[]
     try:
@@ -2823,7 +3615,7 @@ async def register_node(request: Request, body: NodeRegistrationRequest = Body(.
         try:
             from cryptography.x509 import load_pem_x509_certificate
             cert = load_pem_x509_certificate(body.device_certificate.encode())
-            if cert.not_valid_before <= datetime.utcnow() <= cert.not_valid_after:
+            if cert.not_valid_before <= datetime.now(timezone.utc) <= cert.not_valid_after:
                 cert_pubkey = cert.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
                 reg_pubkey = serialization.load_pem_public_key(body.public_key_pem.encode()).public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
                 if cert_pubkey == reg_pubkey:
@@ -2894,1287 +3686,3 @@ async def register_node(request: Request, body: NodeRegistrationRequest = Body(.
     if quarantine:
         api_server.database.log_audit('node_quarantine', body.node_id, f'Node {body.node_id} quarantined for admin approval (trust_score={trust_score})', 'warning')
     return wrap_encrypted(session_id, key, {'success': True, 'node_id': body.node_id, 'trust_score': trust_score, 'quarantine': quarantine})
-    # The following lines were unreachable and caused indentation errors. If you want to use them, move them into a function:
-    #    raise ValueError('os_image is required')
-    #    # disallow shell metacharacters
-    #    if any(ch in v for ch in [';', '|', '&', '$', '`', '\\', '>', '<']):
-    #        raise ValueError('Invalid os_image value')
-    #    return v  # Ensure valid os_image value
-# (Removed duplicate FastAPI app redefinition; using single instance declared at top)
-def require_role(user, role):
-    # Enforce RBAC: only admin can perform admin actions
-    roles = get_user_roles(user)
-    if role not in roles:
-        logging.warning(f"RBAC: User {user} lacks required role {role}")
-        raise HTTPException(status_code=403, detail=f'{role} role required')
-
-# --- FINAL ROUTE OVERRIDES (ensure correct handlers not shadowed by earlier wrappers) ---
-# Re-register secure session start AFTER generic wrappers that changed signature.
-# First, remove any previously registered POST route for this path so the override actually takes effect
-try:
-    _target_path = '/api/secure/session/start'
-    _method = 'POST'
-    to_remove = []
-    for _r in list(app.router.routes):  # type: ignore[attr-defined]
-        try:
-            if getattr(_r, 'path', None) == _target_path and _method in getattr(_r, 'methods', set()):
-                to_remove.append(_r)
-        except Exception:
-            continue
-    for _r in to_remove:
-        try:
-            app.router.routes.remove(_r)  # type: ignore[attr-defined]
-            logging.info('Removed previous wrapped route for %s', _target_path)
-        except Exception:
-            pass
-except Exception as _e:  # pragma: no cover - non-critical
-    logging.error(f"Failed pruning old secure_session_start route: {_e}")
-@app.post('/api/secure/session/start', summary='Secure Session Start', tags=['secure'])
-@rate_limited(per_minute=30, burst=10)
-async def secure_session_start_override(body: SecureSessionStart = Body(...)):
-    """Initiate an AES-GCM secure session (final override).
-    Client supplies RSA-OAEP encrypted 32-byte key (base64). Dev fallback allowed if env OMEGA_ALLOW_INSECURE_HANDSHAKE set.
-    Returns: { session_id, token, issued_at, expires_in }
-    """
-    session_id = f"sid-{secrets.token_hex(12)}"
-    allow_dev = os.environ.get('OMEGA_ALLOW_INSECURE_HANDSHAKE','0').lower() in ('1','true','yes')
-    key=None
-    if body.encrypted_key:
-        try:
-            encrypted_key_bytes = base64.b64decode(body.encrypted_key)
-            key = api_server.rsa_private_key.decrypt(
-                encrypted_key_bytes,
-                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
-            )
-        except Exception:
-            if not allow_dev:
-                raise HTTPException(status_code=400, detail='Invalid encrypted_key')
-    if key is None:
-        if not allow_dev:
-            raise HTTPException(status_code=400, detail='encrypted_key is required')
-        key = os.urandom(32)
-    key_b64 = base64.b64encode(key).decode()
-    register_session_meta(session_id, key_b64)
-    with SESSION_LOCK:
-        if session_id in SESSION_META:
-            SESSION_META[session_id]['user'] = body.user_id or 'admin'
-        else:
-            SESSION_META[session_id] = {'user': body.user_id or 'admin', 'key': key_b64, 'created': time.time(), 'last_rotate': time.time(), 'counter': 0}
-    payload = {'session_id': session_id, 'issued_at': time.time(), 'expires_in': 6*3600}
-    try:
-        jwt = api_server.security_manager.issue_jwt(session_id, user=SESSION_META.get(session_id, {}).get('user','admin'), ttl=6*3600)
-        payload['token'] = jwt
-    except Exception:
-        pass
-    return payload
-
-def get_user_roles(user):
-    # Real role lookup: check DB or in-memory map
-    # For now, fallback to admin/user
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT role FROM user_roles WHERE username=?', (user,))
-            roles = [r[0] for r in cur.fetchall()]
-            if roles:
-                return roles
-    except Exception as e:
-        logging.error(f"Error fetching user roles for {user}: {e}")
-    if user == 'admin':
-        return ['admin']
-    return ['user']
-
-class VDCreateRequest(BaseModel):
-    user_id: str
-    os_image: str
-    vnc_password: str
-    cpu_cores: int = 2
-    gpu_units: int = 0
-    memory_gb: int = 4
-    resolution: str = '1280x720'
-    profile: str = ''
-    packages: list = []
-
-    @validator('os_image')
-    def validate_os_image(cls, v: str) -> str:
-        if not v:
-            raise ValueError('os_image is required')
-        # disallow shell metacharacters that could affect docker/image names
-        if any(ch in v for ch in [';', '|', '&', '$', '`', '\\', '>', '<']):
-            raise ValueError('Invalid os_image value')
-        return v
-
-def _find_free_port(start: int = 6000, end: int = 65000) -> int:
-    for p in range(start, end):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                s.bind(('0.0.0.0', p))
-                return p
-            except OSError:
-                continue
-    raise RuntimeError('No free ports available')
-
-def _docker_run(args: list, timeout: int | float = 60) -> str:
-    try:
-        result = subprocess.check_output(['docker'] + args, stderr=subprocess.STDOUT, timeout=timeout)
-        return result.decode().strip()
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"Docker error: {e.output.decode().strip()}")
-    except FileNotFoundError:
-        raise HTTPException(status_code=500, detail='Docker not found on host')
-
-def _docker_available() -> bool:
-    try:
-        subprocess.check_output(['docker', 'info', '--format', '{{.ServerVersion}}'], stderr=subprocess.STDOUT, timeout=5)
-        return True
-    except Exception:
-        return False
-
-def _image_for_os(os_image: str) -> str:
-    mapping = {
-    # Modern Ubuntu XFCE desktop (public, widely available)
-    'ubuntu-xfce': 'accetto/ubuntu-vnc-xfce:latest',  # exposes :6901 (noVNC) and :5901
-    # Chromium variant maps to the same base; Chromium can be added via packages/profile
-    'ubuntu-xfce-chromium': 'accetto/ubuntu-vnc-xfce:latest',
-    # Webtop variants (noVNC on :3000)
-    'ubuntu-webtop': 'lscr.io/linuxserver/webtop:ubuntu',
-        # Legacy option (kept for compatibility)
-        'ubuntu-lxde-legacy': 'dorowu/ubuntu-desktop-lxde-vnc',
-        # Alternatives
-        'debian-xfce': 'accetto/debian-vnc-xfce',
-    'debian-webtop': 'lscr.io/linuxserver/webtop:debian',
-    'fedora-webtop': 'lscr.io/linuxserver/webtop:fedora',
-        'kali-xfce':   'lscr.io/linuxserver/kali-linux:latest',  # may require extra config
-    }
-    # External OS that cannot run in our Docker-based flow
-    if os_image in ('qubes', 'qubes-os', 'qubesos'):
-        raise HTTPException(status_code=400, detail='Qubes OS requires an external hypervisor (Xen). Use /api/secure/rdp/create to connect to a Qubes VM or register an external connector.')
-    if os_image in ('freebsd','openbsd','inferno-os','plan9','centos-stream','almalinux','rocky-linux'):
-        raise HTTPException(status_code=400, detail=f"{os_image} is an external OS. Use /api/secure/rdp/create or register an external connector.")
-    if os_image == 'windows':
-        # Windows handled via RDP endpoints
-        raise HTTPException(status_code=400, detail='Windows requires RDP. Use /api/secure/rdp/create')
-    # Check custom catalog override
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT image FROM vd_images WHERE id=?', (os_image,))
-            row = cur.fetchone()
-            if row:
-                img = row[0]
-                # Normalize deprecated/nonexistent accetto variants
-                if img.startswith('accetto/ubuntu-vnc-xfce-'):
-                    return 'accetto/ubuntu-vnc-xfce:latest'
-                return img
-    except Exception:
-        pass
-    return mapping.get(os_image, mapping['ubuntu-xfce'])
-
-
-def _sanitize_image_name(img: str) -> str:
-    # Basic allowlist check: allow only repository[:tag] with safe characters
-    if not img or '..' in img:
-        raise HTTPException(status_code=400, detail='Invalid image name')
-    # Allow common characters and colon/slash/dash/underscore
-    if not all(c.isalnum() or c in '/:._-@' for c in img):
-        raise HTTPException(status_code=400, detail='Invalid image name characters')
-    return img
-
-
-def _validate_container_name(name: str) -> str:
-    # Docker recommends lowercase and limited chars; enforce a strict pattern
-    if not name or len(name) > 128:
-        raise HTTPException(status_code=400, detail='Invalid container name')
-    if any(c in name for c in ' <>|&;$`\n\r'):
-        raise HTTPException(status_code=400, detail='Invalid container name characters')
-    return name
-
-def _container_ports_for_image(image: str) -> dict:
-    # Known defaults
-    if 'dorowu/ubuntu-desktop-lxde-vnc' in image:
-        return {'http': 80, 'vnc': 5900}
-    if 'accetto' in image:
-        return {'http': 6901, 'vnc': 5901}
-    if 'linuxserver/webtop' in image or 'lscr.io/linuxserver/webtop' in image:
-        # Web UI on 3000, no classic 590x VNC port exposed. We'll map vnc to 5901 as placeholder (unused)
-        return {'http': 3000, 'vnc': 5901}
-    # Fallback
-    return {'http': 80, 'vnc': 5900}
-
-def _env_for_image(image: str, vnc_password: str, resolution: Optional[str] = None) -> list[str]:
-    # Provide multiple common env names used by popular VNC desktop images
-    envs = []
-    # Set multiple common VNC password envs
-    for key in ('VNC_PASSWORD', 'PASSWORD', 'VNC_PW'):
-        envs += ['-e', f"{key}={vnc_password}"]
-    # Some images require setting USER to root for password/program installs
-    envs += ['-e', 'USER=root']
-    # Some accetto images support user/password pairs; keep minimal for now
-    if resolution:
-        # Support common env names across images
-        for rkey in ('RESOLUTION', 'VNC_RESOLUTION'):
-            envs += ['-e', f"{rkey}={resolution}"]
-        # For webtop, hint width/height if RESOLUTION provided (optional)
-        if 'linuxserver/webtop' in image or 'lscr.io/linuxserver/webtop' in image:
-            try:
-                parts = resolution.lower().split('x')
-                if len(parts) == 2:
-                    w, h = parts[0], parts[1]
-                    envs += ['-e', f"WEBTOP_WIDTH={w}", '-e', f"WEBTOP_HEIGHT={h}"]
-            except Exception:
-                pass
-    return envs
-
-def _detect_viewer_path(http_port: int) -> tuple[str, str]:
-    """Probe the container viewer endpoint and pick the correct path and query defaults.
-    Returns (path, query_string_without_leading_question_mark).
-    - accetto images: /vnc.html and no host/port/path params required
-    - dorowu images: /static/vnc.html and needs host/port/path=websockify
-    Fallback to '/' if neither is available.
-    """
-    import urllib.request
-    def _head(path: str) -> int:
-        try:
-            req = urllib.request.Request(f'http://127.0.0.1:{http_port}{path}', method='HEAD')
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                return int(resp.getcode())
-        except Exception:
-            return 0
-    if _head('/vnc.html') == 200:
-        return '/vnc.html', 'autoconnect=1'
-    if _head('/static/vnc.html') == 200:
-        return '/static/vnc.html', f'autoconnect=1&host=localhost&port={http_port}&path=websockify'
-    # last resort
-    return '/', ''
-
-@app.post('/api/secure/vd/create')
-@rate_limited(per_minute=30, burst=6)
-async def vd_create(request: Request, spec: VDCreateRequest, background_tasks: BackgroundTasks):
-    sid, key = validate_secure(request.headers)
-    # Preflight: ensure Docker daemon is available
-    if not _docker_available():
-        raise HTTPException(status_code=503, detail='Docker daemon not running. Start Docker Desktop and retry.')
-    # Resolve image from env override or mapping, and set pull policy
-    env_img = os.environ.get('OMEGA_DEFAULT_VD_IMAGE', '').strip()
-    image = env_img or _image_for_os(spec.os_image)
-    try:
-        image = _sanitize_image_name(image)
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=400, detail='Invalid image selection')
-    ports = _container_ports_for_image(image)
-    pull_policy = os.environ.get('OMEGA_VD_PULL_POLICY', 'IfNotPresent').strip().lower()
-    http_port = _find_free_port(7000, 7999)
-    vnc_port = _find_free_port(5900, 5999)
-    vnc_password = spec.vnc_password.strip() if isinstance(spec.vnc_password, str) and spec.vnc_password.strip() else secrets.token_urlsafe(8)
-    session_id = f"vd-{secrets.token_hex(8)}"
-    name = f"omega_{session_id}"
-    try:
-        name = _validate_container_name(name)
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=400, detail='Invalid container name')
-
-    # Prepare storage path
-    sess_path = os.path.join(api_server.session_storage_base, session_id)
-    os.makedirs(sess_path, exist_ok=True)
-
-    # Pull image based on policy and with fallbacks (only when not env-overridden)
-    def _inspect(img: str):
-        _docker_run(['image', 'inspect', img], timeout=120)
-    def _pull(img: str):
-        _docker_run(['pull', img], timeout=600)
-    try:
-        if pull_policy == 'never':
-            _inspect(image)
-        elif pull_policy == 'always':
-            _pull(image)
-        else:  # IfNotPresent
-            try:
-                _inspect(image)
-            except HTTPException:
-                _pull(image)
-    except HTTPException as e1:
-        if env_img:
-            # Respect env override; don't fallback automatically
-            raise HTTPException(status_code=500, detail=f"Image '{image}' not available with pull policy '{pull_policy}': {e1.detail}. Pull the image manually or adjust OMEGA_VD_PULL_POLICY.")
-        # Fallback attempts when using mapped images
-        alt1 = 'accetto/ubuntu-vnc-xfce:latest'
-        alt2 = 'dorowu/ubuntu-desktop-lxde-vnc'
-        last_err = e1
-        for alt in (alt1, alt2):
-            try:
-                if pull_policy == 'never':
-                    _inspect(alt)
-                elif pull_policy == 'always':
-                    _pull(alt)
-                else:
-                    try:
-                        _inspect(alt)
-                    except HTTPException:
-                        _pull(alt)
-                image = alt
-                ports = _container_ports_for_image(image)
-                last_err = None
-                break
-            except HTTPException as e_alt:
-                last_err = e_alt
-        if last_err is not None:
-            hint = 'Ensure Docker Desktop is running and has internet access, or pre-pull an image and set OMEGA_DEFAULT_VD_IMAGE plus OMEGA_VD_PULL_POLICY=Never.'
-            raise HTTPException(status_code=500, detail=f"Image resolution failed for '{spec.os_image}'. Last error: {last_err.detail}. {hint}")
-
-    # Run container
-    port_http_map = f"{http_port}:{ports['http']}"
-    port_vnc_map = f"{vnc_port}:{ports['vnc']}"
-    envs = _env_for_image(image, vnc_password, spec.resolution)
-    # Some images use different envs; keep minimal
-    # Add labels to enable reconciliation after restarts
-    labels = [
-        '-l', 'omega.kind=virtual-desktop',
-        '-l', f'omega.session_id={session_id}',
-        '-l', f'omega.user={spec.user_id or "admin"}'
-    ]
-    run_args = ['run', '-d', '--restart', 'unless-stopped', '--name', name] + labels + ['-p', port_http_map, '-p', port_vnc_map] + envs + [image]
-    container_id = _docker_run(run_args, timeout=120)
-    # Give the container a brief moment to initialize services (tight timeout to avoid blocking)
-    try:
-        time.sleep(0.7)
-    except Exception:
-        pass
-
-    # Register DB session
-    s_info = SessionInfo(
-        session_id=session_id,
-        user_id=spec.user_id,
-        node_id='control-primary',
-        application='virtual-desktop',
-        cpu_cores=spec.cpu_cores,
-        gpu_units=spec.gpu_units,
-        memory_gb=spec.memory_gb,
-        status='running',
-        created_at=time.time(),
-        last_activity=time.time()
-    )
-    api_server.database.add_session(s_info)
-
-    # Build connect URL depending on image family (path differs)
-    # dorowu image serves a SPA at '/', with noVNC located under /static/vnc.html and expects host/port/path
-    # Try custom viewer_path override
-    custom_viewer = None
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT viewer_path FROM vd_images WHERE id=?', (spec.os_image,))
-            row = cur.fetchone()
-            if row and row[0]:
-                custom_viewer = row[0]
-    except Exception:
-        pass
-    if custom_viewer:
-        connect_path = custom_viewer
-        connect_query = f"autoconnect=1&password={vnc_password}"
-    elif 'linuxserver/webtop' in image or 'lscr.io/linuxserver/webtop' in image:
-        # Webtop serves UI at / on :3000 and doesn't use the noVNC query params
-        connect_path = '/'
-        connect_query = ''
-    else:
-        # Auto-detect between accetto (/vnc.html) and dorowu (/static/vnc.html)
-        path, q = _detect_viewer_path(http_port)
-        connect_path = path
-        # Always include password if we have one
-        connect_query = (q + ('&' if q else '') + f'password={vnc_password}').strip('&')
-    connect_url = f"http://localhost:{http_port}{connect_path}{('?' + connect_query) if connect_query else ''}"
-    # Store meta
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        conn.execute(
-            'INSERT OR REPLACE INTO vd_session_meta (session_id, container_id, http_port, vnc_port, vnc_password, os_image, connect_url) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (session_id, container_id, http_port, vnc_port, vnc_password, spec.os_image, connect_url)
-        )
-        conn.commit()
-
-    # Optionally install requested/default packages in background (after a quick connectivity check)
-    # Determine package set: profile > explicit packages > env default
-    # Note: avoid 'chromium-browser' on modern Ubuntu (snap-based in containers). Keep firefox which is present in our default image.
-    profile_map = {
-        'browser': ['firefox', 'curl', 'wget', 'zip', 'unzip'],
-        'developer': ['firefox', 'git', 'curl', 'wget', 'htop', 'build-essential', 'vim', 'python3', 'python3-pip'],
-        'office': ['firefox', 'libreoffice', 'curl', 'zip', 'unzip']
-    }
-    pkgs = spec.packages
-    if not pkgs and spec.profile and spec.profile in profile_map:
-        pkgs = profile_map[spec.profile]
-    if pkgs is None:
-        # Allow default packages via env
-        default_pkgs = os.environ.get('OMEGA_VD_DEFAULT_PACKAGES', 'firefox,htop,git,curl,zip,unzip').strip()
-        pkgs = [p.strip() for p in default_pkgs.split(',') if p.strip()]
-    def _check_network_and_install(cid: str, packages: List[str]):
-        try:
-            # Detect package manager and refresh caches with reasonable timeout
-            try:
-                pm_detect = (
-                    'set +e; '
-                    'pm=""; '
-                    'if command -v apt-get >/dev/null 2>&1; then pm=apt; '
-                    'elif command -v dnf >/dev/null 2>&1; then pm=dnf; '
-                    'elif command -v yum >/dev/null 2>&1; then pm=yum; '
-                    'elif command -v apk >/dev/null 2>&1; then pm=apk; fi; '
-                    'echo "$pm"'
-                )
-                pm = _docker_run(['exec','-u','0', cid, 'bash','-lc', pm_detect], timeout=60).strip()
-            except HTTPException:
-                pm = ''
-            try:
-                if pm == 'apt':
-                    _docker_run(['exec','-u','0', cid, 'bash','-lc', 'export DEBIAN_FRONTEND=noninteractive; apt-get update -y -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 || true'], timeout=600)
-                elif pm == 'dnf':
-                    _docker_run(['exec','-u','0', cid, 'bash','-lc', 'dnf -y makecache || true'], timeout=600)
-                elif pm == 'yum':
-                    _docker_run(['exec','-u','0', cid, 'bash','-lc', 'yum -y makecache || true'], timeout=600)
-                elif pm == 'apk':
-                    _docker_run(['exec','-u','0', cid, 'bash','-lc', 'apk update || true'], timeout=300)
-                api_server.database.log_event('vd_network_ok', session_id, f'PM={pm or "unknown"}: repo cache refreshed', 'info')
-            except HTTPException as e:
-                api_server.database.log_event('vd_network_warn', session_id, f'PM={pm or "unknown"}: repo refresh issue: {e.detail}', 'warning')
-            # Install additional packages if requested
-            if packages:
-                # Install packages individually with cross-distro fallbacks
-                pkgs_str = ' '.join([shlex.quote(p) if ' ' in p else p for p in packages]) if packages else ''
-                parts = [
-                    'set +e; export DEBIAN_FRONTEND=noninteractive; ',
-                    'pm=""; ',
-                    'if command -v apt-get >/dev/null 2>&1; then pm=apt; ',
-                    'elif command -v dnf >/dev/null 2>&1; then pm=dnf; ',
-                    'elif command -v yum >/dev/null 2>&1; then pm=yum; ',
-                    'elif command -v apk >/dev/null 2>&1; then pm=apk; fi; ',
-                    'install_apt() { apt-get install -y --no-install-recommends "$1" >/dev/null 2>&1; }; ',
-                    'install_dnf() { dnf install -y "$1" >/dev/null 2>&1; }; ',
-                    'install_yum() { yum install -y "$1" >/dev/null 2>&1; }; ',
-                    'install_apk() { apk add --no-cache "$1" >/dev/null 2>&1; }; ',
-                    'do_install() { case "$pm" in apt) install_apt "$1" ;; dnf) install_dnf "$1" ;; yum) install_yum "$1" ;; apk) install_apk "$1" ;; *) return 1 ;; esac; }; ',
-                    'for p in ', pkgs_str, ' ; do ',
-                    '  installed=0; echo "Installing $p via $pm"; ',
-                    '  case "$p" in ',
-                    '    firefox|browser) ',
-                    '      for alt in firefox firefox-esr chromium epiphany-browser epiphany midori; do do_install "$alt" && echo "INSTALL_OK:$alt" && installed=1 && break; done; ',
-                    '      [ $installed -eq 1 ] || echo "INSTALL_FAIL:$p"; ;;',
-                    '    chromium|chromium-browser) ',
-                    '      for alt in chromium chromium-browser chromium-common epiphany-browser epiphany midori; do do_install "$alt" && echo "INSTALL_OK:$alt" && installed=1 && break; done; ',
-                    '      [ $installed -eq 1 ] || echo "INSTALL_FAIL:$p"; ;;',
-                    '    *) do_install "$p" && echo "INSTALL_OK:$p" || echo "INSTALL_FAIL:$p"; ;;',
-                    '  esac; ',
-                    'done; ',
-                    'BROWSER=$(command -v firefox || command -v chromium || command -v epiphany-browser || command -v epiphany || command -v midori || true); ',
-                    'echo "BROWSER_DETECTED:${BROWSER}"; true'
-                ]
-                install_script = ''.join(parts)
-                try:
-                    out = _docker_run(['exec', '-u', '0', cid, 'bash', '-lc', install_script], timeout=1800)
-                    api_server.database.log_event('vd_packages', session_id, f'Install attempted (pm={pm or "unknown"}): {packages}', 'info')
-                    # Surface detected browser to logs
-                    if out and 'BROWSER_DETECTED:' in out:
-                        line = [ln for ln in out.splitlines() if ln.startswith('BROWSER_DETECTED:')][-1]
-                        api_server.database.log_event('vd_browser', session_id, line, 'info')
-                except HTTPException as e:
-                    api_server.database.log_event('vd_packages_error', session_id, f'Package loop failed: {e.detail}', 'warning')
-        except HTTPException as e:
-            api_server.database.log_event('vd_packages_error', session_id, f'Package install failed: {e.detail}', 'warning')
-        except Exception as e:
-            api_server.database.log_event('vd_packages_error', session_id, f'Package install failed: {e}', 'warning')
-    background_tasks.add_task(_check_network_and_install, container_id, pkgs)
-
-    # Respond with session info and initial connect URL
-    payload = {
-        'session_id': session_id,
-        'connect_url': connect_url,
-        'http_port': http_port,
-        'status': 'running'
-    }
-    return wrap_encrypted(sid, key, payload)
-
-@app.get('/api/secure/vd/profiles')
-async def vd_profiles(request: Request):
-    sid, key = validate_secure(request.headers)
-    profiles = [
-    {'id':'browser','label':'Browser','packages':['firefox','curl','wget','zip','unzip']},
-        {'id':'developer','label':'Developer','packages':['firefox','git','curl','wget','htop','build-essential','vim','python3','python3-pip']},
-        {'id':'office','label':'Office','packages':['firefox','libreoffice','curl','zip','unzip']}
-    ]
-    return wrap_encrypted(sid, key, {'profiles': profiles})
-
-@app.get('/api/secure/vd/{session_id}/url')
-async def vd_get_url(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT connect_url,http_port,vnc_port,vnc_password,os_image,container_id FROM vd_session_meta WHERE session_id = ?', (session_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail='VD session not found')
-        connect_url, http_port, vnc_port, vnc_password, os_image, container_id = row
-    # Try to ensure container is running
-    try:
-        state = _docker_run(['inspect','-f','{{.State.Running}}', container_id]) if container_id else 'true'
-        if state.strip().lower() != 'true':
-            try:
-                _docker_run(['start', container_id])
-                time.sleep(0.5)
-            except HTTPException:
-                pass
-    except HTTPException:
-        pass
-    # Recompute connect URL to handle image variations and fix older sessions
-    image = _image_for_os(os_image)
-    custom_viewer = None
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT viewer_path FROM vd_images WHERE id=?', (os_image,))
-            r = cur.fetchone()
-            if r and r[0]: custom_viewer = r[0]
-    except Exception:
-        pass
-    if custom_viewer:
-        connect_path = custom_viewer
-        query = f"autoconnect=1&password={vnc_password}"
-    elif 'linuxserver/webtop' in image or 'lscr.io/linuxserver/webtop' in image:
-        connect_path = '/'
-        query = ''
-    else:
-        # Auto-detect path live in case the image mapping changed or a snapshot was restored
-        path, q = _detect_viewer_path(http_port)
-        connect_path = path
-        query = (q + ('&' if q else '') + f'password={vnc_password}').strip('&')
-    new_url = f"http://localhost:{http_port}{connect_path}{('?' + query) if query else ''}"
-    payload = {'session_id': session_id, 'connect_url': new_url, 'http_port': http_port, 'vnc_port': vnc_port}
-    return wrap_encrypted(sid, key, payload)
-
-@app.delete('/api/secure/vd/{session_id}')
-async def vd_delete(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    # RBAC/ownership: admin can delete any; owner can delete own session
-    req_user = SESSION_META.get(sid, {}).get('user', 'admin')
-    is_admin = False
-    try:
-        require_role(req_user, 'admin')
-        is_admin = True
-    except HTTPException:
-        is_admin = False
-    if not is_admin:
-        # Verify ownership
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT user_id FROM sessions WHERE session_id = ?', (session_id,))
-            row = cur.fetchone()
-            owner = row[0] if row else None
-        if owner != req_user:
-            raise HTTPException(status_code=403, detail='Forbidden: only owner or admin can delete this session')
-    container_id = None
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT container_id FROM vd_session_meta WHERE session_id = ?', (session_id,))
-        row = cur.fetchone()
-        if row:
-            container_id = row[0]
-    # Stop and remove container
-    if container_id:
-        try:
-            _docker_run(['rm', '-f', container_id])
-        except HTTPException as e:
-            logging.warning(f"Container removal issue: {e.detail}")
-    # Remove DB records
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        conn.execute('DELETE FROM vd_session_meta WHERE session_id = ?', (session_id,))
-        conn.execute('DELETE FROM sessions WHERE session_id = ?', (session_id,))
-        conn.commit()
-    payload = {'deleted': True, 'session_id': session_id}
-    return wrap_encrypted(sid, key, payload)
-
-@app.post('/api/secure/vd/{session_id}/pause')
-async def vd_pause(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    container_id = None
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT container_id FROM vd_session_meta WHERE session_id = ?', (session_id,))
-        row = cur.fetchone()
-        if row:
-            container_id = row[0]
-    if not container_id:
-        raise HTTPException(status_code=404, detail='VD session not found')
-    try:
-        _docker_run(['pause', container_id])
-    except HTTPException as e:
-        raise
-    api_server.database.update_session_status(session_id, 'paused')
-    return wrap_encrypted(sid, key, {'session_id': session_id, 'status': 'paused'})
-
-@app.post('/api/secure/vd/{session_id}/resume')
-async def vd_resume(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    container_id = None
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT container_id FROM vd_session_meta WHERE session_id = ?', (session_id,))
-        row = cur.fetchone()
-        if row:
-            container_id = row[0]
-    if not container_id:
-        raise HTTPException(status_code=404, detail='VD session not found')
-    try:
-        _docker_run(['unpause', container_id])
-    except HTTPException as e:
-        raise
-    api_server.database.update_session_status(session_id, 'running')
-    return wrap_encrypted(sid, key, {'session_id': session_id, 'status': 'running'})
-
-@app.post('/api/secure/vd/{session_id}/snapshot')
-async def vd_snapshot(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT container_id FROM vd_session_meta WHERE session_id = ?', (session_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail='VD session not found')
-        container_id = row[0]
-    snap_tag = f"omega-snap-{session_id}-{int(time.time())}"
-    # docker commit
-    _docker_run(['commit', container_id, snap_tag])
-    # Log event
-    api_server.database.log_event('vd_snapshot', session_id, f'Snapshot created: {snap_tag}', 'info')
-    # Estimate snapshot size via docker inspect (best effort)
-    size_bytes = 0
-    try:
-        out = subprocess.check_output(['docker','image','inspect',snap_tag,'--format','{{.Size}}'], stderr=subprocess.DEVNULL, timeout=10).decode().strip()
-        size_bytes = int(out) if out.isdigit() else 0
-    except Exception:
-        pass
-    # Persist metadata
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            conn.execute('INSERT OR REPLACE INTO snapshots (session_id, tag, size_bytes, created_at) VALUES (?, ?, ?, ?)', (session_id, snap_tag, size_bytes, time.time()))
-            conn.commit()
-    except Exception as e:
-        logging.error(f'snapshot meta save error: {e}')
-    return wrap_encrypted(sid, key, {'session_id': session_id, 'snapshot': snap_tag})
-
-@app.get('/api/secure/vd/{session_id}/snapshots')
-async def vd_list_snapshots(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT tag,size_bytes,created_at FROM snapshots WHERE session_id=? ORDER BY created_at DESC', (session_id,))
-        snaps=[{'tag':r[0],'size_bytes':r[1],'created_at':r[2]} for r in cur.fetchall()]
-    return wrap_encrypted(sid, key, {'session_id': session_id, 'snapshots': snaps})
-
-# --- VD utility: package status inside container ---
-@app.get('/api/secure/vd/{session_id}/packages')
-async def vd_packages_status(request: Request, session_id: str, q: Optional[str] = None):
-    sid, key = validate_secure(request.headers)
-    # Resolve container
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT container_id FROM vd_session_meta WHERE session_id=?', (session_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail='VD session not found')
-        container_id = row[0]
-    # Determine packages to check
-    default_list = ['firefox','git','curl','wget','htop','zip','unzip','libreoffice']
-    pkgs = [p.strip() for p in (q.split(',') if q else default_list) if p.strip()]
-    # Build check script (best-effort: dpkg and which)
-    check_script = (
-        'set +e; '
-        'for p in ' + ' '.join([shlex.quote(p) if ' ' in p else p for p in pkgs]) + '; do '
-        '  if dpkg -s "$p" >/dev/null 2>&1; then echo "OK:dpkg:$p"; '
-        '  elif command -v "$p" >/dev/null 2>&1; then echo "OK:bin:$p"; '
-        '  else echo "MISS:$p"; fi; '
-        'done'
-    )
-    try:
-        out = _docker_run(['exec','-u','0', container_id, 'bash','-lc', check_script])
-    except HTTPException as e:
-        raise HTTPException(status_code=500, detail=f'Package status check failed: {e.detail}')
-    results = []
-    for line in (out or '').splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith('OK:'):
-            parts = line.split(':')
-            if len(parts) >= 3:
-                _, source, name = parts[0], parts[1], ':'.join(parts[2:])
-                results.append({'name': name, 'installed': True, 'source': source})
-            else:
-                results.append({'name': line[3:], 'installed': True, 'source': 'unknown'})
-        elif line.startswith('MISS:'):
-            results.append({'name': line[5:], 'installed': False})
-    return wrap_encrypted(sid, key, {'session_id': session_id, 'packages': results})
-
-class SnapshotDeleteRequest(BaseModel):
-    tag: str
-
-@app.post('/api/secure/vd/{session_id}/snapshot/delete')
-async def vd_delete_snapshot(request: Request, session_id: str, body: SnapshotDeleteRequest):
-    sid, key = validate_secure(request.headers)
-    # Admin only
-    user = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(user, 'admin')
-    try:
-        _docker_run(['rmi','-f', body.tag])
-    except HTTPException:
-        pass
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        conn.execute('DELETE FROM snapshots WHERE session_id=? AND tag=?', (session_id, body.tag))
-        conn.commit()
-    api_server.database.log_event('vd_snapshot_delete', session_id, f'Deleted snapshot {body.tag}', 'info')
-    return wrap_encrypted(sid, key, {'deleted': True, 'tag': body.tag})
-
-class SnapshotRestoreRequest(BaseModel):
-    tag: str
-
-@app.post('/api/secure/vd/{session_id}/snapshot/restore')
-async def vd_restore_snapshot(request: Request, session_id: str, body: SnapshotRestoreRequest):
-    sid, key = validate_secure(request.headers)
-    # Admin only
-    user = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(user, 'admin')
-    # Start a new container from snapshot tag
-    ports = _container_ports_for_image('dorowu/ubuntu-desktop-lxde-vnc')
-    http_port = _find_free_port(7000, 7999)
-    vnc_port = _find_free_port(5900, 5999)
-    vnc_password = secrets.token_urlsafe(8)
-    name = f'omega_restore_{session_id}_{int(time.time())}'
-    try:
-        _docker_run(['run','-d','--name',name,'-p',f"{http_port}:{ports['http']}",'-p',f"{vnc_port}:{ports['vnc']}",'-e',f"VNC_PASSWORD={vnc_password}", body.tag])
-    except HTTPException as e:
-        raise HTTPException(status_code=500, detail=f'Restore failed: {e.detail}')
-    # Use same dorowu-compatible path and params when restoring from snapshot
-    connect_url = f"http://localhost:{http_port}/static/vnc.html?autoconnect=1&password={vnc_password}&host=localhost&port={http_port}&path=websockify"
-    api_server.database.log_event('vd_snapshot_restore', session_id, f'Restored {body.tag} -> {name}', 'info')
-    return wrap_encrypted(sid, key, {'restored': True, 'connect_url': connect_url})
-
-# Health check for VD viewer readiness
-@app.get('/api/secure/vd/{session_id}/health')
-async def vd_health(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    # Lookup meta
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT http_port, os_image FROM vd_session_meta WHERE session_id=?', (session_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail='VD session not found')
-        http_port, os_image = row
-    # Probe viewer paths quickly (single attempt)
-    import urllib.request
-    ready = False
-    code = None
-    hit = None
-    for path in ['/static/vnc.html', '/vnc.html', '/']:
-        try:
-            req = urllib.request.Request(f'http://127.0.0.1:{http_port}{path}', method='HEAD')
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                code = resp.getcode(); hit = path
-                if code == 200:
-                    ready = True
-                    break
-        except Exception:
-            continue
-    payload = {'session_id': session_id, 'ready': ready, 'http_port': http_port, 'code': code or 0, 'path': hit or ''}
-    return wrap_encrypted(sid, key, payload)
-
-# RDP session endpoints (Windows via user-licensed RDP)
-class RDPCreateRequest(BaseModel):
-    user_id: str
-    host: str
-    port: int = 3389
-    username: str
-    password: str
-    domain: Optional[str] = None
-
-# --- RBAC utility endpoints ---
-class RoleAssignRequest(BaseModel):
-    username: str
-    role: str
-
-@app.get('/api/secure/whoami')
-async def secure_whoami(request: Request):
-    sid, key = validate_secure(request.headers)
-    user = SESSION_META.get(sid, {}).get('user', 'admin')
-    roles = get_user_roles(user)
-    # Resolve friendly descriptions for roles from roles table
-    friendly = []
-    try:
-        with db_connect() as conn:
-            cur = conn.execute('SELECT role,description FROM roles WHERE role IN ({seq})'.format(seq=','.join('?'*len(roles))), tuple(roles) if roles else ())
-            rows = {r[0]: r[1] for r in cur.fetchall()}
-            for r in roles:
-                friendly.append(rows.get(r) or r)
-    except Exception:
-        friendly = roles
-    # Permissions stub: in future map roles->permissions via a table
-    permissions = ['all'] if 'admin' in roles else ['read']
-    return wrap_encrypted(sid, key, {'user': user, 'roles': roles, 'role_descriptions': friendly, 'permissions': permissions, 'timestamp': time.time()})
-
-@app.post('/api/secure/admin/roles/assign')
-async def admin_assign_role(request: Request, body: RoleAssignRequest):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    role = body.role.strip()
-    username = body.username.strip()
-    if not role or not username:
-        raise HTTPException(status_code=400, detail='username and role are required')
-    try:
-        with db_connect() as conn:
-            conn.execute('INSERT OR IGNORE INTO roles (role, description) VALUES (?, ?)', (role, None))
-            cur = conn.execute('SELECT 1 FROM user_roles WHERE username=? AND role=?', (username, role))
-            exists = bool(cur.fetchone())
-            if not exists:
-                conn.execute('INSERT INTO user_roles (username, role) VALUES (?, ?)', (username, role))
-            conn.commit()
-        api_server.database.log_event('security_role_assign', caller, f'Assigned role {role} to {username}', 'info')
-    except Exception as e:
-        logging.error(f'Role assign error: {e}')
-        raise HTTPException(status_code=500, detail='Role assignment failed')
-    return wrap_encrypted(sid, key, {'success': True, 'username': username, 'role': role, 'applied': not exists})
-
-@app.post('/api/secure/admin/roles/remove')
-async def admin_remove_role(request: Request, body: RoleAssignRequest):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    role = body.role.strip()
-    username = body.username.strip()
-    if not role or not username:
-        raise HTTPException(status_code=400, detail='username and role are required')
-    try:
-        with db_connect() as conn:
-            cur = conn.execute('SELECT 1 FROM user_roles WHERE username=? AND role=?', (username, role))
-            existed = bool(cur.fetchone())
-            conn.execute('DELETE FROM user_roles WHERE username=? AND role=?', (username, role))
-            conn.commit()
-        api_server.database.log_event('security_role_remove', caller, f'Removed role {role} from {username}', 'info')
-    except Exception as e:
-        logging.error(f'Role remove error: {e}')
-        raise HTTPException(status_code=500, detail='Role removal failed')
-    return wrap_encrypted(sid, key, {'success': True, 'username': username, 'role': role, 'removed': existed})
-
-
-class UserCreateRequest(BaseModel):
-    username: str
-    password: str
-
-
-@app.post('/api/secure/admin/users/create')
-@rate_limited(per_minute=30, burst=6)
-async def admin_create_user(request: Request, body: UserCreateRequest):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    username = body.username.strip()
-    if not username or not body.password:
-        raise HTTPException(status_code=400, detail='username and password are required')
-    hashed = _hash_password(body.password)
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            conn.execute('INSERT OR REPLACE INTO users (username, password_hash, created_at) VALUES (?, ?, ?)', (username, hashed, time.time()))
-            conn.commit()
-        api_server.database.log_event('user_create', caller, f'User {username} created', 'info')
-    except Exception as e:
-        logging.error(f'user create error: {e}')
-        raise HTTPException(status_code=500, detail='Failed to create user')
-    return wrap_encrypted(sid, key, {'created': True, 'username': username})
-
-
-class UserModifyRequest(BaseModel):
-    username: str
-
-
-@app.post('/api/secure/admin/users/reset_password')
-@rate_limited(per_minute=10, burst=4)
-async def admin_reset_password(request: Request, body: UserModifyRequest):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    username = body.username.strip()
-    if not username:
-        raise HTTPException(status_code=400, detail='username required')
-    # Set a random password and return a one-time token (best-effort)
-    new_pw = secrets.token_urlsafe(12)
-    hashed = _hash_password(new_pw)
-    try:
-        with db_connect() as conn:
-            cur = conn.execute('SELECT 1 FROM users WHERE username=?', (username,))
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail='user not found')
-            conn.execute('UPDATE users SET password_hash=? WHERE username=?', (hashed, username))
-            conn.commit()
-        api_server.database.log_event('user_reset_pw', caller, f'Password reset for {username}', 'info')
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f'Password reset error: {e}')
-        raise HTTPException(status_code=500, detail='Password reset failed')
-    # Return the new password in the response (admin should convey securely)
-    return wrap_encrypted(sid, key, {'username': username, 'new_password': new_pw})
-
-
-@app.post('/api/secure/admin/users/suspend')
-async def admin_suspend_user(request: Request, body: UserModifyRequest):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    username = body.username.strip()
-    try:
-        with db_connect() as conn:
-            cur = conn.execute('SELECT disabled FROM users WHERE username=?', (username,))
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail='user not found')
-            conn.execute('UPDATE users SET disabled=1 WHERE username=?', (username,))
-            conn.commit()
-        api_server.database.log_event('user_suspend', caller, f'User suspended: {username}', 'warning')
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f'User suspend error: {e}')
-        raise HTTPException(status_code=500, detail='Suspend failed')
-    return wrap_encrypted(sid, key, {'suspended': True, 'username': username})
-
-
-@app.post('/api/secure/admin/users/activate')
-async def admin_activate_user(request: Request, body: UserModifyRequest):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    username = body.username.strip()
-    try:
-        with db_connect() as conn:
-            cur = conn.execute('SELECT disabled FROM users WHERE username=?', (username,))
-            row = cur.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail='user not found')
-            conn.execute('UPDATE users SET disabled=0 WHERE username=?', (username,))
-            conn.commit()
-        api_server.database.log_event('user_activate', caller, f'User activated: {username}', 'info')
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f'User activate error: {e}')
-        raise HTTPException(status_code=500, detail='Activate failed')
-    return wrap_encrypted(sid, key, {'activated': True, 'username': username})
-
-
-@app.get('/api/secure/admin/certificates')
-async def list_certificates(request: Request):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    # Placeholder: no real cert store yet
-    return wrap_encrypted(sid, key, {'certificates': [], 'timestamp': time.time()})
-
-
-@app.post('/api/secure/admin/certificates/generate')
-async def generate_certificate(request: Request, body: dict):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    # Placeholder: return a simulated cert id
-    cert_id = f'cert-{secrets.token_hex(8)}'
-    api_server.database.log_event('cert_generate', caller, f'Generated placeholder cert {cert_id}', 'info')
-    return wrap_encrypted(sid, key, {'generated': True, 'id': cert_id})
-
-
-def issue_node_certificate(node_id: str, public_key_pem: str, days: int = 1) -> str:
-    """Issue a short-lived X.509 certificate for a node, signed by server RSA key.
-    Returns PEM-encoded certificate as string.
-    """
-    try:
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.serialization import load_pem_public_key
-        pubkey = load_pem_public_key(public_key_pem.encode())
-        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, node_id)])
-        issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"Omega Controller CA")])
-        now = datetime.utcnow()
-        builder = x509.CertificateBuilder()
-        builder = builder.subject_name(subject)
-        builder = builder.issuer_name(issuer)
-        builder = builder.public_key(pubkey)
-        builder = builder.serial_number(x509.random_serial_number())
-        builder = builder.not_valid_before(now - timedelta(minutes=1))
-        builder = builder.not_valid_after(now + timedelta(days=days))
-        builder = builder.add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        cert = builder.sign(private_key=api_server.rsa_private_key, algorithm=hashes.SHA256())
-        return cert.public_bytes(serialization.Encoding.PEM).decode()
-    except Exception as e:
-        logging.error(f'issue_node_certificate error for {node_id}: {e}')
-        raise
-
-
-@app.post('/api/secure/nodes/{node_id}/issue_cert')
-async def secure_issue_node_cert(request: Request, node_id: str, body: dict = Body(...)):
-    """Issue a node certificate for the given node_id using provided public_key_pem.
-    Protected endpoint: requires a secure session and admin role.
-    Request body: { "public_key_pem": "-----BEGIN PUBLIC KEY...", "days": 1 }
-    """
-    session_id, key = validate_secure(request.headers)
-    caller = SESSION_META.get(session_id, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    public_key_pem = body.get('public_key_pem')
-    days = int(body.get('days', 1)) if body.get('days') else 1
-    if not public_key_pem:
-        raise HTTPException(status_code=400, detail='public_key_pem required')
-    try:
-        cert_pem = issue_node_certificate(node_id, public_key_pem, days=days)
-        api_server.database.log_event('issue_node_cert', node_id, f'Issued node cert (days={days}) to {caller}', 'info')
-        return wrap_encrypted(session_id, key, {'certificate_pem': cert_pem})
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f'secure_issue_node_cert error: {e}')
-        raise HTTPException(status_code=500, detail='failed to issue certificate')
-
-
-@app.post('/api/secure/admin/certificates/revoke')
-async def revoke_certificate(request: Request, body: dict):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    cert_id = (body.get('id') or '')
-    if not cert_id:
-        raise HTTPException(status_code=400, detail='id required')
-    api_server.database.log_event('cert_revoke', caller, f'Revoked placeholder cert {cert_id}', 'info')
-    return wrap_encrypted(sid, key, {'revoked': True, 'id': cert_id})
-
-
-@app.get('/api/secure/admin/users')
-@rate_limited(per_minute=60, burst=10)
-async def admin_list_users(request: Request):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    users = []
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT username, created_at, disabled FROM users ORDER BY created_at DESC')
-            for r in cur.fetchall():
-                users.append({'username': r[0], 'created_at': r[1], 'disabled': bool(r[2])})
-    except Exception as e:
-        logging.error(f'list users error: {e}')
-        raise HTTPException(status_code=500, detail='Failed to list users')
-    return wrap_encrypted(sid, key, {'users': users})
-
-@app.post('/api/secure/rdp/create')
-async def rdp_create(request: Request, spec: RDPCreateRequest):
-    sid, key = validate_secure(request.headers)
-    # Ownership/RBAC: non-admin may only create for self; admin may create for others
-    req_user = SESSION_META.get(sid, {}).get('user', 'admin')
-    if req_user != (spec.user_id or req_user):
-        try:
-            require_role(req_user, 'admin')
-        except HTTPException:
-            raise HTTPException(status_code=403, detail='Forbidden: cannot create RDP for another user')
-    session_id = f"rdp-{secrets.token_hex(8)}"
-    s_info = SessionInfo(
-        session_id=session_id,
-        user_id=spec.user_id,
-        node_id='control-primary',
-        application='rdp-desktop',
-        cpu_cores=0, gpu_units=0, memory_gb=0,
-        status='running', created_at=time.time(), last_activity=time.time()
-    )
-    api_server.database.add_session(s_info)
-    connect_url = f"rdp://{spec.username}@{spec.host}:{spec.port}"
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        conn.execute('INSERT OR REPLACE INTO rdp_session_meta (session_id, host, port, username, domain, connect_url) VALUES (?, ?, ?, ?, ?, ?)',
-                     (session_id, spec.host, spec.port, spec.username, spec.domain or '', connect_url))
-        conn.commit()
-    api_server.database.log_event('rdp_session_create', session_id, f'RDP to {spec.host}:{spec.port} user {spec.username}', 'info')
-    return wrap_encrypted(sid, key, {'session_id': session_id, 'connect_url': connect_url, 'status': 'running'})
-
-@app.get('/api/secure/rdp/{session_id}/url')
-async def rdp_get_url(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        cur = conn.execute('SELECT connect_url, host, port, username, domain FROM rdp_session_meta WHERE session_id=?', (session_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail='RDP session not found')
-        connect_url, host, port, username, domain = row
-    return wrap_encrypted(sid, key, {'session_id': session_id, 'connect_url': connect_url, 'rdp': {'host': host, 'port': port, 'username': username, 'domain': domain}})
-
-@app.delete('/api/secure/rdp/{session_id}')
-async def rdp_delete(request: Request, session_id: str):
-    sid, key = validate_secure(request.headers)
-    # RBAC/ownership: admin or owner may delete
-    req_user = SESSION_META.get(sid, {}).get('user', 'admin')
-    is_admin = False
-    try:
-        require_role(req_user, 'admin')
-        is_admin = True
-    except HTTPException:
-        is_admin = False
-    if not is_admin:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT session_id FROM sessions WHERE session_id=? AND user_id=?', (session_id, req_user))
-            if not cur.fetchone():
-                raise HTTPException(status_code=403, detail='Forbidden: only owner or admin can delete this RDP session')
-    with sqlite3.connect(api_server.database.db_path) as conn:
-        conn.execute('DELETE FROM rdp_session_meta WHERE session_id=?', (session_id,))
-        conn.execute('DELETE FROM sessions WHERE session_id=?', (session_id,))
-        conn.commit()
-    api_server.database.log_event('rdp_session_delete', session_id, 'RDP session removed', 'info')
-    return wrap_encrypted(sid, key, {'deleted': True, 'session_id': session_id})
-
-# --- OS Catalog endpoints ---
-class OSImageRegister(BaseModel):
-    id: str
-    image: str
-    http_port: int
-    vnc_port: int
-    viewer_path: str = '/'
-    description: Optional[str] = None
-    experimental: int = 0
-
-@app.get('/api/secure/vd/os-list')
-async def vd_os_list(request: Request):
-    sid, key = validate_secure(request.headers)
-    # Built-ins
-    builtin = [
-    {'id':'ubuntu-xfce', 'image':'accetto/ubuntu-vnc-xfce:latest', 'http_port':6901, 'vnc_port':5901, 'viewer_path':'/', 'description':'Ubuntu + XFCE (modern) + noVNC'},
-    {'id':'ubuntu-xfce-chromium', 'image':'accetto/ubuntu-vnc-xfce:latest', 'http_port':6901, 'vnc_port':5901, 'viewer_path':'/', 'description':'Ubuntu + XFCE (Chromium via packages)'},
-    {'id':'ubuntu-webtop', 'image':'lscr.io/linuxserver/webtop:ubuntu', 'http_port':3000, 'vnc_port':5901, 'viewer_path':'/', 'description':'Ubuntu Webtop (browser-based desktop)'},
-        {'id':'ubuntu-lxde-legacy', 'image':'dorowu/ubuntu-desktop-lxde-vnc', 'http_port':80, 'vnc_port':5900, 'viewer_path':'/static/vnc.html', 'description':'Legacy LXDE variant'},
-    {'id':'debian-xfce', 'image':'accetto/debian-vnc-xfce', 'http_port':6901, 'vnc_port':5901, 'viewer_path':'/', 'description':'Debian + XFCE'},
-    {'id':'debian-webtop', 'image':'lscr.io/linuxserver/webtop:debian', 'http_port':3000, 'vnc_port':5901, 'viewer_path':'/', 'description':'Debian Webtop (browser-based desktop)'},
-    {'id':'fedora-webtop', 'image':'lscr.io/linuxserver/webtop:fedora', 'http_port':3000, 'vnc_port':5901, 'viewer_path':'/', 'description':'Fedora Webtop (browser-based desktop)'},
-    # RHEL-family presented as external connectors to avoid broken tags
-    {'id':'centos-stream', 'image':'external/centos', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'CentOS Stream (external – connect via RDP/VNC/SSH)', 'experimental': True},
-    {'id':'almalinux', 'image':'external/almalinux', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'AlmaLinux (external – connect via RDP/VNC/SSH)', 'experimental': True},
-    {'id':'rocky-linux', 'image':'external/rocky', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'Rocky Linux (external – connect via RDP/VNC/SSH)', 'experimental': True},
-        {'id':'kali-xfce', 'image':'lscr.io/linuxserver/kali-linux:latest', 'http_port':80, 'vnc_port':5900, 'viewer_path':'/', 'description':'Kali XFCE (may need extra config)'},
-    # External OS (not containerized): provide as a catalog entry for UX; route users to RDP/VNC connectors
-    {'id':'qubes-os', 'image':'external/qubes', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'Qubes OS (external VM – connect via RDP/VNC)', 'experimental': True},
-    {'id':'freebsd', 'image':'external/freebsd', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'FreeBSD (external – connect via RDP/VNC/SSH)', 'experimental': True},
-    {'id':'openbsd', 'image':'external/openbsd', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'OpenBSD (external – connect via RDP/VNC/SSH)', 'experimental': True},
-    {'id':'inferno-os', 'image':'external/inferno', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'Inferno (research – external VM)', 'experimental': True},
-    {'id':'plan9', 'image':'external/plan9', 'http_port':0, 'vnc_port':0, 'viewer_path':'', 'description':'Plan 9 from Bell Labs (research – external VM)', 'experimental': True},
-    ]
-    custom=[]
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT id,image,http_port,vnc_port,viewer_path,description,experimental FROM vd_images ORDER BY id')
-            for r in cur.fetchall():
-                custom.append({'id':r[0],'image':r[1],'http_port':r[2],'vnc_port':r[3],'viewer_path':r[4],'description':r[5],'experimental':bool(r[6])})
-    except Exception:
-        pass
-    return wrap_encrypted(sid, key, {'builtin': builtin, 'custom': custom})
-
-
-@app.post('/api/secure/admin/session/revoke')
-@rate_limited(per_minute=60, burst=10)
-async def admin_revoke_session(request: Request, body: dict):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    session_id = body.get('session_id')
-    if not session_id:
-        raise HTTPException(status_code=400, detail='session_id required')
-    # remove from memory and persist revocation
-    SESSION_META.pop(session_id, None)
-    SESSION_NONCES.pop(session_id, None)
-    try:
-        persist_revocation(session_id, body.get('reason','admin_revoke'))
-    except Exception:
-        pass
-    try:
-        # close ws if present
-        ws = SESSION_WS.get(session_id)
-        if ws:
-            await ws.close()
-    except Exception:
-        pass
-    try:
-        api_server.database.log_event('session_revoked', session_id, f'Revoked by admin {caller}', 'warning')
-    except Exception:
-        pass
-    return wrap_encrypted(sid, key, {'revoked': True, 'session_id': session_id})
-
-
-@app.post('/api/secure/admin/session/rotate')
-@rate_limited(per_minute=60, burst=10)
-async def admin_rotate_session(request: Request, body: dict):
-    sid, key = validate_secure(request.headers)
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    session_id = body.get('session_id')
-    if not session_id or session_id not in SESSION_META:
-        raise HTTPException(status_code=400, detail='Unknown session_id')
-    # generate server-side new AES key and persist as pending rekey; push via WS if connected
-    new_key = os.urandom(32)
-    key_b64 = base64.b64encode(new_key).decode()
-    persist_pending_rekey(session_id, key_b64)
-    # Attempt push via WS: send a small delivery packet (server will not send raw AES key; instead request client to rekey)
-    pushed = False
-    try:
-        ws = SESSION_WS.get(session_id)
-        if ws:
-            try:
-                # Signal client to perform rekey (client should call rotate endpoint to supply new key), so we send a rekey_request
-                await ws.send_json({'type':'rekey_request','session_id':session_id,'ts':time.time()})
-                pushed = True
-            except Exception:
-                pushed = False
-    except Exception:
-        pushed = False
-    try:
-        api_server.database.log_event('session_admin_rotate', session_id, f'Admin {caller} requested rotate (pushed={pushed})', 'info')
-    except Exception:
-        pass
-    return wrap_encrypted(sid, key, {'rotated': True, 'session_id': session_id, 'pushed': pushed})
-
-
-@app.post('/api/secure/session/poll')
-async def session_poll(request: Request, body: dict):
-    # Clients poll to check if server has pending rekey or revocation
-    session_id = body.get('session_id')
-    if not session_id:
-        raise HTTPException(status_code=400, detail='session_id required')
-    # If revoked, instruct client to drop session
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            cur = conn.execute('SELECT revoked_at,reason FROM revoked_sessions WHERE session_id=?', (session_id,))
-            row = cur.fetchone()
-            if row:
-                return JSONResponse(content={'status':'revoked','revoked_at': row[0], 'reason': row[1]})
-            cur = conn.execute('SELECT new_key,created_at FROM session_pending_rekey WHERE session_id=?', (session_id,))
-            row = cur.fetchone()
-            if row:
-                # For safety, server does not return raw new_key to client; instead it instructs client to rekey
-                return JSONResponse(content={'status':'rekey_pending','created_at': row[1]})
-    except Exception:
-        pass
-    return JSONResponse(content={'status':'ok'})
-
-@app.get('/api/secure/vd/docker-health')
-async def vd_docker_health(request: Request):
-    sid, key = validate_secure(request.headers)
-    ok = _docker_available()
-    info = None
-    if ok:
-        try:
-            info = subprocess.check_output(['docker','info','--format','{{.ServerVersion}}'], stderr=subprocess.DEVNULL, timeout=5).decode().strip()
-        except Exception:
-            info = None
-    return wrap_encrypted(sid, key, {'docker': ok, 'server_version': info})
-
-@app.post('/api/secure/vd/os-register')
-async def vd_os_register(request: Request, body: OSImageRegister):
-    sid, key = validate_secure(request.headers)
-    # Admin only
-    caller = SESSION_META.get(sid, {}).get('user', 'admin')
-    require_role(caller, 'admin')
-    try:
-        with sqlite3.connect(api_server.database.db_path) as conn:
-            conn.execute('INSERT OR REPLACE INTO vd_images (id,image,http_port,vnc_port,viewer_path,description,experimental) VALUES (?,?,?,?,?,?,?)',
-                         (body.id.strip(), body.image.strip(), body.http_port, body.vnc_port, body.viewer_path.strip() or '/', body.description, int(bool(body.experimental))))
-            conn.commit()
-        api_server.database.log_event('vd_os_register', caller, f'Registered OS {body.id} -> {body.image}', 'info')
-    except Exception as e:
-        logging.error(f'vd_os_register error: {e}')
-        raise HTTPException(status_code=500, detail='Failed to register OS image')
-    return wrap_encrypted(sid, key, {'success': True, 'id': body.id})

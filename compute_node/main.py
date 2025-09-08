@@ -17,7 +17,7 @@ import subprocess
 import threading
 from typing import Dict, List, Any, Optional, Set, Union
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from enum import Enum
 import psutil
@@ -598,7 +598,7 @@ class EnhancedComputeNode:
                 isolation_level=isolation_level,
                 status="running",
                 resource_allocation=resource_limits,
-                start_time=datetime.utcnow()
+                start_time=datetime.now(timezone.utc)
             )
             
             self.active_executions[workload_id] = execution
@@ -621,7 +621,7 @@ class EnhancedComputeNode:
                 # Stop execution
                 execution = self.active_executions[workload_id]
                 execution.status = "completed"
-                execution.end_time = datetime.utcnow()
+                execution.end_time = datetime.now(timezone.utc)
                 
                 # Destroy sandbox
                 await self.sandbox_manager.destroy_sandbox(workload_id)
@@ -690,7 +690,7 @@ class HotSwapManager:
             event = {
                 'type': 'device_removed',
                 'device_id': device_id,
-                'timestamp': datetime.utcnow(),
+                'timestamp': datetime.now(timezone.utc),
                 'action': 'workload_migration_needed'
             }
             self.swap_events.append(event)
@@ -707,7 +707,7 @@ class HotSwapManager:
                 'type': 'device_added',
                 'device_id': device_id,
                 'device_type': device.device_type.value,
-                'timestamp': datetime.utcnow(),
+                'timestamp': datetime.now(timezone.utc),
                 'action': 'device_ready_for_workloads'
             }
             self.swap_events.append(event)
@@ -728,7 +728,8 @@ class AutoScalingManager:
             'memory_threshold_scale_down': 0.4,
             'scale_cooldown_seconds': 300
         }
-        self.last_scaling_action = datetime.utcnow()
+        # Initialize last scaling action timestamp (timezone-aware)
+        self.last_scaling_action = datetime.now(timezone.utc)
         self.active_scaling = True
         
     async def start_scaling_monitor(self):
@@ -744,7 +745,7 @@ class AutoScalingManager:
         while self.active_scaling:
             try:
                 # Check if cooldown period has passed
-                time_since_last_action = (datetime.utcnow() - self.last_scaling_action).seconds
+                time_since_last_action = (datetime.now(timezone.utc) - self.last_scaling_action).seconds
                 if time_since_last_action < self.scaling_policies['scale_cooldown_seconds']:
                     await asyncio.sleep(30)
                     continue
@@ -789,7 +790,7 @@ class AutoScalingManager:
             logger.info("High utilization detected - requesting scale up")
             # In a real implementation, this would request additional resources
             # from the control node or activate idle devices
-            self.last_scaling_action = datetime.utcnow()
+            self.last_scaling_action = datetime.now(timezone.utc)
             
         except Exception as e:
             logger.error(f"Scale up failed: {e}")
@@ -800,7 +801,7 @@ class AutoScalingManager:
             logger.info("Low utilization detected - considering scale down")
             # In a real implementation, this would gracefully reduce resources
             # or put devices into power-saving mode
-            self.last_scaling_action = datetime.utcnow()
+            self.last_scaling_action = datetime.now(timezone.utc)
             
         except Exception as e:
             logger.error(f"Scale down failed: {e}")

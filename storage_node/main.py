@@ -21,12 +21,79 @@ import multiprocessing
 import math
 from typing import Dict, List, Any, Optional, Set, Union, Tuple, Callable
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from enum import Enum
 import shutil
 import psutil
 import numpy as np
+import pathlib
+
+# Pluggable object storage adapters
+class BaseStorageAdapter:
+    async def put_object(self, key: str, data: bytes):
+        raise NotImplementedError
+    async def get_object(self, key: str) -> Optional[bytes]:
+        raise NotImplementedError
+    async def exists(self, key: str) -> bool:
+        raise NotImplementedError
+
+class InMemoryAdapter(BaseStorageAdapter):
+    def __init__(self):
+        self._store = {}
+    async def put_object(self, key: str, data: bytes):
+        self._store[key] = data
+    async def get_object(self, key: str) -> Optional[bytes]:
+        return self._store.get(key)
+    async def exists(self, key: str) -> bool:
+        return key in self._store
+
+class LocalFSAdapter(BaseStorageAdapter):
+    def __init__(self, root: str):
+        self.root = pathlib.Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+    async def put_object(self, key: str, data: bytes):
+        path = self.root / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    async def get_object(self, key: str) -> Optional[bytes]:
+        path = self.root / key
+        if path.exists():
+            return path.read_bytes()
+        return None
+    async def exists(self, key: str) -> bool:
+        return (self.root / key).exists()
+
+class MinioAdapter(BaseStorageAdapter):  # thin wrapper if minio lib present
+    def __init__(self, client, bucket: str):
+        self.client = client
+        self.bucket = bucket
+    async def put_object(self, key: str, data: bytes):  # sync lib -> run in thread if needed
+        import io, asyncio
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: self.client.put_object(self.bucket, key, io.BytesIO(data), length=len(data)))
+    async def get_object(self, key: str) -> Optional[bytes]:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        def _get():
+            try:
+                resp = self.client.get_object(self.bucket, key)
+                data = resp.read()
+                resp.close(); resp.release_conn()
+                return data
+            except Exception:
+                return None
+        return await loop.run_in_executor(None, _get)
+    async def exists(self, key: str) -> bool:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        def _stat():
+            try:
+                self.client.stat_object(self.bucket, key)
+                return True
+            except Exception:
+                return False
+        return await loop.run_in_executor(None, _stat)
 import random
 from pathlib import Path
 from aiohttp import web
@@ -765,7 +832,7 @@ class PostgreSQLManager:
         """Create monthly partitions for a table"""
         try:
             async with self.async_engine.begin() as conn:
-                current_date = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                current_date = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
                 
                 for i in range(months):
                     # Calculate partition dates
@@ -835,7 +902,7 @@ class PostgreSQLManager:
         try:
             async with self.async_session_factory() as session:
                 insert_stmt = self.storage_analytics.insert().values(
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     node_id=operation_data.get('node_id'),
                     operation_type=operation_data.get('operation_type'),
                     object_id=operation_data.get('object_id'),
@@ -862,7 +929,7 @@ class PostgreSQLManager:
                 upsert_stmt = f"""
                 INSERT INTO node_state (node_id, last_heartbeat, status, capabilities, 
                                       performance_metrics, storage_capacity, current_load, version, region, tags)
-                VALUES ('{node_id}', '{datetime.utcnow()}', '{state_data.get('status')}', 
+                VALUES ('{node_id}', '{datetime.now(timezone.utc)}', '{state_data.get('status')}', 
                        '{json.dumps(state_data.get('capabilities', {}))}',
                        '{json.dumps(state_data.get('performance_metrics', {}))}',
                        '{json.dumps(state_data.get('storage_capacity', {}))}',
@@ -878,7 +945,7 @@ class PostgreSQLManager:
                     performance_metrics = EXCLUDED.performance_metrics,
                     storage_capacity = EXCLUDED.storage_capacity,
                     current_load = EXCLUDED.current_load,
-                    updated_at = '{datetime.utcnow()}'
+                    updated_at = '{datetime.now(timezone.utc)}'
                 """
                 
                 await session.execute(upsert_stmt)
@@ -892,7 +959,7 @@ class PostgreSQLManager:
         try:
             async with self.async_session_factory() as session:
                 # Build time range filter
-                end_time = datetime.utcnow()
+                end_time = datetime.now(timezone.utc)
                 start_time = end_time - timedelta(hours=query.time_range_hours)
                 
                 # Build base query
@@ -920,7 +987,7 @@ class PostgreSQLManager:
                 
                 # Format results
                 analytics_data = {
-                    'query_executed_at': datetime.utcnow().isoformat(),
+                    'query_executed_at': datetime.now(timezone.utc).isoformat(),
                     'time_range_hours': query.time_range_hours,
                     'total_operations': sum(row[2] for row in rows),
                     'total_bytes': sum(row[3] for row in rows),
@@ -953,7 +1020,7 @@ class PostgreSQLManager:
         """Clean up old partitions beyond retention period"""
         try:
             async with self.async_engine.begin() as conn:
-                cutoff_date = datetime.utcnow() - timedelta(days=retention_months * 30)
+                cutoff_date = datetime.now(timezone.utc) - timedelta(days=retention_months * 30)
                 
                 # Find old partitions
                 result = await conn.execute("""
@@ -1190,7 +1257,7 @@ class RedisStateManager:
             await self.publish_message('omega:leader:election', {
                 'event': 'leader_elected',
                 'node_id': self.get_node_id(),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             })
             
         except Exception as e:
@@ -1270,7 +1337,7 @@ class RedisStateManager:
                 'redis_version': info.get('redis_version', 'Unknown'),
                 'connected_clients': info.get('connected_clients', 0),
                 'used_memory_human': info.get('used_memory_human', 'Unknown'),
-                'last_updated': datetime.utcnow().isoformat()
+                'last_updated': datetime.now(timezone.utc).isoformat()
             }
             
         except Exception as e:
@@ -1302,12 +1369,21 @@ class ObjectStorageManager:
             if self.storage_type == "s3":
                 await self._setup_s3_client()
             elif self.storage_type == "minio":
-                await self._setup_minio_client()
+                try:
+                    await self._setup_minio_client()
+                except Exception as e:
+                    # Soft-disable MinIO (network/offline) -> fallback to LocalFS adapter
+                    fallback_root = os.path.abspath(os.path.join('data','object_storage','fallback_local_fs'))
+                    logger.warning(f"MinIO unavailable ({e}); switching to LocalFS fallback at {fallback_root}")
+                    self.storage_type = 'localfs'
+                    self.minio_client = None
+                    self.local_adapter = LocalFSAdapter(fallback_root)  # type: ignore[attr-defined]
             else:
                 raise ValueError(f"Unsupported storage type: {self.storage_type}")
             
             # Ensure bucket exists
-            await self._ensure_bucket_exists()
+            if self.storage_type in ('s3','minio'):
+                await self._ensure_bucket_exists()
             
             logger.info("Object storage manager initialized successfully")
             return True
@@ -1394,6 +1470,9 @@ class ObjectStorageManager:
         try:
             object_key = f"objects/{object_id}"
             
+            if getattr(self, 'local_adapter', None):  # Fallback path
+                await self.local_adapter.put_object(object_key, data)  # type: ignore[attr-defined]
+                return True
             if self.storage_type == "s3":
                 return await self._store_s3_object(object_key, data, metadata)
             elif self.storage_type == "minio":
@@ -1736,7 +1815,7 @@ class FastAPIOrchestrator:
         async def health_check():
             return {
                 "status": "healthy",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "version": "2.1.0",
                 "services": await self._get_service_health()
             }
@@ -1887,7 +1966,7 @@ class FastAPIOrchestrator:
                 storage_tier=request.tier,
                 size_bytes=len(request.data),
                 checksum=checksum,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 message="Object stored successfully" if success else "Storage failed"
             )
             
@@ -1899,7 +1978,7 @@ class FastAPIOrchestrator:
                 storage_tier=request.tier,
                 size_bytes=len(request.data) if hasattr(request, 'data') else 0,
                 checksum="",
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 message=f"Storage error: {str(e)}"
             )
     
@@ -2069,7 +2148,7 @@ class FastAPIOrchestrator:
                 'model_name': model_name,
                 'prediction': f"prediction_for_{model_name}",
                 'confidence': 0.95,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
             
             return prediction
@@ -2090,7 +2169,7 @@ class FastAPIOrchestrator:
                 "type": "status",
                 "data": {
                     "connected": True,
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
             })
             
@@ -2709,7 +2788,7 @@ process.on('SIGINT', () => {
                     await websocket.send(json.dumps({
                         'type': 'welcome',
                         'source': 'python-storage-node',
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': datetime.now(timezone.utc).isoformat()
                     }))
                     
                     # Handle incoming messages
@@ -2766,7 +2845,7 @@ process.on('SIGINT', () => {
             if message_type == 'ping':
                 await websocket.send(json.dumps({
                     'type': 'pong',
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': datetime.now(timezone.utc).isoformat()
                 }))
             
             elif message_type == 'data_processing':
@@ -3188,7 +3267,7 @@ class CoreServicesOrchestrator:
         """Get comprehensive health status of all services"""
         try:
             health_status = {
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 'overall_status': 'healthy' if all(self.service_health.values()) else 'degraded',
                 'initialized': self.is_initialized,
                 'services': {}
@@ -3217,7 +3296,7 @@ class CoreServicesOrchestrator:
         except Exception as e:
             logger.error(f"Health status collection failed: {e}")
             return {
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 'overall_status': 'error',
                 'error': str(e)
             }
@@ -3240,7 +3319,7 @@ class CoreServicesOrchestrator:
                             'bucket': kwargs.get('bucket'),
                             'key': kwargs.get('key'),
                             'size': len(kwargs.get('data', b'')),
-                            'timestamp': datetime.utcnow().isoformat()
+                            'timestamp': datetime.now(timezone.utc).isoformat()
                         }
                     )
                     
@@ -3248,7 +3327,7 @@ class CoreServicesOrchestrator:
                     await self.services['redis'].set_state(
                         f"object:{kwargs.get('bucket')}:{kwargs.get('key')}",
                         {
-                            'stored_at': datetime.utcnow().isoformat(),
+                            'stored_at': datetime.now(timezone.utc).isoformat(),
                             'size': len(kwargs.get('data', b''))
                         }
                     )
@@ -3269,7 +3348,7 @@ class CoreServicesOrchestrator:
                             'operation': 'retrieve',
                             'bucket': kwargs.get('bucket'),
                             'key': kwargs.get('key'),
-                            'timestamp': datetime.utcnow().isoformat()
+                            'timestamp': datetime.now(timezone.utc).isoformat()
                         }
                     )
                     
@@ -11121,24 +11200,41 @@ class IsolationForestAnomalyDetector:
         try:
             if not values:
                 return [0.0] * 8
-            
-            values_array = np.array(values)
-            
+            # Normalize heterogenous entries (objects, numeric strings)
+            norm: List[float] = []
+            for v in values:
+                if isinstance(v, (int, float)):
+                    norm.append(float(v))
+                elif hasattr(v, 'value') and isinstance(getattr(v, 'value'), (int, float)):
+                    norm.append(float(getattr(v, 'value')))
+                else:
+                    try:
+                        norm.append(float(str(v)))
+                    except Exception:
+                        continue
+            if not norm:
+                return [0.0] * 8
+            arr = np.asarray(norm, dtype=float)
+            if arr.size < 2:
+                arr = np.pad(arr, (0, 2-arr.size), 'edge')
+            mean_val = float(np.mean(arr))
             features = [
-                np.mean(values_array),           # Mean
-                np.std(values_array),            # Standard deviation
-                np.min(values_array),            # Minimum
-                np.max(values_array),            # Maximum
-                np.median(values_array),         # Median
-                values_array[-1] - values_array[0], # Trend (last - first)
-                len([v for v in values if v > np.mean(values_array)]), # Above mean count
-                np.sum(np.abs(np.diff(values_array))) / len(values_array) # Volatility
+                mean_val,
+                float(np.std(arr)),
+                float(np.min(arr)),
+                float(np.max(arr)),
+                float(np.median(arr)),
+                float(arr[-1] - arr[0]),
+                int(np.sum(arr > mean_val)),
+                float(np.sum(np.abs(np.diff(arr))) / len(arr))
             ]
-            
             return features
             
         except Exception as e:
-            logger.error(f"Feature extraction failed: {e}")
+            try:
+                logger.error(f"feature_extraction_error: {e} size={len(values)} sample={values[:3] if isinstance(values,(list,tuple)) else 'n/a'}")
+            except Exception:
+                logger.error(f"feature_extraction_error: {e}")
             return [0.0] * 8
     
     def _train_isolation_forest(self, metric_key: str):
@@ -18895,7 +18991,7 @@ class DataLifecycleMLModel:
             return self._scale_features(features)
             
         except Exception as e:
-            logger.error(f"Feature extraction failed: {e}")
+            logger.error("feature_extraction_error", error=str(e), pattern_id=getattr(access_pattern,'data_type',None))
             return np.zeros(15)
     
     def _calculate_access_regularity(self, access_times: List[datetime]) -> float:
@@ -19333,7 +19429,7 @@ class CompressionOptimizer:
             return np.clip(features, 0.0, 1.0)
             
         except Exception as e:
-            logger.error(f"Compression feature extraction failed: {e}")
+            logger.error("compression_feature_extraction_error", error=str(e))
             return np.ones(12) * 0.5
     
     def _get_type_compressibility(self, data_type: str) -> float:
@@ -20124,7 +20220,9 @@ class PredictiveStorageLayer:
     async def initialize(self) -> bool:
         """Initialize the complete predictive storage layer"""
         try:
-            logger.info("Initializing Predictive Storage Layer v5.1...")
+            if self.is_initialized:
+                return True
+            logger.info("Predictive Storage Layer v5.1 initialization start")
             
             # Initialize all components
             ml_init = await self.data_lifecycle_model.initialize()
@@ -20136,7 +20234,7 @@ class PredictiveStorageLayer:
                 return False
             
             self.is_initialized = True
-            logger.info("Predictive Storage Layer v5.1 initialized successfully")
+            logger.info("Predictive Storage Layer v5.1 initialized")
             return True
             
         except Exception as e:

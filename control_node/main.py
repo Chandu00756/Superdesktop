@@ -28,7 +28,7 @@ import ssl
 import struct
 from typing import Dict, List, Any, Optional, Set, Union, Tuple
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from enum import Enum, auto
 from contextlib import asynccontextmanager
@@ -722,7 +722,7 @@ class ResourceManager:
             self.allocation_tracking[task_id] = {
                 'node_id': node_id,
                 'requirements': requirements,
-                'allocated_at': datetime.utcnow()
+                'allocated_at': datetime.now(timezone.utc)
             }
             
             return True
@@ -785,7 +785,7 @@ class HeartbeatManager:
             if redis_client:
                 heartbeat_data = {
                     'node_id': f"control-{socket.gethostname()}",
-                    'timestamp': datetime.utcnow().isoformat(),
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
                     'status': 'healthy'
                 }
                 await redis_client.setex('heartbeat:control', self.heartbeat_interval * 2, json.dumps(heartbeat_data))
@@ -1063,7 +1063,7 @@ class ComputePerformanceMetrics:
         try:
             self.current_metrics = metrics
             self.metrics_history.append({
-                'timestamp': datetime.utcnow(),
+                'timestamp': datetime.now(timezone.utc),
                 'metrics': metrics.copy()
             })
         except Exception as e:
@@ -1080,7 +1080,7 @@ class ThermalMonitor:
         """Update thermal data for the node"""
         try:
             self.thermal_data.append({
-                'timestamp': datetime.utcnow(),
+                'timestamp': datetime.now(timezone.utc),
                 'data': temp_data
             })
         except Exception as e:
@@ -1354,9 +1354,9 @@ class TierStorage:
             
             self.data_blocks[data_id] = {
                 'size_gb': data_size_gb,
-                'stored_at': datetime.utcnow(),
+                'stored_at': datetime.now(timezone.utc),
                 'access_count': 0,
-                'last_access': datetime.utcnow()
+                'last_access': datetime.now(timezone.utc)
             }
             
             self.used_gb += data_size_gb
@@ -1567,7 +1567,7 @@ class StorageIOMetrics:
         try:
             self.current_metrics.update(new_metrics)
             self.metrics_history.append({
-                'timestamp': datetime.utcnow(),
+                'timestamp': datetime.now(timezone.utc),
                 'metrics': new_metrics.copy()
             })
         except Exception as e:
@@ -1586,7 +1586,7 @@ class AccessPatternTracker:
             access_event = {
                 'data_id': data_id,
                 'access_type': access_type,
-                'timestamp': datetime.utcnow()
+                'timestamp': datetime.now(timezone.utc)
             }
             
             self.access_log.append(access_event)
@@ -1595,12 +1595,12 @@ class AccessPatternTracker:
             if data_id not in self.pattern_cache:
                 self.pattern_cache[data_id] = {
                     'access_count': 0,
-                    'last_access': datetime.utcnow(),
+                    'last_access': datetime.now(timezone.utc),
                     'access_frequency': 'low'
                 }
             
             self.pattern_cache[data_id]['access_count'] += 1
-            self.pattern_cache[data_id]['last_access'] = datetime.utcnow()
+            self.pattern_cache[data_id]['last_access'] = datetime.now(timezone.utc)
             
         except Exception as e:
             logging.error(f"Access recording failed: {e}")
@@ -1618,7 +1618,7 @@ class DataCatalog:
             self.data_registry[data_id] = {
                 'tier': tier,
                 'size_gb': size_gb,
-                'created_at': datetime.utcnow(),
+                'created_at': datetime.now(timezone.utc),
                 'metadata': {}
             }
             
@@ -1666,7 +1666,7 @@ class WorkloadManager:
                     'workload': workload,
                     'target_node': target_node,
                     'handler': handler,
-                    'start_time': datetime.utcnow()
+                    'start_time': datetime.now(timezone.utc)
                 }
                 
                 logging.info(f"Workload {execution_id} scheduled on {target_node}")
@@ -1955,7 +1955,7 @@ class ThermalManager:
             self.thermal_history[node_id].append(thermal_data)
             
             # Keep only recent data (last hour)
-            cutoff_time = datetime.utcnow() - timedelta(hours=1)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=1)
             while (self.thermal_history[node_id] and 
                    self.thermal_history[node_id][0]['timestamp'] < cutoff_time):
                 self.thermal_history[node_id].popleft()
@@ -2618,7 +2618,7 @@ class SimpleAnomalyDetector:
                 'task_id': task.get('task_id'),
                 'node_id': node_id,
                 'scheduling_time': scheduling_time,
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 'features': {
                     'cpu_cores': task.get('cpu_cores', 0),
                     'memory_gb': task.get('memory_gb', 0),
@@ -3003,8 +3003,8 @@ class LeaderElectionManager:
                 if success:
                     self.state.current_leader = self.node_id
                     self.state.leader_term += 1
-                    self.state.leader_lease_expiry = datetime.utcnow() + timedelta(seconds=LEADER_LEASE_DURATION)
-                    self.state.last_election_time = datetime.utcnow()
+                    self.state.leader_lease_expiry = datetime.now(timezone.utc) + timedelta(seconds=LEADER_LEASE_DURATION)
+                    self.state.last_election_time = datetime.now(timezone.utc)
                     
                     logging.info(f"Successfully became cluster leader (term {self.state.leader_term})")
                     LEADER_ELECTIONS_TOTAL.inc()
@@ -3033,7 +3033,7 @@ class LeaderElectionManager:
                     # Refresh lease
                     try:
                         etcd_client.refresh_lease(self.state.leader_lease_expiry)
-                        self.state.leader_lease_expiry = datetime.utcnow() + timedelta(seconds=LEADER_LEASE_DURATION)
+                        self.state.leader_lease_expiry = datetime.now(timezone.utc) + timedelta(seconds=LEADER_LEASE_DURATION)
                     except Exception as e:
                         logging.warning(f"Failed to refresh leader lease: {e}")
                         # Try to re-acquire leadership
@@ -3916,7 +3916,7 @@ def get_recent_logs(node_id: str, limit: int = 50):
     """Get recent system logs for a node"""
     try:
         logs = []
-        current_time = datetime.utcnow()
+        current_time = datetime.now(timezone.utc)
         
         # Simulate logs for demonstration
         log_levels = ["INFO", "WARN", "ERROR", "DEBUG"]
@@ -4045,7 +4045,7 @@ def get_gpu_details():
 def get_security_status(node_id: str):
     """Get security status for a node"""
     return {
-        "last_scan": (datetime.utcnow() - timedelta(hours=2)).isoformat(),
+    "last_scan": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
         "vulnerabilities": {
             "critical": 0,
             "high": 1,
@@ -4054,11 +4054,11 @@ def get_security_status(node_id: str):
         },
         "firewall_status": "active",
         "antivirus_status": "active",
-        "last_auth": datetime.utcnow().isoformat(),
+    "last_auth": datetime.now(timezone.utc).isoformat(),
         "failed_logins": 0,
         "certificates": {
             "valid": True,
-            "expires": (datetime.utcnow() + timedelta(days=90)).isoformat()
+            "expires": (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()
         }
     }
 

@@ -7,13 +7,39 @@ This module provides helper factories that:
 
 Use create_counter/create_gauge/create_histogram instead of direct constructors.
 """
-from prometheus_client import Counter, Gauge, Histogram, REGISTRY as DEFAULT_REGISTRY
+import os
+from prometheus_client import (
+    Counter,
+    Gauge,
+    Histogram,
+    REGISTRY as DEFAULT_REGISTRY,
+    CollectorRegistry,
+    PROCESS_COLLECTOR,
+    PLATFORM_COLLECTOR,
+    GC_COLLECTOR,
+)
 import logging
 
 log = logging.getLogger(__name__)
 
 # In-process cache to short‑circuit second attempts before hitting the registry
 _METRIC_CACHE = {}
+
+# Optional isolated registry support (prevents duplicate metric warnings across forks or multi-service runs)
+_ISOLATED = bool(int(os.environ.get('OMEGA_METRICS_ISOLATE', '1')))
+if _ISOLATED:
+    try:
+        _REGISTRY = CollectorRegistry(auto_describe=True)
+        # Best-effort registration; ignore if collector objects differ by version
+        for collector in (PROCESS_COLLECTOR, PLATFORM_COLLECTOR, GC_COLLECTOR):  # type: ignore
+            try:
+                _REGISTRY.register(collector)  # type: ignore[arg-type]
+            except Exception:
+                pass
+    except Exception:
+        _REGISTRY = DEFAULT_REGISTRY
+else:
+    _REGISTRY = DEFAULT_REGISTRY
 
 
 def _key(kind: str, name: str, labelnames, buckets=None):
@@ -42,7 +68,7 @@ def _find_existing(registry, name: str):
 
 def create_counter(name: str, documentation: str, labelnames=None, registry=None):
     if registry is None:
-        registry = DEFAULT_REGISTRY
+        registry = _REGISTRY
     key = _key("counter", name, labelnames)
     if key in _METRIC_CACHE:
         return _METRIC_CACHE[key]
@@ -65,7 +91,7 @@ def create_counter(name: str, documentation: str, labelnames=None, registry=None
 
 def create_gauge(name: str, documentation: str, labelnames=None, registry=None):
     if registry is None:
-        registry = DEFAULT_REGISTRY
+        registry = _REGISTRY
     key = _key("gauge", name, labelnames)
     if key in _METRIC_CACHE:
         return _METRIC_CACHE[key]
@@ -88,7 +114,7 @@ def create_gauge(name: str, documentation: str, labelnames=None, registry=None):
 
 def create_histogram(name: str, documentation: str, labelnames=None, registry=None, buckets=None):
     if registry is None:
-        registry = DEFAULT_REGISTRY
+        registry = _REGISTRY
     key = _key("histogram", name, labelnames, buckets)
     if key in _METRIC_CACHE:
         return _METRIC_CACHE[key]

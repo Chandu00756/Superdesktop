@@ -8,12 +8,13 @@ import logging
 import time
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import uuid
 import hashlib
 
 from fastapi import FastAPI, WebSocket, BackgroundTasks
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import os as _os
 _os.environ.setdefault('PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION', 'python')
@@ -54,20 +55,74 @@ class PlacementDecision(BaseModel):
 
 class OmegaOrchestrator:
     def __init__(self):
-        self.nodes: Dict[str, NodeSpec] = {}
-        self.active_sessions: Dict[str, Dict[str, Any]] = {}
-        self.placement_history: List[PlacementDecision] = []
+        """Initialize in-memory state containers and stat counters."""
+        self.start_time = time.time()
+        # Core in-memory state
+        self.nodes = {}              # type: Dict[str, NodeSpec]
+        self.active_sessions = {}    # type: Dict[str, Dict[str, Any]]
+        self.placement_history = []  # type: List[PlacementDecision]
         self.cluster_state = "initializing"
+
+        # External clients (lazy async init in initialize())
         self.redis_client = None
         self.postgres_pool = None
         self.etcd_client = None
+
+        # Logging
         self.logger = logging.getLogger(__name__)
+
+        # Scheduling / autoscaling stats (numeric counters)
+        self._scheduling_stats = {
+            'decisions': 0,
+            'last_score': 0.0,
+            'scales_out': 0,
+            'scales_in': 0,
+            'autoscale_iterations': 0
+        }
+
+        # Rolling samples for derived custom metrics
+        self._seamlessness_samples = []  # type: List[float]
+        self._scaling_eff_samples = []   # type: List[float]
+        self._collab_coeff_samples = []  # type: List[float]
+
+        # Recorded autoscaling actions (auditable). Each item: {ts, action, reason, util_before}
+        self.autoscaling_events = []     # type: List[Dict[str, Any]]
+        # Internal cache of whether autoscaling tables initialized (avoid repeat DDL attempts)
+        self._autoscale_persistence_ready = False
+
+    # --- Unified health schema ---
+    def build_health(self) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        deps = {
+            'redis': {'ok': self.redis_client is not None},
+            'database': {'ok': self.postgres_pool is not None},
+            'etcd': {'ok': self.etcd_client is not None},
+        }
+        degraded = [k for k, v in deps.items() if not v['ok']]
+        return {
+            'status': 'healthy' if not degraded else 'degraded',
+            'version': '1.0.0',
+            'uptime_seconds': int(time.time() - self.start_time),
+            'cluster': {
+                'state': self.cluster_state,
+                'node_count': len(self.nodes),
+                'active_sessions': len(self.active_sessions),
+                'last_decision_score': self._scheduling_stats.get('last_score'),
+                'autoscale': {
+                    'iterations': self._scheduling_stats.get('autoscale_iterations'),
+                    'scale_out': self._scheduling_stats.get('scales_out'),
+                    'scale_in': self._scheduling_stats.get('scales_in')
+                }
+            },
+            'dependencies': deps,
+            'degraded': degraded,
+            'timestamp': now.isoformat()
+        }
         
     async def initialize(self):
         """Initialize orchestrator components"""
         # Redis for fast lookups
         try:
-            # Use centralized helper which tries aioredis, redis.asyncio, then an in-memory stub.
             from utils.redis_helper import get_redis_client
             self.redis_client = await get_redis_client(REDIS_URL)
         except Exception as e:
@@ -82,41 +137,42 @@ class OmegaOrchestrator:
                 async def hgetall(self, key):
                     return self._store.get(key, {})
             self.redis_client = _InMemoryRedisStub()
-        
-        # PostgreSQL for persistent storage (fall back to SQLite if not available)
+
+        # PostgreSQL (fallback to SQLite if unavailable)
         try:
             self.postgres_pool = await asyncpg.create_pool(POSTGRES_URL)
         except Exception as e:
             self.logger.warning(f"Postgres unavailable ({e}), falling back to local SQLite")
             try:
-                import aiosqlite
-                # Use a simple aiosqlite-based thin pool wrapper
+                try:
+                    import aiosqlite  # type: ignore
+                except Exception:
+                    aiosqlite = None  # type: ignore
+                if aiosqlite is None:
+                    raise RuntimeError('aiosqlite not installed')
                 class _SQLitePool:
                     def __init__(self, path):
                         self.path = path
                     async def acquire(self):
                         return await aiosqlite.connect(self.path)
-                    async def __aenter__(self):
-                        return await aiosqlite.connect(self.path)
-                    async def __aexit__(self, exc_type, exc, tb):
-                        pass
                 sqlite_path = _os.path.join(_os.getcwd(), 'omega_orchestrator.db')
                 self.postgres_pool = _SQLitePool(sqlite_path)
             except Exception:
                 self.logger.error("No local DB available for orchestrator persistence")
                 self.postgres_pool = None
-        
-        # etcd for distributed consensus
+
+        # etcd client
         self.etcd_client = etcd3.client(host='localhost', port=2379)
-        
-        # Initialize database schema
+
+        # Initialize schema
         await self._init_database()
-        
-        # Start background tasks
+
+        # Launch background tasks
         asyncio.create_task(self._heartbeat_monitor())
         asyncio.create_task(self._cluster_optimization())
         asyncio.create_task(self._metrics_collection())
-        
+        asyncio.create_task(self._autoscaling_loop())
+
         self.cluster_state = "active"
         self.logger.info("Omega Orchestrator initialized successfully")
     
@@ -154,7 +210,16 @@ class OmegaOrchestrator:
                 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
                 CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
                 CREATE INDEX IF NOT EXISTS idx_placement_session ON placement_decisions(session_id);
+                CREATE TABLE IF NOT EXISTS autoscaling_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    ts TIMESTAMPTZ DEFAULT NOW(),
+                    action VARCHAR(32) NOT NULL,
+                    reason TEXT,
+                    util_before FLOAT,
+                    active_nodes INT
+                );
             ''')
+                self._autoscale_persistence_ready = True
         except Exception as e:
             self.logger.error(f"Database init failed (continuing without persistence): {e}")
     
@@ -242,8 +307,15 @@ class OmegaOrchestrator:
     async def process_placement_request(self, request: PlacementRequest) -> PlacementDecision:
         """Process resource placement request using advanced algorithms"""
         try:
+            # Capability filters (CPU/GPU/memory tags & custom constraints)
+            eligible = {
+                nid: n for nid, n in self.nodes.items()
+                if self._passes_capability_filters(n, request.resource_requirements, request.constraints)
+            }
+            if not eligible:
+                raise RuntimeError('No eligible nodes for placement')
             # Calculate placement scores for all eligible nodes
-            placement_scores = await self._calculate_placement_scores(request)
+            placement_scores = await self._calculate_placement_scores(request, candidates=eligible)
             
             # Apply bin-packing algorithm with latency weights
             selected_nodes = self._bin_pack_with_latency(request, placement_scores)
@@ -275,11 +347,11 @@ class OmegaOrchestrator:
             self.logger.error(f"Failed to process placement request: {e}")
             raise
     
-    async def _calculate_placement_scores(self, request: PlacementRequest) -> Dict[str, float]:
+    async def _calculate_placement_scores(self, request: PlacementRequest, candidates: Optional[Dict[str, NodeSpec]] = None) -> Dict[str, float]:
         """Calculate placement scores using multi-factor algorithm"""
         scores = {}
-        
-        for node_id, node in self.nodes.items():
+        nodes_iter = (candidates or self.nodes)
+        for node_id, node in nodes_iter.items():
             if node.status != "active":
                 continue
             
@@ -334,7 +406,8 @@ class OmegaOrchestrator:
         """Monitor node heartbeats and handle failures"""
         while True:
             try:
-                current_time = datetime.now()
+                # Use timezone-aware UTC time for consistency
+                current_time = datetime.now(timezone.utc)
                 failed_nodes = []
                 
                 for node_id, node in self.nodes.items():
@@ -391,20 +464,326 @@ class OmegaOrchestrator:
                     "active_sessions": len(self.active_sessions),
                     "cluster_utilization": await self._calculate_cluster_utilization(),
                     "average_placement_score": self._calculate_avg_placement_score(),
+                    "seamlessness_index": self._compute_seamlessness_index(),
+                    "scaling_efficiency": self._compute_scaling_efficiency(),
+                    "collaboration_coefficient": self._compute_collaboration_coefficient(),
                     "timestamp": datetime.now().isoformat()
                 }
-                
                 # Store in Redis for real-time access
-                await self.redis_client.set("cluster:metrics", json.dumps(metrics))
-                
-                # Export to Prometheus
+                try:
+                    await self.redis_client.set("cluster:metrics", json.dumps(metrics))  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                # Export to Prometheus (placeholder hook)
                 await self._export_prometheus_metrics(metrics)
-                
-                await asyncio.sleep(30)  # Collect every 30 seconds
-                
             except Exception as e:
                 self.logger.error(f"Error in metrics collection: {e}")
-                await asyncio.sleep(30)
+            await asyncio.sleep(15)
+    async def _autoscaling_loop(self):
+        """Periodic autoscaling decisions (hooks only / v1)."""
+        interval = int(_os.getenv('OMEGA_AUTOSCALE_INTERVAL', '60'))
+        while True:
+            try:
+                self._scheduling_stats['autoscale_iterations'] += 1
+                util = await self._calculate_cluster_utilization()
+                # Simple thresholds
+                if util > 0.75:
+                    await self._scale_out(util, reason="utilization_high")
+                elif util < 0.25 and len(self.nodes) > 1:
+                    await self._scale_in(util, reason="utilization_low")
+            except Exception as e:
+                self.logger.warning(f"Autoscale loop error: {e}")
+            await asyncio.sleep(interval)
+    # --- Autoscaling helpers ---
+    def _record_autoscale_event(self, action: str, util_before: float, reason: str):
+        evt = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'action': action,
+            'reason': reason,
+            'util_before': round(util_before, 4),
+            'active_nodes': len([n for n in self.nodes.values() if n.status == 'active'])
+        }
+        self.autoscaling_events.append(evt)
+        # retain last 200 events to bound memory
+        if len(self.autoscaling_events) > 200:
+            self.autoscaling_events = self.autoscaling_events[-200:]
+        self.logger.info(f"[autoscale] {action} recorded reason={reason} util={util_before:.2f}")
+        # Best-effort persistence
+        asyncio.create_task(self._persist_autoscale_event(evt))
+
+    async def _scale_out(self, util_before: float, reason: str = "threshold", count: int = 1):
+        """Provision simulated nodes (in-memory + persistence) to satisfy scale out."""
+        self._scheduling_stats['scales_out'] += 1
+        for _ in range(max(1, count)):
+            node_id = f"auto-node-{uuid.uuid4().hex[:6]}"
+            spec = NodeSpec(
+                node_id=node_id,
+                node_type='cpu_node',
+                resources={'cpu': 8, 'memory': 32, 'gpu': 0},
+                status='active',
+                last_heartbeat=datetime.now(timezone.utc),
+                labels={'autoscaled': 'true'},
+                annotations={'reason': reason},
+                network_config={}
+            )
+            # Reuse existing register logic for consistency
+            try:
+                await self.register_node(spec)
+            except Exception as e:
+                self.logger.error(f"Autoscale scale_out register failed for {node_id}: {e}")
+        self._record_autoscale_event('scale_out', util_before, reason)
+
+    async def _scale_in(self, util_before: float, reason: str = "threshold", count: int = 1):
+        """Select candidate nodes (autoscaled) and remove them gracefully."""
+        self._scheduling_stats['scales_in'] += 1
+        removable = [n for n in self.nodes.values() if n.labels.get('autoscaled') == 'true' and n.status == 'active']
+        # Fallback: include any active nodes except first if not enough
+        if len(removable) < count:
+            extra = [n for n in self.nodes.values() if n.status == 'active' and n not in removable]
+            removable.extend(extra)
+        removed = 0
+        for node in removable:
+            if len([n for n in self.nodes.values() if n.status == 'active']) <= 1:
+                break  # never remove last node
+            try:
+                await self.deregister_node(node.node_id)
+                removed += 1
+            except Exception as e:
+                self.logger.error(f"Autoscale scale_in deregister failed for {node.node_id}: {e}")
+            if removed >= count:
+                break
+        self._record_autoscale_event('scale_in', util_before, reason + f" removed={removed}")
+
+    async def _persist_autoscale_event(self, evt: Dict[str, Any]):
+        if not self.postgres_pool or not self._autoscale_persistence_ready:
+            return
+        try:
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute(
+                    'INSERT INTO autoscaling_events (action, reason, util_before, active_nodes, ts) VALUES ($1,$2,$3,$4,NOW())',
+                    evt['action'], evt['reason'], float(evt['util_before']), int(evt['active_nodes'])
+                )
+        except Exception as e:
+            # Suppress to avoid loop failure; log once
+            self.logger.debug(f"Persist autoscale event failed: {e}")
+
+    # --- Custom metrics computations ---
+    def _compute_seamlessness_index(self) -> float:
+        try:
+            # Use variance of last placement scores (lower variance -> higher seamlessness)
+            last_scores = [d.placement_score for d in self.placement_history[-20:]]
+            if len(last_scores) < 2:
+                return 100.0
+            import statistics
+            var = statistics.pvariance(last_scores)
+            score = max(0.0, 100.0 - min(var, 100.0))
+            self._seamlessness_samples.append(score)
+            return round(score,2)
+        except Exception:
+            return 0.0
+
+    def _compute_scaling_efficiency(self) -> float:
+        try:
+            active = len([n for n in self.nodes.values() if n.status=='active']) or 1
+            util = self._calculate_avg_placement_score()/ (active*10) if active else 0
+            eff = min(100.0, util * 100)
+            self._scaling_eff_samples.append(eff)
+            return round(eff,2)
+        except Exception:
+            return 0.0
+
+    def _compute_collaboration_coefficient(self) -> float:
+        try:
+            sessions = len(self.active_sessions) or 1
+            nodes = len(self.nodes) or 1
+            coeff = min(100.0, (sessions / nodes) * 50 + 50)
+            self._collab_coeff_samples.append(coeff)
+            return round(coeff,2)
+        except Exception:
+            return 0.0
+
+    # ---- Missing helper methods (added) ----
+    async def _store_placement_decision(self, decision: PlacementDecision) -> None:
+        if not self.postgres_pool:
+            return
+        try:
+            async with self.postgres_pool.acquire() as conn:
+                await conn.execute('''
+                    INSERT INTO placement_decisions (session_id, selected_nodes, resource_allocation, placement_score, reasoning)
+                    VALUES ($1, $2, $3, $4, $5)
+                ''', decision.session_id, json.dumps(decision.selected_nodes), json.dumps(decision.resource_allocation), decision.placement_score, decision.reasoning)
+        except Exception as e:
+            self.logger.warning(f"Persist placement decision failed: {e}")
+
+    async def _generate_allocation_plan(self, request: PlacementRequest, selected_nodes: List[str]) -> Dict[str, Dict[str, Any]]:
+        plan: Dict[str, Dict[str, Any]] = {}
+        if not selected_nodes:
+            return plan
+        # naive: evenly divide numeric resource requirements
+        counts = len(selected_nodes)
+        for node_id in selected_nodes:
+            node = self.nodes.get(node_id)
+            alloc: Dict[str, Any] = {}
+            for k,v in request.resource_requirements.items():
+                if isinstance(v,(int,float)):
+                    alloc[k] = max(0, v / counts)
+            plan[node_id] = alloc
+        return plan
+
+    def _generate_placement_reasoning(self, request: PlacementRequest, selected_nodes: List[str], scores: Dict[str,float]) -> str:
+        if not selected_nodes:
+            return "No nodes selected"
+        parts = []
+        for nid in selected_nodes:
+            parts.append(f"node {nid} score={scores.get(nid,0):.2f}")
+        return "; ".join(parts)
+
+    def _calculate_resource_score(self, req: Dict[str,Any], available: Dict[str,Any]) -> float:
+        if not req:
+            return 1.0
+        score = 0.0
+        counted = 0
+        for k,v in req.items():
+            if isinstance(v,(int,float)) and isinstance(available.get(k),(int,float)):
+                counted += 1
+                have = available[k]
+                score += min(1.0, have / (v if v else 1))
+        return score / counted if counted else 1.0
+
+    async def _calculate_latency_score(self, node_id: str, request: PlacementRequest) -> float:
+        # placeholder heuristic: random-ish deterministic hash based
+        h = int(hashlib.sha256(node_id.encode()).hexdigest(),16)
+        return ((h % 50) / 50)  # 0..0.98
+
+    async def _calculate_thermal_score(self, node_id: str) -> float:
+        # stub: assume good thermal headroom
+        return 0.9
+
+    def _calculate_load_score(self, node_id: str) -> float:
+        # low historical placement count yields higher score (spread load)
+        count = sum(1 for d in self.placement_history if node_id in d.selected_nodes)
+        return 1.0 / (1 + count)
+
+    def _passes_capability_filters(self, node: NodeSpec, req: Dict[str,Any], constraints: List[Dict[str,Any]]) -> bool:
+        # Basic CPU/GPU/memory filters
+        try:
+            if 'cpu' in req and node.resources.get('cpu',0) < req['cpu']:
+                return False
+            if 'memory' in req and node.resources.get('memory',0) < req['memory']:
+                return False
+            if req.get('gpu') and node.resources.get('gpu',0) < req['gpu']:
+                return False
+            # label constraints
+            for c in constraints or []:
+                key = c.get('key'); val = c.get('value')
+                if key and val and node.labels.get(key) != val:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _can_satisfy_requirements(self, node: NodeSpec, remaining: Dict[str,Any]) -> bool:
+        for k,v in remaining.items():
+            if isinstance(v,(int,float)) and node.resources.get(k,0) <= 0:
+                return False
+        return True
+
+    def _subtract_resources(self, remaining: Dict[str,Any], provided: Dict[str,Any]) -> Dict[str,Any]:
+        new = {}
+        for k,v in remaining.items():
+            if isinstance(v,(int,float)):
+                new_v = v - float(provided.get(k,0))
+                if new_v > 0:
+                    new[k] = new_v
+            else:
+                new[k] = v
+        return new
+
+    async def _calculate_cluster_utilization(self) -> float:
+        # naive: average resource score across nodes
+        if not self.nodes:
+            return 0.0
+        util = 0.0
+        for n in self.nodes.values():
+            util += sum(v for v in n.resources.values() if isinstance(v,(int,float)))
+        return min(1.0, util / (len(self.nodes) * 100.0))
+
+    def _calculate_avg_placement_score(self) -> float:
+        if not self.placement_history:
+            return 0.0
+        return sum(d.placement_score for d in self.placement_history) / len(self.placement_history)
+
+    async def _handle_node_failure(self, node_id: str):
+        node = self.nodes.get(node_id)
+        if not node:
+            return
+        node.status = 'failed'
+        try:
+            await self.redis_client.delete(f"node:{node_id}")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.logger.error(f"Node {node_id} marked failed")
+
+    async def _drain_node(self, node_id: str):
+        # placeholder: mark draining then drained; real impl would migrate sessions
+        node = self.nodes.get(node_id)
+        if node:
+            node.status = 'drained'
+
+    async def _identify_suboptimal_placements(self, recent: List[PlacementDecision]) -> List[str]:
+        # simple heuristic: pick sessions with score below median*0.5
+        if not recent:
+            return []
+        scores = [d.placement_score for d in recent]
+        median = sorted(scores)[len(scores)//2]
+        return [d.session_id for d in recent if d.placement_score < median*0.5]
+
+    async def _trigger_rebalancing(self, sessions: List[str]):
+        if not sessions:
+            return
+        self.logger.info(f"Rebalancing sessions: {sessions}")
+
+    async def _update_prediction_models(self, recent: List[PlacementDecision]):
+        # stub hook for future ML model updates
+        return
+
+    async def _export_prometheus_metrics(self, metrics: Dict[str,Any]):
+        # Expose a minimal Prometheus metrics integration using custom helper if available
+        try:
+            from utils import metrics as m
+            # Gauges (cached by helper)
+            g_total = m.create_gauge('omega_total_nodes', 'Total nodes in orchestrator')
+            g_active = m.create_gauge('omega_active_nodes', 'Active nodes in orchestrator')
+            g_util = m.create_gauge('omega_cluster_utilization', 'Cluster utilization (0-1)')
+            g_score = m.create_gauge('omega_avg_placement_score', 'Average placement score')
+            g_total.set(metrics.get('total_nodes',0))
+            g_active.set(metrics.get('active_nodes',0))
+            g_util.set(metrics.get('cluster_utilization',0.0))
+            g_score.set(metrics.get('average_placement_score',0.0))
+        except Exception:
+            pass
+
+    # Unified health endpoint builder (mirrors backend schema)
+    def build_health(self) -> Dict[str, Any]:
+        deps = {
+            'redis': {'ok': self.redis_client is not None},
+            'database': {'ok': self.postgres_pool is not None},
+            'etcd': {'ok': self.etcd_client is not None},
+            'scheduler': {'ok': True},
+        }
+        degraded = [k for k,v in deps.items() if not v['ok']]
+        return {
+            'status': 'healthy' if not degraded else 'degraded',
+            'version': '1.0.0',
+            'uptime_seconds': int(time.time()),
+            'dependencies': deps,
+            'degraded': degraded,
+            'scheduling': self._scheduling_stats,
+            # Use timezone-aware UTC timestamp instead of deprecated utcnow
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+
+    # (FastAPI app defined after class)
     
     def _validate_node_spec(self, node_spec: NodeSpec) -> bool:
         """Validate node specification"""
@@ -436,40 +815,54 @@ class OmegaOrchestrator:
         except Exception as e:
             self.logger.error(f"Failed to announce node change: {e}")
 
-# Create FastAPI app for orchestrator API
-app = FastAPI(title="Omega Orchestrator", version="1.0.0")
-orchestrator = OmegaOrchestrator()
+# FastAPI app instantiation (single, after class definition)
+orch = OmegaOrchestrator()
 
-@app.on_event("startup")
-async def startup_event():
-    await orchestrator.initialize()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await orch.initialize()
+    yield
+    # Shutdown hooks (future): flush metrics, close DB pools
+    try:
+        if orch.postgres_pool:
+            # asyncpg pool has close() coroutine; sqlite fallback has none
+            close = getattr(orch.postgres_pool, 'close', None)
+            if close:
+                maybe = close()
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+    except Exception:
+        pass
 
-@app.post("/api/v1/nodes/register")
-async def register_node(node_data: dict):
-    node_spec = NodeSpec(**node_data)
-    success = await orchestrator.register_node(node_spec)
-    return {"success": success}
+app = FastAPI(title="Omega Orchestrator", version="1.0.0", lifespan=lifespan)
 
-@app.delete("/api/v1/nodes/{node_id}")
-async def deregister_node(node_id: str):
-    success = await orchestrator.deregister_node(node_id)
-    return {"success": success}
+@app.get('/health')
+async def health():
+    return orch.build_health()
 
-@app.post("/api/v1/placement/request")
-async def placement_request(request: PlacementRequest):
-    decision = await orchestrator.process_placement_request(request)
+@app.post('/schedule')
+async def schedule(req: PlacementRequest):
+    decision = await orch.process_placement_request(req)
     return decision
 
-@app.get("/api/v1/cluster/status")
-async def get_cluster_status():
-    return {
-        "cluster_name": CLUSTER_NAME,
-        "state": orchestrator.cluster_state,
-        "total_nodes": len(orchestrator.nodes),
-        "active_nodes": len([n for n in orchestrator.nodes.values() if n.status == "active"]),
-        "active_sessions": len(orchestrator.active_sessions)
-    }
+@app.get('/autoscaling/events')
+async def autoscaling_events(limit: int = 50):
+    limit = max(1, min(200, limit))
+    return {'events': orch.autoscaling_events[-limit:]}
 
-if __name__ == "__main__":
+@app.post('/autoscaling/scale_out')
+async def manual_scale_out(count: int = 1, reason: str = 'manual'):
+    util = await orch._calculate_cluster_utilization()
+    await orch._scale_out(util, reason=reason, count=count)
+    return {'status':'ok','action':'scale_out','count':count,'nodes': list(orch.nodes.keys())}
+
+@app.post('/autoscaling/scale_in')
+async def manual_scale_in(count: int = 1, reason: str = 'manual'):
+    util = await orch._calculate_cluster_utilization()
+    await orch._scale_in(util, reason=reason, count=count)
+    return {'status':'ok','action':'scale_in','count':count,'nodes': list(orch.nodes.keys())}
+
+if __name__ == "__main__":  # pragma: no cover
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7777)

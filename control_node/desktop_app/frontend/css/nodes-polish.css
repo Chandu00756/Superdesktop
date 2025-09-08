@@ -1,0 +1,479 @@
+#nodes-container .main-modes .mode-tab i { font-size:12px; opacity:.85; }
+/* nodes-polish.css - Persistent overrides and tuned theme for Nodes tab */
+:root{
+  --omega-accent: #00e6d1;
+  --omega-bg: #0b0c0d;
+  --omega-panel: #151516;
+  --omega-muted: #9a9a9a;
+  --omega-danger: #d9534f;
+  --omega-radius: 7px; /* slightly tighter */
+  --omega-gap: 10px;   /* ~10% compaction */
+}
+
+/* Global overrides scoped to app layout */
+.omega-menubar, #nodes-container .omega-menubar, .omega-menu {
+  background: #0b0f10 !important;
+  border-bottom: 1px solid rgba(255,255,255,0.04) !important;
+}
+
+/* Toolbar buttons (larger, clearer) */
+.omega-menubar .btn-small, #nodes-container .omega-menubar .btn-small, #nodes-container .omega-menubar button {
+  background: transparent !important;
+  border: 1px solid rgba(255,255,255,0.06) !important;
+  color: var(--omega-accent) !important;
+  padding: 7px 9px !important; /* compacted */
+  border-radius: var(--omega-radius) !important;
+  min-width: 72px !important; /* slightly smaller */
+  height: 32px !important;
+  box-sizing: border-box !important;
+}
+
+/* Primary / danger */
+#nodes-container .btn-primary, #nodes-container .omega-menubar .btn-primary {
+  background: linear-gradient(180deg,#05b3c8,#018e9b) !important;
+  color: #001 !important;
+  border: none !important;
+}
+#nodes-container .btn-danger, #nodes-container .omega-menubar .btn-danger {
+  background: linear-gradient(180deg,#d44,#a22) !important;
+  color: #fff !important;
+}
+
+/* Mode pills and tab buttons */
+.tab-navigation .tab-btn, #nodes-container .main-modes .mode-tab {
+  background: rgba(255,255,255,0.02) !important;
+  color: var(--omega-muted) !important;
+  border-bottom: 2px solid transparent !important;
+  min-width:56px !important; /* tighter */
+  padding:5px 8px !important;  /* compact */
+  border-radius:6px !important;
+}
+.tab-navigation .tab-btn.active, #nodes-container .main-modes .mode-tab.active {
+  background: linear-gradient(90deg,#031e1b,#052927) !important;
+  color: var(--omega-accent) !important;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.6) !important;
+  border-bottom-color: var(--omega-accent) !important;
+}
+
+/* High-specificity overrides to beat other app styles (menubar buttons in Nodes) */
+#nodes-container .omega-menubar button, #nodes-container .omega-menubar .btn-small, .omega-desktop #nodes-container .omega-menubar button {
+  background: linear-gradient(180deg, rgba(5,179,200,0.06), rgba(1,142,155,0.04)) !important;
+  border: 1px solid rgba(255,255,255,0.06) !important;
+  color: var(--omega-accent) !important;
+  padding: 6px 10px !important;
+  border-radius: 6px !important;
+  min-width: 60px !important;
+  height: 32px !important;
+  font-size: 12px !important;
+  box-shadow: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+/* Ensure mode tabs inside Nodes get the polished pill look */
+#nodes-container .main-modes .mode-tab {
+  background: rgba(255,255,255,0.02) !important;
+  color: var(--omega-muted) !important;
+  border: 1px solid rgba(255,255,255,0.03) !important;
+  padding: 6px 10px !important;
+  border-radius: 6px !important;
+  min-width: 56px !important;
+  font-size: 12px !important;
+  box-shadow: none !important;
+}
+
+#nodes-container .main-modes .mode-tab.active {
+  background: linear-gradient(90deg,#031e1b,#052927) !important;
+  color: var(--omega-accent) !important;
+  border-color: var(--omega-accent) !important;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.6) !important;
+}
+
+/* Nodes-specific status/header similar to Network tab */
+.nodes-status-header {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:12px;
+  background: var(--omega-panel);
+  border: 1px solid rgba(255,255,255,0.03);
+  padding:8px 12px;
+  border-radius:6px;
+}
+.nodes-status-header .nodes-overview { display:flex; gap:14px; align-items:center; font:400 11px var(--font-mono); }
+.nodes-status-header .nodes-overview .metric { display:flex; gap:8px; align-items:center; color:var(--omega-muted); }
+.nodes-status-header .nodes-actions { display:flex; gap:8px; }
+.nodes-status-header .nodes-actions .network-btn { padding:6px 10px; font-size:11px; }
+
+/* Sidebar */
+#omega-sidebar, #nodes-container .nodes-sidebar, #nodes-sidebar {
+  background: var(--omega-panel) !important;
+  border: 1px solid rgba(255,255,255,0.03) !important;
+  padding: 12px !important;
+  border-radius: var(--omega-radius) !important;
+}
+#omega-sidebar .sidebar-content, #nodes-sidebar .ns-tree { color: #e6eef0 !important; }
+
+/* Table and rows */
+#nodes-container table.nodes-table, #nodes-table { width: 100% !important; border-collapse: separate !important; border-spacing: 0 8px !important; }
+#nodes-container table.nodes-table thead th, #nodes-table thead th { color: #e6eef0 !important; font-weight:700 !important; }
+#nodes-container table.nodes-table tr, #nodes-table tr { background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.02)) !important; border-radius: 6px !important; }
+#nodes-container .protocol-badge, .protocol-badge { background: rgba(255,255,255,0.03) !important; color: #9ad9d3 !important; border: 1px solid rgba(80,80,80,0.4) !important; padding: 4px 8px !important; border-radius: 999px !important; }
+
+/* Detail pane */
+#nodes-detail, .nodes-detail { background: #131313 !important; border: 1px solid rgba(70,70,70,0.5) !important; border-radius: var(--omega-radius) !important; }
+
+/* Topology canvas and node visuals (match Network look) */
+.topology-canvas, #topo-canvas, #mode-topology .topology-canvas, .topology-canvas-container { background: var(--omega-dark-2, #121212); border: 1px solid rgba(80,80,80,0.4); border-radius:6px; position:relative; overflow:hidden; }
+.topology-node { position:absolute; cursor:pointer; -webkit-user-select:none; user-select:none; transition:transform .12s ease; }
+.topology-node .node-visual { width:56px; height:36px; display:flex; align-items:center; justify-content:center; border-radius:6px; border:2px solid rgba(120,120,120,0.4); background:linear-gradient(180deg, rgba(0,0,0,0.2), rgba(255,255,255,0.02)); color:#fff; }
+.topology-node .node-label { font:600 9px var(--font-mono); color:var(--omega-white); text-align:center; margin-top:6px; }
+.topology-node:hover { transform:scale(1.06); }
+
+
+/* Modals */
+.nodes-modal .modal-inner, .modal-inner { background: rgba(10,10,10,0.98) !important; border: 1px solid rgba(80,80,80,0.6) !important; }
+
+/* Subtle adjustments */
+.btn-small, .btn-primary, .btn-danger { transition: transform .08s ease, box-shadow .08s ease !important; }
+.btn-small:hover, .btn-primary:hover, .btn-danger:hover { transform: translateY(-1px) !important; box-shadow: 0 6px 18px rgba(0,0,0,0.6) !important; }
+
+/* Accessibility: increase contrast for labels */
+.nodes-sidebar .ns-header, .detail-header { color: var(--omega-accent) !important; font-weight:700 !important; }
+
+/* remove debug badge if present */
+#nodes-polish-badge, #omega-dev-banner { display: none !important; }
+
+/* ===== Layout fixes for Nodes tab ===== */
+/* Ensure the nodes container uses a clear 3-column layout and spacing */
+#nodes-container.nodes-shell, .nodes-shell {
+  display: grid !important;
+  grid-template-columns: 280px 1fr 320px !important;
+  gap: 16px !important;
+  align-items: start !important;
+  padding: 14px !important;
+  box-sizing: border-box !important;
+  height: calc(100vh - 140px) !important; /* respect top menu and taskbar */
+}
+
+/* Sidebar: ensure separation and no overlap */
+#nodes-container .nodes-sidebar, .nodes-sidebar {
+  padding: 16px !important;
+  margin: 0 !important;
+  box-sizing: border-box !important;
+  z-index: 6 !important;
+  border-right: 1px solid rgba(255,255,255,0.03) !important;
+}
+
+#nodes-container .nodes-main, .nodes-main {
+  padding: 12px !important;
+  background: transparent !important;
+  z-index: 1 !important;
+}
+
+/* Ensure floating widgets remain visible; provide breathing room so content doesn't collide */
+/* Reserve space on wide screens; collapse padding on smaller widths */
+.omega-desktop #nodes-container { padding-right: 340px; box-sizing: border-box; }
+@media (max-width: 1500px) { .omega-desktop #nodes-container { padding-right: 280px; } }
+@media (max-width: 1350px) { .omega-desktop #nodes-container { padding-right: 0; } }
+
+/* Menu bar spacing consistency */
+.omega-menubar.nodes-bar { grid-column:1/-1; display:flex; align-items:center; gap:18px; padding:10px 18px 8px; border-bottom:1px solid rgba(255,255,255,0.05); background:linear-gradient(180deg,#0d0f10,#060707); position:sticky; top:64px; z-index:40; }
+.nodes-bar .bar-group { display:flex; align-items:center; gap:8px; }
+.nodes-bar .bar-sep { width:1px; height:30px; background:linear-gradient(180deg,rgba(255,255,255,0),rgba(255,255,255,0.25),rgba(255,255,255,0)); }
+.nodes-bar .bar-flex-spacer { flex:1; }
+.nodes-bar .bar-btn { display:inline-flex; align-items:center; gap:6px; font-weight:500; letter-spacing:.35px; padding:6px 14px !important; height:34px !important; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.08); border-radius:7px; font-size:12px !important; color:var(--omega-light-1); backdrop-filter:blur(4px); transition:background .18s,border .18s,transform .18s; }
+.nodes-bar .bar-btn .ico { font-size:13px; opacity:.85; }
+.nodes-bar .bar-btn:hover { background:rgba(0,230,209,0.08); border-color:rgba(0,230,209,0.4); }
+.nodes-bar .bar-btn:active { transform:translateY(1px); }
+.nodes-bar .btn-primary.bar-btn { background:linear-gradient(135deg,#023c35,#066158); border:1px solid rgba(0,230,209,0.55) !important; box-shadow:0 0 0 1px rgba(0,230,209,0.15),0 4px 14px -4px rgba(0,230,209,0.4); color:#0ff5e3; }
+.nodes-bar .btn-primary.bar-btn:hover { border-color:#0ff5e3 !important; }
+.nodes-bar button { margin-right:0 !important; }
+.nodes-bar .bar-group.cluster-actions .bar-btn { min-width:72px; }
+.nodes-bar .bar-group.utilities-actions .bar-btn { min-width:60px; }
+
+/* Mode tabs refined */
+#nodes-container .main-modes { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 8px; }
+#nodes-container .main-modes .mode-tab { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); color:var(--omega-light-2); padding:5px 12px; font-size:11px; border-radius:14px; letter-spacing:.3px; cursor:pointer; line-height:1; transition:background .18s,border .18s,color .18s; }
+#nodes-container .main-modes .mode-tab:hover { background:rgba(255,255,255,0.08); color:var(--omega-light-1); }
+#nodes-container .main-modes .mode-tab.active { background:linear-gradient(90deg,#032926,#04413c); border-color:var(--omega-accent,#00e6d1); color:var(--omega-accent,#00e6d1); box-shadow:0 4px 16px -6px rgba(0,230,209,0.4); }
+
+/* Toolbar (filters + batch) tidy layout */
+.nodes-main .main-toolbar { display:flex; flex-wrap:wrap; gap:18px; align-items:flex-end; padding:4px 2px 12px; border-bottom:1px solid rgba(255,255,255,0.05); margin-bottom:10px; }
+.nodes-main .main-toolbar .filters { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.nodes-main .main-toolbar .filters select,
+.nodes-main .main-toolbar .filters input[type=text],
+.nodes-main .main-toolbar .filters input[type=number],
+.nodes-main .main-toolbar .filters input { background:#101314; border:1px solid rgba(255,255,255,0.08); color:var(--omega-light-1); font-size:11px; padding:5px 8px; border-radius:6px; height:30px; }
+.nodes-main .main-toolbar .filters select:focus,
+.nodes-main .main-toolbar .filters input:focus { outline:none; border-color:var(--omega-accent); box-shadow:0 0 0 1px rgba(0,230,209,0.25); }
+.nodes-main .main-toolbar label { font-size:11px; color:var(--omega-light-2); display:flex; align-items:center; gap:4px; }
+.nodes-main .main-toolbar .batch-actions { display:flex; gap:6px; }
+.nodes-main .main-toolbar .batch-actions .btn-small { height:32px !important; padding:6px 12px !important; font-size:11px !important; border-radius:6px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); }
+.nodes-main .main-toolbar .batch-actions .btn-small:hover { background:rgba(0,230,209,0.1); border-color:rgba(0,230,209,0.4); }
+
+/* Table wrapper elevate */
+.nodes-main .nodes-table-wrapper { background:linear-gradient(180deg,rgba(255,255,255,0.015),rgba(0,0,0,0.25)); border:1px solid rgba(255,255,255,0.07); box-shadow:0 6px 18px -10px rgba(0,0,0,0.7); }
+
+/* List mode two-column layout (table + side panels) */
+#mode-list .list-grid { display:grid; grid-template-columns: 1fr 300px; gap:18px; align-items:start; }
+@media (max-width:1350px) { #mode-list .list-grid { grid-template-columns: 1fr; } #mode-list .list-grid .list-side { order:-1; display:flex; flex-wrap:wrap; gap:12px; } #mode-list .list-grid .list-side .panel { flex:1 1 300px; } }
+#mode-list .list-grid .list-side { position:relative; }
+#mode-list .panel { background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.25)); border:1px solid rgba(255,255,255,0.07); border-radius:8px; display:flex; flex-direction:column; min-height:160px; max-height:260px; }
+#mode-list .panel-header { padding:10px 12px 8px; font-size:12px; font-weight:600; letter-spacing:.5px; color:var(--omega-accent,#00e6d1); border-bottom:1px solid rgba(255,255,255,0.07); }
+#mode-list .panel-body { padding:4px 0 0; font-size:11px; line-height:1.25; }
+#mode-list .panel-scroll { overflow:auto; max-height:210px; }
+#mode-list #alerts-feed > div, #mode-list #audit-log > div { padding:6px 10px; border-bottom:1px solid rgba(255,255,255,0.05); }
+#mode-list #alerts-feed > div:last-child, #mode-list #audit-log > div:last-child { border-bottom:none; }
+#mode-list .panel-body::-webkit-scrollbar { width:6px; }
+#mode-list .panel-body::-webkit-scrollbar-track { background:rgba(0,0,0,0.2); }
+#mode-list .panel-body::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.15); border-radius:3px; }
+#mode-list .panel-body::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.25); }
+
+/* Activity filters */
+#mode-list .activity-toolbar { display:flex; align-items:center; justify-content:space-between; padding:6px 8px 4px; gap:6px; border-bottom:1px solid rgba(255,255,255,0.06); }
+#mode-list .activity-filters { display:flex; gap:4px; flex-wrap:wrap; }
+#mode-list .activity-filters .act-filter { background:#182526; border:1px solid #253a3d; color:#9fb9ba; font-size:10px; padding:4px 8px; border-radius:12px; cursor:pointer; letter-spacing:.35px; line-height:1; transition:background .18s,border .18s,color .18s; }
+#mode-list .activity-filters .act-filter:hover { background:#203437; color:#d5f5f6; }
+#mode-list .activity-filters .act-filter.active { background:#03423d; color:#00e6d1; border-color:#00e6d1; box-shadow:0 2px 8px -3px rgba(0,230,209,0.4); }
+#mode-list .activity-meta { font-size:10px; color:#6aa; font-family:system-ui, sans-serif; }
+#mode-list #audit-log { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; }
+#mode-list #audit-log > div { font-size:10.5px; display:flex; gap:6px; align-items:flex-start; }
+#mode-list #audit-log > div .ts { color:#6da; font-size:10px; min-width:44px; text-align:right; opacity:.75; }
+#mode-list #audit-log > div.alert-entry { background:rgba(255,180,0,0.05); }
+#mode-list #audit-log > div.security-entry { background:rgba(0,170,255,0.05); }
+#mode-list #audit-log > div.error-entry { background:rgba(255,50,50,0.08); }
+
+/* Detail subtabs refinement */
+.nodes-detail .detail-subtabs { display:flex; flex-wrap:wrap; gap:6px; padding:8px 0 10px; border-bottom:1px solid rgba(255,255,255,0.06); }
+.nodes-detail .detail-subtabs .tab { background:#182526; border:1px solid #253a3d; color:#9fb9ba; padding:6px 12px; font-size:11px; border-radius:6px; cursor:pointer; letter-spacing:.35px; line-height:1; transition:background .18s,border .18s,color .18s; }
+.nodes-detail .detail-subtabs .tab:hover { background:#203437; color:#d5f5f6; }
+.nodes-detail .detail-subtabs .tab.active { background:#03423d; color:#00e6d1; border-color:#00e6d1; box-shadow:0 4px 14px -6px rgba(0,230,209,0.45); }
+
+/* Table and cell sizing consistency */
+#nodes-container .nodes-table th, #nodes-container .nodes-table td, .nodes-table th, .nodes-table td {
+  padding: 7px 9px !important; /* compact */
+  font-size: 11px !important; /* slightly smaller */
+  line-height: 1.15 !important;
+  vertical-align: middle !important;
+}
+
+/* Improve header contrast and checkbox visibility */
+#nodes-container .nodes-table thead th { color: #dfeff0 !important; background: transparent !important; }
+#nodes-container .nodes-table tbody tr { box-shadow: none !important; }
+
+/* Ensure empty-state row spans across all columns and is visually distinct */
+#nodes-container .nodes-table tr.empty td { text-align: center !important; padding: 34px 16px !important; color: var(--omega-muted) !important; }
+
+/* Widget card uniformity */
+.card { background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.02)) !important; border-radius: 8px !important; padding: 12px !important; border: 1px solid rgba(60,60,60,0.24) !important; }
+
+/* Main modes and toolbar spacing refinement */
+#nodes-container .main-modes { margin-bottom:6px !important; gap:6px !important; }
+.nodes-main .main-toolbar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+
+/* Make empty-state buttons smaller and inline */
+#nodes-container .nodes-table tr.empty td button { padding:6px 8px !important; min-width:72px !important; margin-left:8px !important; }
+
+/* Buttons: more visible, consistent size */
+.btn-small { height: 36px !important; padding: 8px 12px !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; }
+.btn-primary { box-shadow: 0 2px 8px rgba(0,0,0,0.45) inset !important; }
+
+/* Compact button helper used by nodes normalizer */
+.nodes-compact { min-width: 64px !important; padding: 6px 10px !important; height: 32px !important; font-size: 12px !important; }
+
+/* Network-style small action buttons (used in nodes-status-header) */
+.network-btn { background: var(--omega-dark-4, #111) !important; border: 1px solid rgba(80,80,80,0.4) !important; color: var(--omega-white, #fff) !important; padding: 6px 10px !important; border-radius: 4px !important; font-size: 12px !important; cursor: pointer; }
+.network-btn:hover { border-color: var(--omega-accent) !important; }
+
+/* Detail pane should not overlap and gets its column */
+#nodes-detail { grid-column: 3 / 4 !important; }
+
+/* Fix modes strip to not overflow and align with top of main column */
+#nodes-container .main-modes { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+
+/* small responsive fallback */
+@media (max-width: 1100px) { #nodes-container.nodes-shell { grid-template-columns: 1fr !important; height: auto !important; } }
+
+/* Extra: ensure mode-buttons don't wrap awkwardly on narrow toolbars */
+.nodes-shell .main-modes .mode-tab { white-space:nowrap; }
+
+/* Extra: subtle divider on main content similar to Network tab */
+.nodes-main .nodes-table-wrapper { background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.02)); border: 1px solid rgba(80,80,80,0.2); border-radius:6px; padding:8px; }
+
+/* Sidebar grouped discovery actions */
+#nodes-container .grouped-actions { display:flex; flex-direction:column; gap:8px; margin-top:12px; padding:10px 10px 12px; background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.25)); border:1px solid rgba(255,255,255,0.06); border-radius:8px; }
+#nodes-container .grouped-actions button { width:100%; }
+#nodes-container .grouped-actions .action-register { font-weight:600 !important; }
+
+/* Topology view */
+#nodes-container #mode-topology { padding:4px 2px 8px; }
+#nodes-container .topology-view { position:relative; height:480px; background:linear-gradient(180deg,#0f1415,#0a0d0e); border:1px solid rgba(255,255,255,0.06); border-radius:10px; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+#nodes-container .topology-view .topology-empty { font-size:12px; color:var(--omega-muted); }
+#nodes-container canvas.topology-canvas { width:100% !important; height:100% !important; image-rendering:auto; }
+/* Topology header */
+#nodes-container .topology-header { display:flex; align-items:center; justify-content:space-between; padding:8px 12px 6px; background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.3)); border:1px solid rgba(255,255,255,0.06); border-radius:10px; margin-bottom:10px; gap:18px; }
+#nodes-container .topology-header .legend { display:flex; gap:8px; margin-left:12px; }
+#nodes-container .topology-header .legend .leg { font-size:10px; padding:4px 8px; border:1px solid rgba(255,255,255,0.08); border-radius:14px; letter-spacing:.35px; }
+#nodes-container .topology-header .legend .online { background:#033a35; color:#00e6d1; }
+#nodes-container .topology-header .legend .offline { background:#402222; color:#ff7878; }
+#nodes-container .topology-header .legend .quarantine { background:#463814; color:#f5c041; }
+#nodes-container .topology-header .topology-right { display:flex; align-items:center; gap:8px; }
+#nodes-container .topology-header .zoom-box { padding:0 4px; }
+#nodes-container .topology-header input[type=range] { width:110px; accent-color: var(--omega-accent); }
+#nodes-container .topology-stats { font-size:11px; color:var(--omega-light-2,#9ab); margin-left:10px; }
+
+/* Network-like Nodes Topology Layout */
+#nodes-container .nodes-topology-grid { display:grid; grid-template-columns: 2fr 320px; gap:16px; align-items:start; }
+@media (max-width:1400px){ #nodes-container .nodes-topology-grid { grid-template-columns: 1fr; } #nodes-container .nodes-topology-grid .nodes-topology-side { order:2; display:flex; gap:12px; } #nodes-container .nodes-topology-side .topo-panel { flex:1 1 300px; } }
+#nodes-container .nodes-topology-main { display:flex; flex-direction:column; gap:10px; }
+#nodes-container .nodes-topology-toolbar { display:flex; align-items:center; justify-content:space-between; background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.3)); border:1px solid rgba(255,255,255,0.06); padding:6px 10px; border-radius:8px; }
+#nodes-container .nodes-topology-toolbar .tools-left { display:flex; align-items:center; gap:6px; }
+#nodes-container .nodes-topology-toolbar .tools-right { display:flex; align-items:center; gap:12px; }
+#nodes-container .nodes-topology-side { display:flex; flex-direction:column; gap:16px; }
+#nodes-container .topo-panel { background:linear-gradient(180deg,rgba(255,255,255,0.015),rgba(0,0,0,0.32)); border:1px solid rgba(255,255,255,0.07); border-radius:10px; display:flex; flex-direction:column; min-height:160px; }
+#nodes-container .topo-panel .panel-header { padding:10px 12px 8px; font-size:12px; font-weight:600; letter-spacing:.45px; color:var(--omega-accent); border-bottom:1px solid rgba(255,255,255,0.07); }
+#nodes-container .topo-panel .panel-body { padding:10px 12px; font-size:11px; line-height:1.35; overflow:auto; }
+#nodes-container .topo-panel.legend .legend-body { display:flex; flex-direction:column; gap:6px; }
+#nodes-container .topo-panel.legend .legend-item { display:flex; align-items:center; gap:8px; font-size:11px; }
+#nodes-container .topo-panel.legend .legend-item .color { width:14px; height:14px; border-radius:4px; display:inline-block; border:1px solid rgba(255,255,255,0.25); }
+#nodes-container .topo-panel.legend .color.online { background:#03534c; }
+#nodes-container .topo-panel.legend .color.offline { background:#552828; }
+#nodes-container .topo-panel.legend .color.quarantine { background:#5a4722; }
+
+/* Detail body section layout enhancements */
+#nodes-container .detail-body { font-size:12px; line-height:1.35; }
+#nodes-container .detail-body h4 { margin:0 0 6px; font-size:12px; letter-spacing:.4px; }
+#nodes-container .detail-body .card { border-radius:10px !important; }
+#nodes-container .detail-body .quick-actions button { flex:1 1 90px; }
+
+/* Scrollbars inside topology side panels */
+#nodes-container .topo-panel .panel-body::-webkit-scrollbar { width:6px; }
+#nodes-container .topo-panel .panel-body::-webkit-scrollbar-track { background:rgba(0,0,0,0.2); }
+#nodes-container .topo-panel .panel-body::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18); border-radius:3px; }
+#nodes-container .topo-panel .panel-body::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.28); }
+
+/* ================= Unified Button Theme (final pass) ================= */
+/* Base sizing + reset for all actionable buttons within nodes container (excluding mode tabs + bar-btn already themed) */
+#nodes-container button.btn-small:not(.mode-tab):not(.bar-btn),
+#nodes-container .nodes-sidebar .ns-actions button,
+#nodes-container .batch-actions .btn-small,
+#nodes-container .quick-actions .btn-small,
+#nodes-container .panel .btn-small,
+#nodes-container .card .btn-small,
+#nodes-container .nodes-table .btn-small,
+#nodes-container .modal-footer .btn-small,
+#nodes-container .modal-footer button:not(.bar-btn):not(.mode-tab),
+#nodes-container .detail-body .btn-small,
+#nodes-container .nodes-status-header .network-btn,
+#nodes-container .nodes-table tr.empty td button.btn-small {
+  --btn-bg: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(0,0,0,0.15));
+  --btn-border: rgba(255,255,255,0.08);
+  --btn-color: var(--omega-light-1,#ddf7f6);
+  --btn-shadow: 0 2px 4px -1px rgba(0,0,0,0.6);
+  position: relative;
+  background: var(--btn-bg) !important;
+  border: 1px solid var(--btn-border) !important;
+  color: var(--btn-color) !important;
+  padding: 6px 14px !important;
+  height: 34px !important;
+  font-size: 12px !important;
+  line-height: 1 !important;
+  border-radius: 7px !important;
+  font-weight: 500 !important;
+  letter-spacing: .35px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  cursor: pointer !important;
+  backdrop-filter: blur(4px) !important;
+  transition: background .18s, border-color .18s, color .18s, transform .16s, box-shadow .18s !important;
+  box-shadow: var(--btn-shadow) !important;
+}
+
+/* Hover / Active */
+#nodes-container button.btn-small:not(.mode-tab):not(.bar-btn):hover,
+#nodes-container .nodes-sidebar .ns-actions button:hover,
+#nodes-container .batch-actions .btn-small:hover,
+#nodes-container .quick-actions .btn-small:hover,
+#nodes-container .panel .btn-small:hover,
+#nodes-container .card .btn-small:hover,
+#nodes-container .nodes-table .btn-small:hover,
+#nodes-container .modal-footer .btn-small:hover,
+#nodes-container .modal-footer button:not(.bar-btn):not(.mode-tab):hover,
+#nodes-container .detail-body .btn-small:hover,
+#nodes-container .nodes-status-header .network-btn:hover,
+#nodes-container .nodes-table tr.empty td button.btn-small:hover {
+  background: linear-gradient(180deg, rgba(0,230,209,0.18), rgba(0,230,209,0.05)) !important;
+  border-color: rgba(0,230,209,0.55) !important;
+  color: var(--omega-accent,#00e6d1) !important;
+  box-shadow: 0 4px 14px -4px rgba(0,230,209,0.5), 0 2px 4px -1px rgba(0,0,0,0.7) !important;
+}
+#nodes-container button.btn-small:not(.mode-tab):not(.bar-btn):active,
+#nodes-container .nodes-sidebar .ns-actions button:active,
+#nodes-container .batch-actions .btn-small:active,
+#nodes-container .quick-actions .btn-small:active,
+#nodes-container .panel .btn-small:active,
+#nodes-container .card .btn-small:active,
+#nodes-container .nodes-table .btn-small:active,
+#nodes-container .modal-footer .btn-small:active,
+#nodes-container .modal-footer button:not(.bar-btn):not(.mode-tab):active,
+#nodes-container .detail-body .btn-small:active,
+#nodes-container .nodes-status-header .network-btn:active,
+#nodes-container .nodes-table tr.empty td button.btn-small:active { transform: translateY(1px) !important; box-shadow: 0 1px 3px rgba(0,0,0,0.6) inset !important; }
+
+/* Primary variant */
+#nodes-container .btn-primary,
+#nodes-container button.btn-small.btn-primary,
+#nodes-container .modal-footer .btn-primary {
+  --btn-bg: linear-gradient(135deg,#02413b,#066159 60%); /* accent tinted */
+  --btn-color: #0ff5e3;
+  background: var(--btn-bg) !important;
+  color: var(--btn-color) !important;
+  border: 1px solid rgba(0,230,209,0.6) !important;
+  box-shadow: 0 0 0 1px rgba(0,230,209,0.25), 0 6px 18px -6px rgba(0,230,209,0.55) !important;
+}
+#nodes-container .btn-primary:hover { border-color:#0ff5e3 !important; background: linear-gradient(135deg,#03514a,#07766c) !important; }
+
+/* Danger variant (supports .danger from normalizer) */
+#nodes-container .btn-danger,
+#nodes-container .danger,
+#nodes-container button.btn-small.btn-danger {
+  --btn-bg: linear-gradient(135deg,#611919,#7d1e1e 60%);
+  background: var(--btn-bg) !important;
+  color: #ffe9e9 !important;
+  border: 1px solid rgba(255,80,80,0.5) !important;
+  box-shadow: 0 0 0 1px rgba(255,80,80,0.2), 0 5px 14px -5px rgba(255,60,60,0.55) !important;
+}
+#nodes-container .btn-danger:hover,
+#nodes-container .danger:hover { background: linear-gradient(135deg,#7d1e1e,#992424 60%) !important; border-color:#ff8b8b !important; }
+
+/* Ghost / subtle variant (auto-detect by attribute if added later) */
+#nodes-container button[data-variant="ghost"] { background: rgba(255,255,255,0.04) !important; border:1px solid rgba(255,255,255,0.04) !important; color: var(--omega-muted) !important; }
+#nodes-container button[data-variant="ghost"]:hover { background: rgba(255,255,255,0.08) !important; color: var(--omega-light-1) !important; border-color: rgba(255,255,255,0.15) !important; }
+
+/* Icon-only compact close buttons */
+#nodes-container .btn-icon { background: transparent !important; color: var(--omega-muted,#88a); border: 1px solid rgba(255,255,255,0.08) !important; width:28px !important; height:28px !important; padding:0 !important; font-size:16px !important; line-height:1 !important; display:inline-flex !important; align-items:center !important; justify-content:center !important; border-radius:6px !important; cursor:pointer !important; transition:background .18s,border .18s,color .18s !important; }
+#nodes-container .btn-icon:hover { background: rgba(255,255,255,0.08) !important; color: var(--omega-light-1,#fff) !important; border-color: rgba(0,230,209,0.4) !important; }
+
+/* Disabled state */
+#nodes-container button:disabled, #nodes-container button.disabled { opacity: .45 !important; cursor: not-allowed !important; filter: grayscale(.4); box-shadow: none !important; transform:none !important; }
+
+/* Focus accessibility */
+#nodes-container button:focus-visible { outline: 2px solid rgba(0,230,209,0.6) !important; outline-offset: 2px !important; box-shadow: 0 0 0 2px rgba(0,230,209,0.35), 0 4px 14px -4px rgba(0,230,209,0.5) !important; }
+
+/* Quick action column inside detail cards */
+#nodes-container .quick-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+
+/* Ensure any legacy inserted plain <button> inside nodes tables inherits base style */
+#nodes-container td button:not([class]) { background:linear-gradient(180deg, rgba(255,255,255,0.05), rgba(0,0,0,0.15)) !important; border:1px solid rgba(255,255,255,0.08) !important; color:var(--omega-light-1,#ddf7f6) !important; padding:6px 12px !important; height:32px !important; font-size:12px !important; border-radius:6px !important; letter-spacing:.35px; box-shadow:0 2px 4px -1px rgba(0,0,0,0.6) !important; }
+
+/* Transition smoothing for batch actions enabling/disabling */
+#nodes-container .batch-actions .btn-small { transition: opacity .25s ease, background .18s, border-color .18s, box-shadow .18s, transform .16s !important; }
+
+/* Slightly smaller buttons inside empty-state inline prompts */
+#nodes-container .nodes-table tr.empty td button.btn-small { height:30px !important; padding:5px 10px !important; border-radius:6px !important; }
+
+/* ===================================================================== */

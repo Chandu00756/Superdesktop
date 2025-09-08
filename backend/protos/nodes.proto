@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package omega.nodes;
+
+message NodeInfo {
+  string node_id = 1;
+  string hostname = 2;
+  string ip_address = 3;
+  int32 port = 4;
+}
+
+message RegisterRequest {
+  NodeInfo node = 1;
+  string public_key_pem = 2;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string node_id = 2;
+  string message = 3;
+}
+
+message StreamMessage {
+  string type = 1;
+  string payload = 2;
+}
+
+service NodeService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Stream(stream StreamMessage) returns (stream StreamMessage);
+}
