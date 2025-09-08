@@ -26,9 +26,25 @@ class TaskStatus:
 
 # Utility: Generate unique IDs
 import uuid
+try:
+    import ulid
+except Exception:  # ulid may not be installed in minimal env; fallback gracefully
+    ulid = None  # type: ignore
 
 def generate_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4()}"
+    """Generate a lexicographically sortable, globally unique identifier.
+
+    Preference order:
+    1. ULID (time sortable) if library available
+    2. UUID4 hex
+    Result is prefixed with provided prefix and a hyphen for clarity.
+    """
+    if ulid is not None:  # type: ignore
+        try:
+            return f"{prefix}-{ulid.new().str.lower()}"  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    return f"{prefix}-{uuid.uuid4().hex}"
 
 # Utility: Logging setup
 import logging

@@ -23,6 +23,7 @@ import shutil
 import psutil
 import numpy as np
 from pathlib import Path
+from .adapters import build_default_store, BaseObjectStore
 
 # ML libraries for prediction and optimization
 try:
@@ -665,6 +666,13 @@ class EnhancedStorageNode:
         self.metadata_db = None
         
         self.health_status = "initializing"
+        # Object store (filesystem / minio / memory) fallback chain
+        try:
+            self.object_store: BaseObjectStore = build_default_store()
+        except Exception as e:
+            logger.warning(f"Primary object store init failed: {e}; using memory store")
+            from .adapters import MemoryStore
+            self.object_store = MemoryStore()
         
         logger.info(f"Enhanced Storage Node {self.node_id} initialized")
     
@@ -688,6 +696,12 @@ class EnhancedStorageNode:
             
             # Initialize replication manager
             self.replication_manager = ReplicationManager({})
+
+            # Store a bootstrap marker object (best effort) to verify persistence path
+            try:
+                await self.object_store.put(f"bootstrap/{self.node_id}.txt", f"online:{int(time.time())}".encode())
+            except Exception as e:
+                logger.debug(f"Bootstrap object store write failed: {e}")
             
             # Load existing metadata
             await self._load_metadata()

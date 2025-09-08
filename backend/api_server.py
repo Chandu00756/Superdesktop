@@ -30,6 +30,24 @@ app = FastAPI(
     description="Advanced encrypted backend for distributed desktop control"
 )
 
+# Hardened security headers middleware (simple inline implementation)
+from starlette.middleware.base import BaseHTTPMiddleware
+class _SecurityHeaders(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):  # type: ignore
+        resp = await call_next(request)
+        # Content-Security-Policy (restrictive; allow self + data images)
+        csp = os.getenv('OMEGA_CSP', "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'")
+        resp.headers.setdefault('Content-Security-Policy', csp)
+        resp.headers.setdefault('X-Content-Type-Options','nosniff')
+        resp.headers.setdefault('X-Frame-Options','DENY')
+        resp.headers.setdefault('Referrer-Policy','no-referrer')
+        resp.headers.setdefault('Permissions-Policy','geolocation=(), microphone=(), camera=()')
+        resp.headers.setdefault('Cross-Origin-Opener-Policy','same-origin')
+        resp.headers.setdefault('Cross-Origin-Resource-Policy','same-origin')
+        resp.headers.setdefault('Cross-Origin-Embedder-Policy','require-corp')
+        return resp
+app.add_middleware(_SecurityHeaders)
+
 # Lightweight health/readiness endpoint (unauthenticated) so frontend can quickly
 # detect backend availability before attempting secure session bootstrap.
 @app.get('/health', include_in_schema=False)
@@ -107,6 +125,7 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 import os
 import shlex
+from common.secret_providers import default_manager
 
 from fastapi import FastAPI, WebSocket, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -776,6 +795,7 @@ class DatabaseManager:
                 prev = conn.execute("SELECT hash_chain FROM audit_logs ORDER BY id DESC LIMIT 1").fetchone()
                 prev_hash = prev[0] if prev else ''
                 import hashlib
+                import hashlib as _hashlib_mod
                 h = hashlib.sha256((prev_hash + event_type + source + message + severity + str(time.time())).encode()).hexdigest()
                 conn.execute("INSERT INTO audit_logs (event_type, source, message, severity, timestamp, hash_chain) VALUES (?, ?, ?, ?, ?, ?)",
                     (event_type, source, message, severity, time.time(), h))
@@ -1029,6 +1049,59 @@ class OmegaAPIServer:
         self.default_desktop_image = os.environ.get('OMEGA_VD_IMAGE', 'dorowu/ubuntu-desktop-lxde-vnc')
         # DB ensure meta table
         self._ensure_vd_meta_table()
+        # Preload audit catalog (lazy creation handled by migrations)
+        self._audit_cache_loaded = False
+
+    def _load_audit_event_types(self):
+        if self._audit_cache_loaded:
+            return
+        try:
+            with sqlite3.connect(self.database.db_path, timeout=30, check_same_thread=False) as conn:
+                conn.execute('CREATE TABLE IF NOT EXISTS audit_event_types (code TEXT PRIMARY KEY, description TEXT, severity_default TEXT, retention_days INTEGER DEFAULT 30)')
+                self._audit_cache_loaded = True
+        except Exception as e:
+            logging.debug(f"audit_event_types load failed: {e}")
+
+    def export_audit_bundle(self, fmt: str = 'jsonl') -> dict:
+        """Export audit_logs into a signed bundle with SHA256 and detached signature placeholder."""
+        self._load_audit_event_types()
+        bundle_id = uuid.uuid4().hex
+        records = []
+        with sqlite3.connect(self.database.db_path, timeout=30, check_same_thread=False) as conn:
+            cur = conn.execute('SELECT id,event_type,source,message,severity,timestamp,hash_chain FROM audit_logs ORDER BY id ASC')
+            rows = cur.fetchall()
+            for r in rows:
+                rec = {
+                    'id': r[0], 'event_type': r[1], 'source': r[2], 'message': r[3],
+                    'severity': r[4], 'timestamp': r[5], 'hash_chain': r[6]
+                }
+                records.append(rec)
+        # Serialize
+        if fmt == 'jsonl':
+            payload = '\n'.join(json.dumps(r, separators=(',',':')) for r in records).encode()
+        else:
+            payload = json.dumps({'records': records}).encode()
+        import hashlib as _hashlib_mod
+        sha256 = _hashlib_mod.sha256(payload).hexdigest()
+        # Sign using RSA private key if available
+        signature_b64 = None
+        try:
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding as asy_padding
+            sig = self.security_manager.rsa_private_key.sign(payload, asy_padding.PKCS1v15(), hashes.SHA256())
+            import base64 as _b64
+            signature_b64 = _b64.b64encode(sig).decode()
+        except Exception as e:
+            logging.debug(f"audit bundle signing skipped: {e}")
+        # Persist manifest
+        try:
+            with sqlite3.connect(self.database.db_path, timeout=30, check_same_thread=False) as conn:
+                conn.execute('CREATE TABLE IF NOT EXISTS audit_export_manifests (id INTEGER PRIMARY KEY AUTOINCREMENT, bundle_id TEXT UNIQUE, created_at REAL, format TEXT, record_count INTEGER, sha256 TEXT, signature TEXT)')
+                conn.execute('INSERT OR REPLACE INTO audit_export_manifests (bundle_id, created_at, format, record_count, sha256, signature) VALUES (?,?,?,?,?,?)', (bundle_id, time.time(), fmt, len(records), sha256, signature_b64))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Persist audit export manifest failed: {e}")
+        return {'bundle_id': bundle_id, 'format': fmt, 'record_count': len(records), 'sha256': sha256, 'signature': signature_b64, 'data': payload.decode(errors='ignore')}
 
     def reconcile_vd_sessions_from_docker(self):
         """On startup, scan Docker for existing Omega VD containers and ensure DB has entries.
@@ -1618,6 +1691,15 @@ async def lifespan(app: FastAPI):  # type: ignore
 # Attach lifespan context (done after definition to avoid circular refs)
 app.router.lifespan_context = lifespan  # type: ignore[attr-defined]
 
+# --- Migration runner (SQLite) for backend ---
+try:
+    import subprocess, sys as _sys
+    _script = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scripts', 'migrate.py'))
+    if os.path.exists(_script):
+        subprocess.run([_sys.executable, _script, '--target', 'backend'], timeout=5, check=False)
+except Exception as e:
+    logging.debug(f"Backend migration runner skipped: {e}")
+
 
 @app.post("/api/auth/login")
 @rate_limited(per_minute=30, burst=10)
@@ -1990,6 +2072,25 @@ async def secure_node_approve(body: dict):
         logging.error(f'approve error: {e}')
         raise HTTPException(status_code=500, detail='internal error')
 
+# --- Audit export endpoints ---
+@app.get('/secure/audit/export', dependencies=[Depends(require_permissions('security:view'))])
+async def audit_export(fmt: str = 'jsonl'):
+    if fmt not in ('jsonl','json'):
+        raise HTTPException(status_code=400, detail='unsupported format')
+    out = api_server.export_audit_bundle(fmt=fmt)
+    # Large bundle data could be omitted unless explicitly requested; included now to simplify
+    return out
+
+@app.get('/secure/audit/manifest', dependencies=[Depends(require_permissions('security:view'))])
+async def audit_manifest():
+    try:
+        with sqlite3.connect(api_server.database.db_path, timeout=30, check_same_thread=False) as conn:
+            cur = conn.execute('SELECT bundle_id, created_at, format, record_count, sha256, signature FROM audit_export_manifests ORDER BY created_at DESC LIMIT 50')
+            rows = [dict(bundle_id=b, created_at=c, format=f, record_count=r, sha256=s, signature=sg) for b,c,f,r,s,sg in cur.fetchall()]
+        return {'manifests': rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Key rotation endpoints
 @app.post('/secure/keys/rotate', dependencies=[Depends(require_permissions('crypto:rotate_keys'))])
 async def rotate_keys(body: dict = {}):
@@ -2236,21 +2337,110 @@ app.include_router(policy_router)
 # Unified health endpoint (override or add if not present)
 @app.get('/health')
 async def unified_health():
+    # Initialize secret manager lazily (first call) to avoid import cycles
+    global SECRET_MANAGER
+    try:
+        SECRET_MANAGER
+    except NameError:
+        SECRET_MANAGER = default_manager()  # type: ignore
+
     deps = {
         'database': {'ok': True},
-        'redis': {'ok': True},
+        'redis': {'ok': True},  # placeholder (future real check)
         'metrics': {'ok': bool(api_server.system_stats)},
-        'rbac_cache': {'ok': True}
+        'rbac_cache': {'ok': True},
+        'sessions': {'ok': True},
+        'audit': {'ok': True},
+        'migrations': {'ok': True},
+        'secrets': {'ok': True},
     }
+
+    # Database & basic queries
+    applied_migrations = []
+    known_migrations = []
+    audit_events = 0
+    audit_exports = 0
     try:
         with db_connect() as conn:
+            # health probe
             conn.execute('SELECT 1')
+            # migrations table (may not exist initially)
+            try:
+                cur = conn.execute('SELECT version FROM schema_migrations ORDER BY version')
+                applied_migrations = [r[0] for r in cur.fetchall()]
+            except Exception:
+                deps['migrations']['ok'] = False
+            # audit stats (tables may or may not exist depending on migration run)
+            try:
+                cur = conn.execute('SELECT count(*) FROM audit_events')
+                audit_events = cur.fetchone()[0]
+            except Exception:
+                deps['audit']['ok'] = False
+            try:
+                cur = conn.execute('SELECT count(*) FROM audit_export_manifests')
+                audit_exports = cur.fetchone()[0]
+            except Exception:
+                pass  # optional table
     except Exception:
         deps['database']['ok'] = False
+
+    # Discover known migration files (best-effort)
+    try:
+        migrations_dir = os.path.join(os.path.dirname(__file__), 'migrations')
+        if os.path.isdir(migrations_dir):
+            for name in os.listdir(migrations_dir):
+                if name.startswith('V') and '__' in name:
+                    ver = name.split('__',1)[0][1:]
+                    known_migrations.append(ver)
+    except Exception:
+        pass
+    pending_migrations = [v for v in known_migrations if v not in applied_migrations]
+    if pending_migrations:
+        deps['migrations']['ok'] = False
+
     # RBAC cache freshness (stale if > 2x TTL)
     if (time.time() - RBAC_LAST_LOAD) > (RBAC_CACHE_TTL * 2):
         deps['rbac_cache']['ok'] = False
-    return build_health(deps, version='1.0.1')
+
+    # Session / key stats
+    active_sessions = len(SESSION_META)
+    revoked_sessions = len(REVOKED_SESSIONS)
+    if active_sessions == 0:
+        deps['sessions']['ok'] = False
+
+    # Secrets snapshot fingerprint (avoid exposing raw secret values)
+    try:
+        snap = SECRET_MANAGER.snapshot()
+        secret_keys = sorted(snap.keys())
+        import hashlib as _hashlib
+        fp = _hashlib.sha256(('|'.join(secret_keys)).encode()).hexdigest()[:16]
+        deps['secrets']['count'] = len(secret_keys)
+        deps['secrets']['fingerprint'] = fp
+        if len(secret_keys) == 0:
+            deps['secrets']['ok'] = False
+    except Exception:
+        deps['secrets']['ok'] = False
+
+    # Audit enrichment
+    deps['audit']['events'] = audit_events
+    deps['audit']['exports'] = audit_exports
+    if audit_events == 0:
+        deps['audit']['ok'] = False  # no events recorded could indicate issue
+
+    extended = {
+        'migrations': {
+            'applied': applied_migrations,
+            'known': known_migrations,
+            'pending': pending_migrations,
+        },
+        'sessions': {
+            'active': active_sessions,
+            'revoked': revoked_sessions,
+        },
+    }
+    base = build_health(deps, version='1.0.2')
+    base['extended'] = extended
+    return base
 
 # Secure token-based registration (replacement for legacy register)
 @app.post('/api/secure/nodes/register', dependencies=[Depends(require_permissions('node:register'))])
@@ -2268,6 +2458,161 @@ async def secure_register(request: Request, body: NodeRegistrationRequest):
 @app.post('/api/nodes/register')
 async def legacy_register_deprecated():
     return {'deprecated': True, 'message': 'Use /secure/nodes/join and /secure/nodes/approve', 'status':'410'}
+
+# === Key & Certificate Lifecycle Management ===
+class KeyRotationRequest(BaseModel):
+    reason: str | None = None
+    rotate_session_keys: bool = True
+    rotate_rsa: bool = False
+
+@app.get('/secure/keys', dependencies=[Depends(require_permissions('keys:view'))])
+async def list_keys():
+    keys = []
+    # Session keys (in-memory)
+    for sid, meta in list(SESSION_META.items())[:500]:  # cap for safety
+        keys.append({
+            'type': 'session',
+            'session_id': sid,
+            'user': meta.get('user'),
+            'created_at': meta.get('created_at'),
+            'expires_at': meta.get('expires_at'),
+            'counter': meta.get('counter',0)
+        })
+    # RSA key fingerprint
+    try:
+        pub = api_server.security_manager.get_public_key_pem()
+        import hashlib as _h
+        fp = _h.sha256(pub.encode()).hexdigest()[:16]
+        keys.append({'type':'rsa','fingerprint':fp})
+    except Exception:
+        pass
+    return {'keys': keys}
+
+@app.post('/secure/keys/revoke', dependencies=[Depends(require_permissions('keys:revoke'))])
+async def revoke_session(body: dict):
+    sid = body.get('session_id')
+    if not sid:
+        raise HTTPException(status_code=400, detail='session_id required')
+    if sid in SESSION_META:
+        SESSION_META.pop(sid, None)
+        REVOKED_SESSIONS.add(sid)
+        api_server.database.log_event('session_revoked', sid, 'Session revoked via API')
+    return {'status':'revoked','session_id':sid}
+
+@app.post('/secure/keys/rotate', dependencies=[Depends(require_permissions('keys:rotate'))])
+async def rotate_keys(req: KeyRotationRequest):
+    rotated = {}
+    if req.rotate_session_keys:
+        count = 0
+        for sid, meta in list(SESSION_META.items()):
+            try:
+                new_key = secrets.token_bytes(32)
+                import base64 as _b64
+                meta['key'] = _b64.b64encode(new_key).decode()
+                meta['counter'] = 0
+                count += 1
+            except Exception:
+                continue
+        rotated['session_keys'] = count
+    if req.rotate_rsa:
+        try:
+            api_server.security_manager._generate_rsa_keypair()
+            rotated['rsa'] = True
+        except Exception as e:
+            rotated['rsa'] = False
+            rotated['rsa_error'] = str(e)
+    api_server.database.log_event('keys_rotated','system', json.dumps({'rotated':rotated,'reason':req.reason}))
+    return {'status':'ok','rotated':rotated}
+
+# === Resource Marketplace Scaffold ===
+class CreditAdjust(BaseModel):
+    user: str
+    delta: int
+    reason: str | None = None
+
+@app.get('/secure/market/credits', dependencies=[Depends(require_permissions('market:view'))])
+async def market_list():
+    rows=[]
+    try:
+        with db_connect() as conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS user_credits (user TEXT PRIMARY KEY, balance INTEGER, updated_at REAL)')
+            cur=conn.execute('SELECT user,balance,updated_at FROM user_credits')
+            rows=[{'user':u,'balance':b,'updated_at':t} for u,b,t in cur.fetchall()]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {'credits':rows}
+
+@app.post('/secure/market/credits/adjust', dependencies=[Depends(require_permissions('market:adjust'))])
+async def credit_adjust(body: CreditAdjust):
+    now=time.time()
+    try:
+        with db_connect() as conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS user_credits (user TEXT PRIMARY KEY, balance INTEGER, updated_at REAL)')
+            conn.execute('INSERT INTO user_credits (user,balance,updated_at) VALUES (?,?,?) ON CONFLICT(user) DO UPDATE SET balance=balance+excluded.balance, updated_at=excluded.updated_at', (body.user, body.delta, now))
+            conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    api_server.database.log_event('credit_adjust', body.user, json.dumps({'delta':body.delta,'reason':body.reason}))
+    return {'status':'ok'}
+
+# === Backup & Disaster Recovery (config snapshot) ===
+class SnapshotCreate(BaseModel):
+    label: str | None = None
+    include_audit: bool = True
+
+SNAPSHOT_DIR = os.getenv('OMEGA_SNAPSHOT_DIR','data/snapshots')
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+@app.post('/secure/backup/snapshot', dependencies=[Depends(require_permissions('backup:create'))])
+async def create_snapshot(body: SnapshotCreate):
+    ts=int(time.time())
+    name=f"snap-{ts}-{(body.label or 'auto').replace(' ','_')}"
+    path=os.path.join(SNAPSHOT_DIR, name)
+    os.makedirs(path, exist_ok=True)
+    meta={'created_at':ts,'label':body.label,'version':'1.0.0'}
+    # Copy key tables (best-effort)
+    tables=['nodes','sessions','policies','roles','permissions','role_permissions','user_roles']
+    copied=[]
+    try:
+        with db_connect() as conn:
+            for t in tables:
+                try:
+                    cur=conn.execute(f'SELECT * FROM {t}')
+                    rows=cur.fetchall()
+                    cols=[c[0] for c in cur.description]
+                    with open(os.path.join(path, f'{t}.json'),'w') as f:
+                        json.dump({'columns':cols,'rows':rows}, f)
+                    copied.append(t)
+                except Exception:
+                    continue
+            if body.include_audit:
+                try:
+                    cur=conn.execute('SELECT * FROM audit_logs ORDER BY id ASC')
+                    rows=cur.fetchall(); cols=[c[0] for c in cur.description]
+                    with open(os.path.join(path,'audit_logs.json'),'w') as f:
+                        json.dump({'columns':cols,'rows':rows}, f)
+                except Exception:
+                    pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    with open(os.path.join(path,'meta.json'),'w') as f:
+        json.dump(meta, f)
+    api_server.database.log_event('snapshot_create','system', json.dumps({'name':name,'copied':copied}))
+    return {'status':'ok','snapshot':name,'copied':copied}
+
+@app.get('/secure/backup/snapshots', dependencies=[Depends(require_permissions('backup:view'))])
+async def list_snapshots():
+    out=[]
+    for n in sorted(os.listdir(SNAPSHOT_DIR)):
+        p=os.path.join(SNAPSHOT_DIR,n)
+        if not os.path.isdir(p): continue
+        try:
+            with open(os.path.join(p,'meta.json')) as f:
+                meta=json.load(f)
+        except Exception:
+            meta={}
+        out.append({'name':n,'meta':meta})
+    return {'snapshots':out}
 
 # Basic validation function for secure endpoints
 def validate_secure(headers):
@@ -2938,7 +3283,13 @@ async def secure_plugins(request: Request, permitted: bool = Depends(require_per
             installed=[{'name':r[0],'version':r[1],'enabled':bool(r[2]),'description':r[3],'installed_at':r[4]} for r in cur.fetchall()]
     except Exception as e:
         logging.error(f'Plugin fetch error {e}')
-    payload={'installed':installed,'available':[], 'timestamp': time.time()}
+    # Merge live loaded plugin registry
+    try:
+        from common.plugin_framework import get_plugin_manager  # type: ignore
+        live = get_plugin_manager().list()
+    except Exception:
+        live = []
+    payload={'installed':installed,'live': live, 'timestamp': time.time()}
     return wrap_encrypted(session_id, key, payload)
 
 # Replace security (user list from sessions)
@@ -3133,6 +3484,49 @@ async def secure_processes(request: Request, permitted: bool = Depends(require_p
 
 class KillProcessRequest(BaseModel):
     pid: int
+
+# --- Streaming negotiation endpoints (scaffold) ---
+try:
+    from common.streaming import get_stream_store  # type: ignore
+except Exception:  # pragma: no cover
+    async def get_stream_store():  # type: ignore
+        class _Null:
+            async def create_offer(self,*a,**k): return 'na'
+            async def attach_answer(self,*a,**k): return False
+            async def get(self,*a,**k): return None
+        return _Null()
+
+class StreamOffer(BaseModel):
+    session_id: str
+    sdp: str
+
+class StreamAnswer(BaseModel):
+    sdp: str
+
+@app.post('/api/secure/stream/offer')
+async def create_stream_offer(body: StreamOffer, request: Request, permitted: bool = Depends(require_permissions('stream:create'))):
+    sid, key = validate_secure(request.headers)
+    store = await get_stream_store()
+    stream_id = await store.create_offer(body.session_id, body.sdp)
+    return wrap_encrypted(sid, key, {'stream_id': stream_id})
+
+@app.post('/api/secure/stream/{stream_id}/answer')
+async def attach_stream_answer(stream_id: str, body: StreamAnswer, request: Request, permitted: bool = Depends(require_permissions('stream:answer'))):
+    sid, key = validate_secure(request.headers)
+    store = await get_stream_store()
+    ok = await store.attach_answer(stream_id, body.sdp)
+    if not ok:
+        raise HTTPException(status_code=404, detail='stream not found')
+    return wrap_encrypted(sid, key, {'ok': True})
+
+@app.get('/api/secure/stream/{stream_id}')
+async def get_stream(stream_id: str, request: Request, permitted: bool = Depends(require_permissions('stream:view'))):
+    sid, key = validate_secure(request.headers)
+    store = await get_stream_store()
+    rec = await store.get(stream_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail='stream not found')
+    return wrap_encrypted(sid, key, {'stream': {k:v for k,v in rec.items() if k != 'offer_sdp' or True}})
 
 @app.post('/api/secure/processes/kill')
 async def secure_process_kill(request: Request, body: KillProcessRequest, permitted: bool = Depends(require_permissions('processes:kill'))):

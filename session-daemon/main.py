@@ -339,6 +339,22 @@ class SessionDaemon:
             except Exception:
                 pass
 
+    # Unified health schema
+    def build_health(self) -> Dict[str, Any]:
+        deps = {
+            'redis': {'ok': self.redis_client is not None},
+            'database': {'ok': self.postgres_pool is not None},
+            'etcd': {'ok': self.etcd_client is not None},
+        }
+        degraded = [k for k,v in deps.items() if not v['ok']]
+        return {
+            'status': 'healthy' if not degraded else 'degraded',
+            'version': '1.0.0',
+            'uptime_seconds': 0,  # TODO: track start time
+            'dependencies': deps,
+            'degraded': degraded,
+        }
+
     # --- simplified core operations (create/list/get/terminate) ---
     async def create_session(self, request: SessionRequest) -> SessionInstance:
         if request.target_latency_ms < 1.0:
@@ -502,7 +518,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat(), "active_sessions": len(session_daemon.sessions)}
+    return session_daemon.build_health()
 
 
 @app.post("/sessions")

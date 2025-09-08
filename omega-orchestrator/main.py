@@ -6,22 +6,40 @@ Initial prototype node discovery, heartbeat, placement, and rolling upgrades.
 import asyncio
 import logging
 import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 import json
 import uuid
 import hashlib
+try:
+    from common.event_bus import get_event_bus  # type: ignore
+except Exception:  # pragma: no cover
+    async def get_event_bus():  # type: ignore
+        class _Null:
+            async def publish(self,*a,**k):
+                return ''
+        return _Null()
 
 from fastapi import FastAPI, WebSocket, BackgroundTasks
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import os as _os
 _os.environ.setdefault('PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION', 'python')
-import aioredis
-import asyncpg
-from kubernetes import client, config
-import etcd3
+# Optional deps: guard imports for test environments
+try:
+    import asyncpg  # type: ignore
+except Exception:  # pragma: no cover
+    asyncpg = None  # type: ignore
+try:
+    from kubernetes import client, config  # type: ignore
+except Exception:  # pragma: no cover
+    client = None  # type: ignore
+    config = None  # type: ignore
+try:
+    import etcd3  # type: ignore
+except Exception:  # pragma: no cover
+    etcd3 = None  # type: ignore
 
 # Configuration
 CLUSTER_NAME = "omega-cluster-01"
@@ -34,11 +52,12 @@ class NodeSpec:
     node_id: str
     node_type: str  # cpu_node, gpu_node, storage_node, hybrid_node
     resources: Dict[str, Any]
-    status: str  # active, inactive, draining, failed
+    status: str  # pending, active, inactive, draining, drained, failed, deregistered
     last_heartbeat: datetime
     labels: Dict[str, str]
     annotations: Dict[str, str]
     network_config: Dict[str, Any]
+    trust_score: float = 1.0  # dynamic reputation (0..1)
     
 class PlacementRequest(BaseModel):
     session_id: str
@@ -57,15 +76,16 @@ class OmegaOrchestrator:
     def __init__(self):
         """Initialize in-memory state containers and stat counters."""
         self.start_time = time.time()
+
         # Core in-memory state
-        self.nodes = {}              # type: Dict[str, NodeSpec]
-        self.active_sessions = {}    # type: Dict[str, Dict[str, Any]]
-        self.placement_history = []  # type: List[PlacementDecision]
+        self.nodes: Dict[str, NodeSpec] = {}
+        self.active_sessions: Dict[str, Dict[str, Any]] = {}
+        self.placement_history: List[PlacementDecision] = []
         self.cluster_state = "initializing"
 
         # External clients (lazy async init in initialize())
-        self.redis_client = None
-        self.postgres_pool = None
+        self.redis_client = None  # Redis or fallback stub
+        self.postgres_pool = None  # asyncpg pool or SQLite wrapper
         self.etcd_client = None
 
         # Logging
@@ -80,15 +100,27 @@ class OmegaOrchestrator:
             'autoscale_iterations': 0
         }
 
-        # Rolling samples for derived custom metrics
-        self._seamlessness_samples = []  # type: List[float]
-        self._scaling_eff_samples = []   # type: List[float]
-        self._collab_coeff_samples = []  # type: List[float]
+        # Rolling samples for derived custom metrics (windowed performance indicators)
+        self._seamlessness_samples: List[float] = []
+        self._scaling_eff_samples: List[float] = []
+        self._collab_coeff_samples: List[float] = []
 
         # Recorded autoscaling actions (auditable). Each item: {ts, action, reason, util_before}
-        self.autoscaling_events = []     # type: List[Dict[str, Any]]
+        self.autoscaling_events: List[Dict[str, Any]] = []
         # Internal cache of whether autoscaling tables initialized (avoid repeat DDL attempts)
         self._autoscale_persistence_ready = False
+        # Node approval queue (pending registrations)
+        self._pending_nodes: Dict[str, Dict[str, Any]] = {}
+        # Predictive scheduling basic history (selection counts per node)
+        self._node_schedule_counts: Dict[str, int] = {}
+        self._last_prediction_time = time.time()
+        # Predictive scheduling penalty strength (max proportional score reduction)
+        self._predictive_penalty_strength = 0.5  # 50% cap
+        # Trust scoring configuration
+        self._trust_weight = 0.05  # 5% weight in composite score
+        self._min_trust = 0.1
+        self._max_trust = 1.0
+
 
     # --- Unified health schema ---
     def build_health(self) -> Dict[str, Any]:
@@ -97,6 +129,7 @@ class OmegaOrchestrator:
             'redis': {'ok': self.redis_client is not None},
             'database': {'ok': self.postgres_pool is not None},
             'etcd': {'ok': self.etcd_client is not None},
+            'autoscale_persistence': {'ok': self._autoscale_persistence_ready},
         }
         degraded = [k for k, v in deps.items() if not v['ok']]
         return {
@@ -140,7 +173,9 @@ class OmegaOrchestrator:
 
         # PostgreSQL (fallback to SQLite if unavailable)
         try:
-            self.postgres_pool = await asyncpg.create_pool(POSTGRES_URL)
+            if asyncpg is None:
+                raise RuntimeError('asyncpg not available')
+            self.postgres_pool = await asyncpg.create_pool(POSTGRES_URL)  # type: ignore[attr-defined]
         except Exception as e:
             self.logger.warning(f"Postgres unavailable ({e}), falling back to local SQLite")
             try:
@@ -151,10 +186,27 @@ class OmegaOrchestrator:
                 if aiosqlite is None:
                     raise RuntimeError('aiosqlite not installed')
                 class _SQLitePool:
-                    def __init__(self, path):
+                    """Lightweight async context manager pool wrapper for aiosqlite so existing
+                    async with pool.acquire() semantics continue to work. Provides a close() no-op.
+                    """
+                    kind = 'sqlite'
+                    def __init__(self, path: str):
                         self.path = path
-                    async def acquire(self):
-                        return await aiosqlite.connect(self.path)
+                    class _ConnCtx:
+                        def __init__(self, path: str):
+                            self.path = path
+                            self.conn = None
+                        async def __aenter__(self):
+                            import aiosqlite  # type: ignore
+                            self.conn = await aiosqlite.connect(self.path)
+                            return self.conn
+                        async def __aexit__(self, exc_type, exc, tb):
+                            if self.conn:
+                                await self.conn.close()
+                    def acquire(self):
+                        return self._ConnCtx(self.path)
+                    async def close(self):  # parity with asyncpg pool
+                        return
                 sqlite_path = _os.path.join(_os.getcwd(), 'omega_orchestrator.db')
                 self.postgres_pool = _SQLitePool(sqlite_path)
             except Exception:
@@ -162,10 +214,22 @@ class OmegaOrchestrator:
                 self.postgres_pool = None
 
         # etcd client
-        self.etcd_client = etcd3.client(host='localhost', port=2379)
+        try:
+            self.etcd_client = etcd3.client(host='localhost', port=2379) if etcd3 else None  # type: ignore[attr-defined]
+        except Exception:
+            self.etcd_client = None
 
         # Initialize schema
         await self._init_database()
+        # Run migrations (SQLite only for now) best-effort
+        try:
+            if getattr(self.postgres_pool, 'kind', '') == 'sqlite':
+                import subprocess, sys, os as _os2
+                mig_script = _os2.path.join(_os2.path.dirname(_os2.path.dirname(__file__)), 'scripts', 'migrate.py')
+                if _os2.path.exists(mig_script):
+                    subprocess.run([sys.executable, mig_script, '--target', 'orchestrator'], timeout=5, check=False)
+        except Exception:
+            self.logger.debug('Migration runner (orchestrator) skipped/failed')
 
         # Launch background tasks
         asyncio.create_task(self._heartbeat_monitor())
@@ -182,44 +246,104 @@ class OmegaOrchestrator:
             self.logger.warning("Skipping database schema init - no persistence backend available")
             return
         try:
-            async with self.postgres_pool.acquire() as conn:
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS nodes (
-                    node_id VARCHAR(64) PRIMARY KEY,
-                    node_type VARCHAR(32) NOT NULL,
-                    resources JSONB,
-                    status VARCHAR(16),
-                    last_heartbeat TIMESTAMP WITH TIME ZONE,
-                    labels JSONB,
-                    annotations JSONB,
-                    network_config JSONB,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-                
-                CREATE TABLE IF NOT EXISTS placement_decisions (
-                    decision_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    session_id VARCHAR(64) NOT NULL,
-                    selected_nodes JSONB,
-                    resource_allocation JSONB,
-                    placement_score FLOAT,
-                    reasoning TEXT,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-                
-                CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
-                CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
-                CREATE INDEX IF NOT EXISTS idx_placement_session ON placement_decisions(session_id);
-                CREATE TABLE IF NOT EXISTS autoscaling_events (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    ts TIMESTAMPTZ DEFAULT NOW(),
-                    action VARCHAR(32) NOT NULL,
-                    reason TEXT,
-                    util_before FLOAT,
-                    active_nodes INT
-                );
-            ''')
-                self._autoscale_persistence_ready = True
+            # Detect SQLite fallback
+            is_sqlite = getattr(self.postgres_pool, 'kind', '') == 'sqlite'
+            if is_sqlite:
+                import aiosqlite  # type: ignore
+                async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
+                    # Use generic TEXT columns for JSON blobs
+                    schema_sql = """
+CREATE TABLE IF NOT EXISTS nodes (
+    node_id TEXT PRIMARY KEY,
+    node_type TEXT NOT NULL,
+    resources TEXT,
+    status TEXT,
+    last_heartbeat TEXT,
+    labels TEXT,
+    annotations TEXT,
+    network_config TEXT,
+    trust_score REAL DEFAULT 1.0,
+    created_at TEXT,
+    updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS placement_decisions (
+    decision_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    selected_nodes TEXT,
+    resource_allocation TEXT,
+    placement_score REAL,
+    reasoning TEXT,
+    created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS autoscaling_events (
+    id TEXT PRIMARY KEY,
+    ts TEXT,
+    action TEXT NOT NULL,
+    reason TEXT,
+    util_before REAL,
+    active_nodes INTEGER
+);
+"""
+                    # executescript available on aiosqlite connection
+                    await conn.executescript(schema_sql)  # type: ignore[attr-defined]
+                    # Ensure DDL is committed
+                    try:
+                        await conn.commit()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                    # Lightweight migration: add trust_score column if table exists without it
+                    try:
+                        cursor = await conn.execute('PRAGMA table_info(nodes)')
+                        cols = await cursor.fetchall()
+                        names = {c[1] for c in cols}
+                        if 'trust_score' not in names:
+                            await conn.execute('ALTER TABLE nodes ADD COLUMN trust_score REAL DEFAULT 1.0')
+                    except Exception:
+                        pass
+                    self._autoscale_persistence_ready = True
+            else:
+                async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
+                    await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS nodes (
+                        node_id VARCHAR(64) PRIMARY KEY,
+                        node_type VARCHAR(32) NOT NULL,
+                        resources JSONB,
+                        status VARCHAR(16),
+                        last_heartbeat TIMESTAMP WITH TIME ZONE,
+                        labels JSONB,
+                        annotations JSONB,
+                        network_config JSONB,
+                        trust_score FLOAT DEFAULT 1.0,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    );
+                    CREATE TABLE IF NOT EXISTS placement_decisions (
+                        decision_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        session_id VARCHAR(64) NOT NULL,
+                        selected_nodes JSONB,
+                        resource_allocation JSONB,
+                        placement_score FLOAT,
+                        reasoning TEXT,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
+                    CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
+                    CREATE INDEX IF NOT EXISTS idx_placement_session ON placement_decisions(session_id);
+                    CREATE TABLE IF NOT EXISTS autoscaling_events (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        ts TIMESTAMPTZ DEFAULT NOW(),
+                        action VARCHAR(32) NOT NULL,
+                        reason TEXT,
+                        util_before FLOAT,
+                        active_nodes INT
+                    );
+                    ''')
+                    # Migration: ensure trust_score column exists (older tables might miss it)
+                    try:
+                        await conn.execute('ALTER TABLE nodes ADD COLUMN IF NOT EXISTS trust_score FLOAT DEFAULT 1.0')
+                    except Exception:
+                        pass
+                    self._autoscale_persistence_ready = True
         except Exception as e:
             self.logger.error(f"Database init failed (continuing without persistence): {e}")
     
@@ -233,36 +357,59 @@ class OmegaOrchestrator:
             # Store in memory
             self.nodes[node_spec.node_id] = node_spec
             
-            # Store in Redis for fast access
-            await self.redis_client.hset(
-                f"node:{node_spec.node_id}",
-                mapping=asdict(node_spec)
-            )
+            # Store in Redis for fast access (best-effort)
+            try:
+                await self.redis_client.hset(  # type: ignore[attr-defined]
+                    f"node:{node_spec.node_id}",
+                    mapping=asdict(node_spec)
+                )
+            except Exception:
+                pass
             
             # Store in PostgreSQL for persistence
-            async with self.postgres_pool.acquire() as conn:
-                await conn.execute('''
-                    INSERT INTO nodes (node_id, node_type, resources, status, 
-                                     last_heartbeat, labels, annotations, network_config)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    ON CONFLICT (node_id) DO UPDATE SET
-                        node_type = EXCLUDED.node_type,
-                        resources = EXCLUDED.resources,
-                        status = EXCLUDED.status,
-                        last_heartbeat = EXCLUDED.last_heartbeat,
-                        labels = EXCLUDED.labels,
-                        annotations = EXCLUDED.annotations,
-                        network_config = EXCLUDED.network_config,
-                        updated_at = NOW()
-                ''', node_spec.node_id, node_spec.node_type, 
-                json.dumps(node_spec.resources), node_spec.status,
-                node_spec.last_heartbeat, json.dumps(node_spec.labels),
-                json.dumps(node_spec.annotations), json.dumps(node_spec.network_config))
+            if self.postgres_pool:
+                is_sqlite = getattr(self.postgres_pool, 'kind', '') == 'sqlite'
+                async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
+                    if is_sqlite:
+                        try:
+                            await conn.execute(
+                                'INSERT OR REPLACE INTO nodes (node_id, node_type, resources, status, last_heartbeat, labels, annotations, network_config, trust_score, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,COALESCE((SELECT created_at FROM nodes WHERE node_id = ?), datetime("now")), datetime("now"))',
+                                node_spec.node_id, node_spec.node_type, json.dumps(node_spec.resources), node_spec.status, node_spec.last_heartbeat.isoformat(), json.dumps(node_spec.labels), json.dumps(node_spec.annotations), json.dumps(node_spec.network_config), float(getattr(node_spec, 'trust_score', 1.0)), node_spec.node_id
+                            )
+                            try:
+                                await conn.commit()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            self.logger.debug(f"SQLite insert node failed: {e}")
+                    else:
+                        await conn.execute('''
+                            INSERT INTO nodes (node_id, node_type, resources, status, 
+                                             last_heartbeat, labels, annotations, network_config, trust_score)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            ON CONFLICT (node_id) DO UPDATE SET
+                                node_type = EXCLUDED.node_type,
+                                resources = EXCLUDED.resources,
+                                status = EXCLUDED.status,
+                                last_heartbeat = EXCLUDED.last_heartbeat,
+                                labels = EXCLUDED.labels,
+                                annotations = EXCLUDED.annotations,
+                                network_config = EXCLUDED.network_config,
+                                trust_score = EXCLUDED.trust_score,
+                                updated_at = NOW()
+                        ''', node_spec.node_id, node_spec.node_type, 
+                        json.dumps(node_spec.resources), node_spec.status,
+                        node_spec.last_heartbeat, json.dumps(node_spec.labels),
+                        json.dumps(node_spec.annotations), json.dumps(node_spec.network_config), float(getattr(node_spec, 'trust_score', 1.0)))
             
             # Announce to cluster via etcd
             await self._announce_node_change("register", node_spec)
             
             self.logger.info(f"Node {node_spec.node_id} registered successfully")
+            try:
+                asyncio.create_task(self._emit_event('node.registered', {'node_id': node_spec.node_id, 'type': node_spec.node_type}))
+            except Exception:
+                pass
             return True
             
         except Exception as e:
@@ -288,16 +435,29 @@ class OmegaOrchestrator:
             await self.redis_client.delete(f"node:{node_id}")
             
             # Update status in PostgreSQL
-            async with self.postgres_pool.acquire() as conn:
-                await conn.execute('''
-                    UPDATE nodes SET status = 'deregistered', updated_at = NOW()
-                    WHERE node_id = $1
-                ''', node_id)
+            if self.postgres_pool:
+                is_sqlite = getattr(self.postgres_pool, 'kind', '') == 'sqlite'
+                async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
+                    if is_sqlite:
+                        await conn.execute('UPDATE nodes SET status = ?, updated_at = datetime("now") WHERE node_id = ?', 'deregistered', node_id)
+                        try:
+                            await conn.commit()  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                    else:
+                        await conn.execute('''
+                            UPDATE nodes SET status = 'deregistered', updated_at = NOW()
+                            WHERE node_id = $1
+                        ''', node_id)
             
             # Announce to cluster
             await self._announce_node_change("deregister", node_spec)
             
             self.logger.info(f"Node {node_id} deregistered successfully")
+            try:
+                asyncio.create_task(self._emit_event('node.deregistered', {'node_id': node_id}))
+            except Exception:
+                pass
             return True
             
         except Exception as e:
@@ -340,6 +500,12 @@ class OmegaOrchestrator:
             # Store decision for future optimization
             self.placement_history.append(decision)
             await self._store_placement_decision(decision)
+            for nid in selected_nodes:
+                self._node_schedule_counts[nid] = self._node_schedule_counts.get(nid,0) + 1
+            try:
+                asyncio.create_task(self._emit_event('schedule.decision', {'session_id': request.session_id, 'nodes': selected_nodes, 'score': overall_score}))
+            except Exception:
+                pass
             
             return decision
             
@@ -372,10 +538,79 @@ class OmegaOrchestrator:
             # Load balancing score (10% weight)
             load_score = self._calculate_load_score(node_id)
             score += load_score * 0.1
+
+            # Trust weight (prioritize higher trust nodes slightly)
+            trust = getattr(node, 'trust_score', 1.0)
+            trust_component = max(self._min_trust, min(self._max_trust, trust)) * self._trust_weight
+            score += trust_component
+
+            # Predictive fairness penalty (simple heuristic) to avoid hotspotting a node
+            pred_penalty = self._predictive_penalty(node_id)
+            if pred_penalty:
+                score *= (1 - pred_penalty)  # apply full proportional penalty
             
             scores[node_id] = score
         
         return scores
+
+    def _predictive_penalty(self, node_id: str) -> float:
+        """Return proportional penalty (0..strength) for nodes over average selection count.
+        Penalty scales with how much a node's historical selection count exceeds the cluster average.
+        """
+        try:
+            total = sum(self._node_schedule_counts.values())
+            if total < 10:
+                return 0.0
+            avg = total / max(1, len(self._node_schedule_counts))
+            count = self._node_schedule_counts.get(node_id, 0)
+            if count <= avg:
+                return 0.0
+            excess_ratio = (count - avg) / (avg if avg else 1)
+            # Scale penalty more aggressively to enforce fairness
+            return min(self._predictive_penalty_strength, excess_ratio * self._predictive_penalty_strength)
+        except Exception:
+            return 0.0
+
+    # --- Trust / reputation management ---
+    def update_node_trust(self, node_id: str, delta: float, reason: str = "") -> float:
+        node = self.nodes.get(node_id)
+        if not node:
+            return 0.0
+        new_val = max(self._min_trust, min(self._max_trust, node.trust_score + delta))
+        if abs(new_val - node.trust_score) > 1e-6:
+            node.trust_score = new_val
+            # Persist to Redis
+            try:
+                asyncio.create_task(self.redis_client.hset(f"node:{node_id}", mapping=asdict(node)))  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            # Persist to DB (best-effort)
+            asyncio.create_task(self._persist_trust_score(node_id, new_val))
+            try:
+                asyncio.create_task(self._emit_event('node.trust.updated', {'node_id': node_id, 'trust': new_val, 'delta': delta, 'reason': reason}))
+            except Exception:
+                pass
+        return new_val
+
+    async def _persist_trust_score(self, node_id: str, trust: float):
+        if not self.postgres_pool:
+            return
+        try:
+            is_sqlite = getattr(self.postgres_pool, 'kind', '') == 'sqlite'
+            async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
+                if is_sqlite:
+                    try:
+                        await conn.execute('UPDATE nodes SET trust_score = ?, updated_at = datetime("now") WHERE node_id = ?', float(trust), node_id)
+                        try:
+                            await conn.commit()  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                    except Exception as ie:
+                        self.logger.debug(f"SQLite update trust failed: {ie}")
+                else:
+                    await conn.execute('UPDATE nodes SET trust_score = $1, updated_at = NOW() WHERE node_id = $2', float(trust), node_id)
+        except Exception as e:
+            self.logger.debug(f"Persist trust failed: {e}")
     
     def _bin_pack_with_latency(self, request: PlacementRequest, scores: Dict[str, float]) -> List[str]:
         """Bin-packing algorithm optimized for latency"""
@@ -510,6 +745,10 @@ class OmegaOrchestrator:
         self.logger.info(f"[autoscale] {action} recorded reason={reason} util={util_before:.2f}")
         # Best-effort persistence
         asyncio.create_task(self._persist_autoscale_event(evt))
+        try:
+            asyncio.create_task(self._emit_event(f'autoscale.{action}', {'reason': reason, 'util': util_before}))
+        except Exception:
+            pass
 
     async def _scale_out(self, util_before: float, reason: str = "threshold", count: int = 1):
         """Provision simulated nodes (in-memory + persistence) to satisfy scale out."""
@@ -546,6 +785,9 @@ class OmegaOrchestrator:
             if len([n for n in self.nodes.values() if n.status == 'active']) <= 1:
                 break  # never remove last node
             try:
+                # Graceful drain
+                node.status = 'draining'
+                await self._drain_node(node.node_id)
                 await self.deregister_node(node.node_id)
                 removed += 1
             except Exception as e:
@@ -558,11 +800,21 @@ class OmegaOrchestrator:
         if not self.postgres_pool or not self._autoscale_persistence_ready:
             return
         try:
-            async with self.postgres_pool.acquire() as conn:
-                await conn.execute(
-                    'INSERT INTO autoscaling_events (action, reason, util_before, active_nodes, ts) VALUES ($1,$2,$3,$4,NOW())',
-                    evt['action'], evt['reason'], float(evt['util_before']), int(evt['active_nodes'])
-                )
+            is_sqlite = getattr(self.postgres_pool, 'kind', '') == 'sqlite'
+            async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
+                if is_sqlite:
+                    try:
+                        await conn.execute(
+                            'INSERT INTO autoscaling_events (id, ts, action, reason, util_before, active_nodes) VALUES (?,?,?,?,?,?)',
+                            str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(), evt['action'], evt['reason'], float(evt['util_before']), int(evt['active_nodes'])
+                        )
+                    except Exception as ie:
+                        self.logger.debug(f"SQLite persist autoscale event failed: {ie}")
+                else:
+                    await conn.execute(
+                        'INSERT INTO autoscaling_events (action, reason, util_before, active_nodes, ts) VALUES ($1,$2,$3,$4,NOW())',
+                        evt['action'], evt['reason'], float(evt['util_before']), int(evt['active_nodes'])
+                    )
         except Exception as e:
             # Suppress to avoid loop failure; log once
             self.logger.debug(f"Persist autoscale event failed: {e}")
@@ -607,11 +859,22 @@ class OmegaOrchestrator:
         if not self.postgres_pool:
             return
         try:
-            async with self.postgres_pool.acquire() as conn:
-                await conn.execute('''
-                    INSERT INTO placement_decisions (session_id, selected_nodes, resource_allocation, placement_score, reasoning)
-                    VALUES ($1, $2, $3, $4, $5)
-                ''', decision.session_id, json.dumps(decision.selected_nodes), json.dumps(decision.resource_allocation), decision.placement_score, decision.reasoning)
+            is_sqlite = getattr(self.postgres_pool, 'kind', '') == 'sqlite'
+            async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
+                if is_sqlite:
+                    await conn.execute(
+                        'INSERT INTO placement_decisions (decision_id, session_id, selected_nodes, resource_allocation, placement_score, reasoning, created_at) VALUES (?,?,?,?,?,?,?)',
+                        str(uuid.uuid4()), decision.session_id, json.dumps(decision.selected_nodes), json.dumps(decision.resource_allocation), decision.placement_score, decision.reasoning, datetime.now(timezone.utc).isoformat()
+                    )
+                    try:
+                        await conn.commit()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                else:
+                    await conn.execute('''
+                        INSERT INTO placement_decisions (session_id, selected_nodes, resource_allocation, placement_score, reasoning)
+                        VALUES ($1, $2, $3, $4, $5)
+                    ''', decision.session_id, json.dumps(decision.selected_nodes), json.dumps(decision.resource_allocation), decision.placement_score, decision.reasoning)
         except Exception as e:
             self.logger.warning(f"Persist placement decision failed: {e}")
 
@@ -723,12 +986,34 @@ class OmegaOrchestrator:
         except Exception:
             pass
         self.logger.error(f"Node {node_id} marked failed")
+        try:
+            asyncio.create_task(self._emit_event('node.failed', {'node_id': node_id}))
+        except Exception:
+            pass
 
     async def _drain_node(self, node_id: str):
-        # placeholder: mark draining then drained; real impl would migrate sessions
         node = self.nodes.get(node_id)
-        if node:
+        if not node:
+            return
+        try:
+            # Simulate session migration latency
+            await asyncio.sleep(0.05)
+            # In real implementation would reassign sessions from this node
             node.status = 'drained'
+            # Record drain completion event (in-memory only)
+            self.autoscaling_events.append({
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'action': 'drain_complete',
+                'reason': f'drain node {node_id}',
+                'util_before': None,
+                'active_nodes': len([n for n in self.nodes.values() if n.status == 'active'])
+            })
+            try:
+                asyncio.create_task(self._emit_event('node.drained', {'node_id': node_id}))
+            except Exception:
+                pass
+        except Exception as e:
+            self.logger.debug(f"Drain node {node_id} failed: {e}")
 
     async def _identify_suboptimal_placements(self, recent: List[PlacementDecision]) -> List[str]:
         # simple heuristic: pick sessions with score below median*0.5
@@ -815,6 +1100,10 @@ class OmegaOrchestrator:
         except Exception as e:
             self.logger.error(f"Failed to announce node change: {e}")
 
+    async def _emit_event(self, event_type: str, data: Dict[str, Any]):
+        bus = await get_event_bus()
+        await bus.publish('cluster', event_type, data)
+
 # FastAPI app instantiation (single, after class definition)
 orch = OmegaOrchestrator()
 
@@ -851,6 +1140,29 @@ async def autoscaling_events(limit: int = 50):
     limit = max(1, min(200, limit))
     return {'events': orch.autoscaling_events[-limit:]}
 
+@app.get('/autoscaling/events/persisted')
+async def autoscaling_events_persisted(limit: int = 50):
+    limit = max(1, min(200, limit))
+    if not orch.postgres_pool or not orch._autoscale_persistence_ready:
+        return {'events': [], 'persistence': 'unavailable'}
+    events: List[Dict[str, Any]] = []
+    try:
+        is_sqlite = getattr(orch.postgres_pool, 'kind', '') == 'sqlite'
+        async with orch.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
+            if is_sqlite:
+                cursor = await conn.execute('SELECT ts, action, reason, util_before, active_nodes FROM autoscaling_events ORDER BY ts DESC LIMIT ?', (limit,))
+                rows = await cursor.fetchall()
+                for r in rows:
+                    events.append({'timestamp': r[0], 'action': r[1], 'reason': r[2], 'util_before': r[3], 'active_nodes': r[4]})
+            else:
+                # asyncpg: fetch returns list of records
+                recs = await conn.fetch('SELECT ts, action, reason, util_before, active_nodes FROM autoscaling_events ORDER BY ts DESC LIMIT $1', limit)
+                for rec in recs:
+                    events.append({'timestamp': rec['ts'].isoformat() if hasattr(rec['ts'], 'isoformat') else rec['ts'], 'action': rec['action'], 'reason': rec['reason'], 'util_before': rec['util_before'], 'active_nodes': rec['active_nodes']})
+    except Exception as e:
+        return {'events': [], 'error': str(e)}
+    return {'events': events, 'persistence': 'ok'}
+
 @app.post('/autoscaling/scale_out')
 async def manual_scale_out(count: int = 1, reason: str = 'manual'):
     util = await orch._calculate_cluster_utilization()
@@ -862,6 +1174,86 @@ async def manual_scale_in(count: int = 1, reason: str = 'manual'):
     util = await orch._calculate_cluster_utilization()
     await orch._scale_in(util, reason=reason, count=count)
     return {'status':'ok','action':'scale_in','count':count,'nodes': list(orch.nodes.keys())}
+
+# --- Trust endpoints (experimental) ---
+class TrustAdjust(BaseModel):
+    delta: float
+    reason: str = ""
+
+@app.get('/nodes')
+async def list_nodes():
+    # Minimal view including trust
+    return {'nodes':[{
+        'node_id': n.node_id,
+        'type': n.node_type,
+        'status': n.status,
+        'resources': n.resources,
+        'trust_score': getattr(n, 'trust_score', 1.0)
+    } for n in orch.nodes.values()]}
+
+@app.post('/nodes/{node_id}/trust')
+async def adjust_trust(node_id: str, body: TrustAdjust):
+    if node_id not in orch.nodes:
+        return {'status':'not_found','node_id': node_id}
+    val = orch.update_node_trust(node_id, body.delta, body.reason)
+    return {'status':'ok','node_id': node_id, 'trust': val}
+
+# --- Node approval workflow endpoints ---
+class PendingNode(BaseModel):
+    node_id: str
+    node_type: str
+    resources: Dict[str, Any]
+    labels: Dict[str, str] = {}
+    annotations: Dict[str, str] = {}
+    network_config: Dict[str, Any] = {}
+
+@app.post('/nodes/register')
+async def submit_node_registration(node: PendingNode, auto_approve: bool = False):
+    if node.node_id in orch.nodes or node.node_id in orch._pending_nodes:
+        return {'status':'exists','node_id': node.node_id}
+    spec_dict = node.dict()
+    if auto_approve:
+        spec = NodeSpec(
+            node_id=node.node_id,
+            node_type=node.node_type,
+            resources=node.resources,
+            status='active',
+            last_heartbeat=datetime.now(timezone.utc),
+            labels=node.labels,
+            annotations=node.annotations,
+            network_config=node.network_config
+        )
+        ok = await orch.register_node(spec)
+        return {'status': 'approved' if ok else 'error', 'node_id': node.node_id}
+    orch._pending_nodes[node.node_id] = spec_dict
+    return {'status':'pending','node_id': node.node_id}
+
+@app.get('/nodes/pending')
+async def list_pending_nodes():
+    return {'pending': list(orch._pending_nodes.values())}
+
+@app.post('/nodes/approve/{node_id}')
+async def approve_node(node_id: str):
+    data = orch._pending_nodes.pop(node_id, None)
+    if not data:
+        return {'status':'not_found','node_id': node_id}
+    spec = NodeSpec(
+        node_id=node_id,
+        node_type=data['node_type'],
+        resources=data['resources'],
+        status='active',
+        last_heartbeat=datetime.now(timezone.utc),
+        labels=data.get('labels',{}),
+        annotations=data.get('annotations',{}),
+        network_config=data.get('network_config',{})
+    )
+    ok = await orch.register_node(spec)
+    return {'status':'approved' if ok else 'error','node_id': node_id}
+
+@app.post('/nodes/deny/{node_id}')
+async def deny_node(node_id: str):
+    existed = orch._pending_nodes.pop(node_id, None) is not None
+    return {'status': 'denied' if existed else 'not_found', 'node_id': node_id}
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
