@@ -3965,8 +3965,8 @@ async def secure_session_rotate(body: SecureSessionRotate, request: Request):
 
 
 # --- Most advanced, secure, and bug-free node registration ---
-@app.post('/api/secure/nodes/register')
-async def register_node(request: Request, body: NodeRegistrationRequest = Body(...)):
+@app.post('/api/secure/nodes/register', include_in_schema=False)
+async def register_node_advanced(request: Request, body: NodeRegistrationRequest = Body(...)):
     import ipaddress, socket, re
     session_id, key = validate_secure(request.headers)
     user = SESSION_META.get(session_id, {}).get('user', 'admin')

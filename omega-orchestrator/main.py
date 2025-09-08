@@ -582,11 +582,16 @@ CREATE TABLE IF NOT EXISTS autoscaling_events (
             node.trust_score = new_val
             # Persist to Redis
             try:
-                asyncio.create_task(self.redis_client.hset(f"node:{node_id}", mapping=asdict(node)))  # type: ignore[attr-defined]
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.redis_client.hset(f"node:{node_id}", mapping=asdict(node)))  # type: ignore[attr-defined]
             except Exception:
                 pass
             # Persist to DB (best-effort)
-            asyncio.create_task(self._persist_trust_score(node_id, new_val))
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_trust_score(node_id, new_val))
+            except Exception:
+                pass
             try:
                 asyncio.create_task(self._emit_event('node.trust.updated', {'node_id': node_id, 'trust': new_val, 'delta': delta, 'reason': reason}))
             except Exception:
@@ -1254,7 +1259,8 @@ class PendingNode(BaseModel):
 async def submit_node_registration(node: PendingNode, auto_approve: bool = False):
     if node.node_id in orch.nodes or node.node_id in orch._pending_nodes:
         return {'status':'exists','node_id': node.node_id}
-    spec_dict = node.dict()
+    # Pydantic v2: use model_dump instead of dict()
+    spec_dict = node.model_dump()
     if auto_approve:
         spec = NodeSpec(
             node_id=node.node_id,
