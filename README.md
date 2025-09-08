@@ -1,3 +1,28 @@
+## Omega Super Desktop Console v2.0
+
+## Initial prototype Distributed Computing Platform
+
+A revolutionary distributed computing system that aggregates CPU, GPU, RAM, storage and network of multiple commodity PCs into one low-latency "super desktop" that runs unmodified Windows/Linux/Mac workloads.
+
+## [LAUNCH] Features
+
+### Core Platform
+
+- **Distributed Computing**: Horizontal scaling across compute, storage, and control nodes
+- **Advanced Resource Orchestration**: Smart placement algorithms with predictive optimization
+- **Real-time Monitoring**: Live performance metrics and health monitoring
+- **AI-Driven Optimization**: Machine learning models for latency prediction and resource optimization
+- **Intelligent Storage**: Multi-tier storage with automatic data lifecycle management
+- **Enterprise Security**: JWT authentication, TLS encryption, and role-based access control
+
+### Desktop Application
+
+- **Professional UI**: Modern Electron-based interface with responsive design
+- **Real-time Dashboards**: Live charts and metrics using Chart.js
+- **Session Management**: Create and manage compute sessions with custom resource allocation
+- **Node Monitoring**: Visual node status and resource utilization
+- **Performance Analytics**: Historical performance data and trend analysis
+
 # Virtual Desktop Sessions (NoVNC over VNC)
 
 This version adds a production-ready Virtual Desktop under the Sessions tab.
@@ -47,31 +72,6 @@ TLS:
 Notes:
 
 - Requires Docker installed and available on host for managing desktop containers.
-
-## Omega Super Desktop Console v2.0
-
-## Initial prototype Distributed Computing Platform
-
-A revolutionary distributed computing system that aggregates CPU, GPU, RAM, storage and network of multiple commodity PCs into one low-latency "super desktop" that runs unmodified Windows/Linux/Mac workloads.
-
-## [LAUNCH] Features
-
-### Core Platform
-
-- **Distributed Computing**: Horizontal scaling across compute, storage, and control nodes
-- **Advanced Resource Orchestration**: Smart placement algorithms with predictive optimization
-- **Real-time Monitoring**: Live performance metrics and health monitoring
-- **AI-Driven Optimization**: Machine learning models for latency prediction and resource optimization
-- **Intelligent Storage**: Multi-tier storage with automatic data lifecycle management
-- **Enterprise Security**: JWT authentication, TLS encryption, and role-based access control
-
-### Desktop Application
-
-- **Professional UI**: Modern Electron-based interface with responsive design
-- **Real-time Dashboards**: Live charts and metrics using Chart.js
-- **Session Management**: Create and manage compute sessions with custom resource allocation
-- **Node Monitoring**: Visual node status and resource utilization
-- **Performance Analytics**: Historical performance data and trend analysis
 
 ## [ARCHITECTURE] Architecture
 
