@@ -236,6 +236,7 @@ class OmegaOrchestrator:
         asyncio.create_task(self._cluster_optimization())
         asyncio.create_task(self._metrics_collection())
         asyncio.create_task(self._autoscaling_loop())
+        asyncio.create_task(self._trust_anomaly_consumer())
 
         self.cluster_state = "active"
         self.logger.info("Omega Orchestrator initialized successfully")
@@ -1103,6 +1104,48 @@ CREATE TABLE IF NOT EXISTS autoscaling_events (
     async def _emit_event(self, event_type: str, data: Dict[str, Any]):
         bus = await get_event_bus()
         await bus.publish('cluster', event_type, data)
+
+    # --- Trust anomaly processing and subscriber ---
+    def _handle_trust_event(self, event_type: str, data: Dict[str, Any]) -> Optional[float]:
+        """Apply small trust adjustments based on event type; returns new trust or None.
+        Events processed: node.failed, node.unhealthy, node.recovered, node.healthy, schedule.decision (tiny reward).
+        """
+        try:
+            # normalize
+            et = (event_type or '').lower()
+            nid = data.get('node_id') if isinstance(data, dict) else None
+            if not nid and et == 'schedule.decision':
+                # reward each selected node slightly
+                nodes = (data or {}).get('nodes') or []
+                newv: Optional[float] = None
+                for n in nodes:
+                    newv = self.update_node_trust(n, +0.01, reason='schedule.decision')
+                return newv
+            if not nid:
+                return None
+            if et in ('node.failed',):
+                return self.update_node_trust(nid, -0.2, reason=et)
+            if et in ('node.unhealthy', 'node.deregistered'):
+                return self.update_node_trust(nid, -0.05, reason=et)
+            if et in ('node.recovered', 'node.healthy', 'node.registered'):
+                return self.update_node_trust(nid, +0.05, reason=et)
+            # ignore trust self-updates to avoid loops
+            if et == 'node.trust.updated':
+                return None
+            return None
+        except Exception:
+            return None
+
+    async def _trust_anomaly_consumer(self):
+        """Subscribe to cluster events and adjust trust accordingly (best-effort)."""
+        try:
+            bus = await get_event_bus()
+            async for evt in bus.subscribe('cluster'):
+                et = evt.get('type'); data = evt.get('data',{})
+                self._handle_trust_event(et, data)
+        except Exception:
+            # Silent exit on failure; could retry later
+            await asyncio.sleep(1)
 
 # FastAPI app instantiation (single, after class definition)
 orch = OmegaOrchestrator()
