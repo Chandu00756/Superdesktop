@@ -30,6 +30,23 @@ app = FastAPI(
     description="Advanced encrypted backend for distributed desktop control"
 )
 
+# Initialize scheduler on startup
+from backend.scheduler_engine import initialize_scheduler
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup"""
+    await initialize_scheduler({
+        'strategy_weights': {
+            'weighted_least_loaded': 0.3,
+            'capability_aware': 0.25,
+            'energy_efficient': 0.15,
+            'predictive_placement': 0.15,
+            'thermal_aware': 0.1,
+            'latency_optimized': 0.05
+        }
+    })
+
 # Hardened security headers middleware (simple inline implementation)
 from starlette.middleware.base import BaseHTTPMiddleware
 class _SecurityHeaders(BaseHTTPMiddleware):
