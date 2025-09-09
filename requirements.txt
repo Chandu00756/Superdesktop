@@ -15,11 +15,8 @@ psycopg2-binary>=2.9.0
 prometheus-client>=0.19.0
 opentelemetry-api>=1.21.0
 opentelemetry-sdk>=1.21.0
-numpy>=1.25.0
-scikit-learn>=1.3.0
-torch>=2.1.0
-onnx>=1.15.0
-onnxruntime>=1.16.0
+numpy>=2.0.0
+# scikit-learn, torch, onnx, onnxruntime omitted for test baseline on Python 3.13; add back when needed
 grpcio>=1.59.0
 grpcio-tools>=1.59.0
 protobuf>=4.25.0

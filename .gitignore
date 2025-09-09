@@ -29,6 +29,10 @@ yarn-error.log*
 *.sqlite3
 omega_production.db
 omega_prototype.db
+*.db-wal
+*.db-shm
+backend/*.db-wal
+backend/*.db-shm
 
 # Logs
 logs/
@@ -72,4 +76,10 @@ tmp/
 temp/
 =
 =*
+
+# Local backups created by automation
+*.prepatch.py
+
+# Runtime snapshots
+data/snapshots/
 

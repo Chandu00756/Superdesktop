@@ -39,11 +39,21 @@ from backend.orchestrator_persistence import initialize_orchestrator
 from backend.webrtc_streaming import initialize_webrtc_engine
 from backend.memory_fabric import initialize_memory_fabric
 from backend.plugin_framework import initialize_plugin_framework
+from backend.advanced_rbac_matrix import initialize_rbac_matrix
+from backend.node_discovery import initialize_node_discovery
+from backend.desktop_integration import initialize_desktop_integration
+from backend.network_mesh import initialize_network_mesh
+from backend.advanced_analytics import initialize_analytics_engine
+from backend.compliance_framework import initialize_compliance_framework
 from backend.advanced_api_endpoints import advanced_router
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize advanced services on startup"""
+    """Initialize advanced services on startup (legacy path).
+    Disabled by default after lifespan migration; set OMEGA_USE_LEGACY_STARTUP=1 to enable.
+    """
+    if os.environ.get('OMEGA_USE_LEGACY_STARTUP','0') != '1':
+        return
     # Initialize scheduler
     await initialize_scheduler({
         'strategy_weights': {
@@ -91,6 +101,47 @@ async def startup_event():
             {'urls': 'stun:stun.l.google.com:19302'},
             {'urls': 'stun:stun1.l.google.com:19302'}
         ],
+        'max_bitrate': 10000000,
+        'adaptive_quality': True
+    })
+    
+    # Initialize unified memory fabric
+    await initialize_memory_fabric({
+        'memory_size': 2 * 1024 * 1024 * 1024,  # 2GB
+        'cache_size': 512 * 1024 * 1024,        # 512MB
+        'cache_policy': 'adaptive',
+        'compression_enabled': True
+    })
+    
+    # Initialize plugin framework
+    await initialize_plugin_framework({
+        'plugin_directories': ['plugins/', 'system_plugins/'],
+        'registry_path': 'backend/plugin_registry.json',
+        'sandbox_enabled': True,
+        'auto_discovery': True
+    })
+    
+    # Initialize advanced RBAC matrix
+    await initialize_rbac_matrix({
+        'db_path': 'backend/rbac_matrix.db',
+        'cache_ttl': 300,
+        'audit_enabled': True
+    })
+    
+    # Initialize node discovery system
+    await initialize_node_discovery({
+        'db_path': 'backend/node_discovery.db',
+        'scan_interval': 300,
+        'networks': ['192.168.1.0/24', '10.0.0.0/24'],
+        'concurrent_scans': 50
+    })
+    
+    # Initialize WebRTC streaming engine
+    await initialize_webrtc_engine({
+        'ice_servers': [
+            {'urls': 'stun:stun.l.google.com:19302'},
+            {'urls': 'stun:stun1.l.google.com:19302'}
+        ],
         'max_sessions': 100,
         'adaptive_quality': True
     })
@@ -110,9 +161,55 @@ async def startup_event():
         'sandbox_enabled': True,
         'security_scanning': True
     })
+    
+    # Initialize desktop application integration
+    await initialize_desktop_integration({
+        'db_path': 'backend/desktop_integration.db',
+        'auto_register_system_apps': True,
+        'notification_enabled': True,
+        'file_association_enabled': True,
+        'protocol_handler_enabled': True,
+        'tray_integration_enabled': True
+    })
+    
+    # Initialize network mesh overlay
+    await initialize_network_mesh({
+        'db_path': 'backend/network_mesh.db',
+        'routing_protocol': 'aodv',
+        'is_gateway': False,
+        'discovery_interfaces': ['eth0', 'wlan0', 'en0'],
+        'mesh_topology': 'mesh',
+        'encryption_enabled': True,
+        'qos_enabled': True
+    })
+    
+    # Initialize advanced analytics engine
+    await initialize_analytics_engine({
+        'db_path': 'backend/analytics.db',
+        'ml_enabled': True,
+        'real_time_alerts': True,
+        'dashboard_auto_refresh': 30,
+        'prediction_enabled': True,
+        'alert_actions': ['log', 'email', 'webhook'],
+        'model_retrain_interval': 86400  # 24 hours
+    })
+    
+    # Initialize compliance framework
+    await initialize_compliance_framework({
+        'db_path': 'backend/compliance.db',
+        'standards': ['gdpr', 'sox', 'iso27001', 'hipaa'],
+        'auto_assessment': True,
+        'audit_retention': 2555200,  # 30 days
+        'report_formats': ['json', 'pdf', 'csv'],
+        'alert_thresholds': {
+            'high_risk_events': 50,
+            'compliance_score': 70
+        }
+    })
 
 # Hardened security headers middleware (simple inline implementation)
 from starlette.middleware.base import BaseHTTPMiddleware
+import asyncio as _asyncio  # for readiness flag
 class _SecurityHeaders(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):  # type: ignore
         resp = await call_next(request)
@@ -134,6 +231,34 @@ app.add_middleware(_SecurityHeaders)
 @app.get('/health', include_in_schema=False)
 async def health_check():
     return {'status': 'ok'}
+
+# Readiness flag and endpoint
+READY_EVENT: _asyncio.Event = _asyncio.Event()
+
+@app.get('/ready', include_in_schema=False)
+async def ready_probe():
+    from fastapi import status as _status
+    return Response(status_code=_status.HTTP_200_OK if READY_EVENT.is_set() else _status.HTTP_503_SERVICE_UNAVAILABLE)
+
+# Optional analytics streaming pipeline and sink
+METRICS_STREAM = None  # set in lifespan if enabled
+class _AnalyticsSink:
+    async def flush(self, name: str, avg: float, count: int, last_ts: float):
+        try:
+            engine = get_analytics_engine()
+            m = Metric(
+                metric_id=str(uuid.uuid4()),
+                name=name,
+                value=float(avg),
+                metric_type=MetricType.GAUGE,
+                tags={},
+                timestamp=last_ts,
+                source='stream',
+                unit=None,
+            )
+            await engine.add_metric(m)
+        except Exception:
+            pass
 
 # Simple unauthenticated ping used by discovery logic and external scripts
 @app.get('/api/ping', include_in_schema=False)
@@ -200,6 +325,10 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Set
 from contextlib import asynccontextmanager
+from backend.quic_server import run_quic
+from backend.advanced_analytics import get_analytics_engine, Metric, MetricType
+from backend.analytics.stream import MetricsStream
+from backend.security import abac as _abac
 import sqlite3
 import threading
 from dataclasses import dataclass, asdict
@@ -1120,7 +1249,6 @@ class PerformanceAnalyzer:
             "health_score": round(health_score, 1),
             "efficiency_rating": efficiency_rating,
             "bottlenecks": bottlenecks,
-            "cpu_average": round(cpu_avg, 1),
             "memory_average": round(memory_avg, 1),
             "gpu_average": round(gpu_avg, 1),
             "recommendations": recommendations
@@ -1174,6 +1302,13 @@ class OmegaAPIServer:
         self.system_stats = {}
         self.network_topology = {}
         self.secure_sessions: Dict[str, str] = {}
+        # Pluggable lightweight KV store (memory by default; minio optional)
+        try:
+            from backend.storage.factory import build_default_store  # local optional module
+            self.kv_store = build_default_store()
+        except Exception as e:
+            logging.debug(f"KV store init failed; using None: {e}")
+            self.kv_store = None
         # Config
         self.session_storage_base = os.environ.get(
             'OMEGA_SESSION_BASE',
@@ -1841,6 +1976,38 @@ async def lifespan(app: FastAPI):  # type: ignore
         await post_init_enhance()
     except Exception as e:
         logging.debug(f"post_init_enhance skipped/failed: {e}")
+    # Start analytics streaming pipeline (env gated)
+    try:
+        if os.getenv('OMEGA_ENABLE_ANALYTICS_STREAM','1').lower() in ('1','true','yes','on'):
+            from backend.analytics.stream import MetricsStream as _MS
+            global METRICS_STREAM
+            METRICS_STREAM = _MS()
+            asyncio.create_task(METRICS_STREAM.run(_AnalyticsSink()))
+    except Exception as e:
+        logging.debug(f"analytics stream init skipped: {e}")
+    # Optional protocol servers
+    try:
+        if os.environ.get('OMEGA_GRPC_ENABLE','0') in ('1','true','yes','on'):
+            from backend.grpc_health import serve_grpc_health  # lazy import
+            host = os.environ.get('OMEGA_GRPC_HOST','0.0.0.0')
+            port = int(os.environ.get('OMEGA_GRPC_PORT','50051'))
+            asyncio.create_task(serve_grpc_health(READY_EVENT, host=host, port=port))
+    except Exception as e:
+        logging.warning(f"gRPC health server launch skipped: {e}")
+    try:
+        cert = os.environ.get('OMEGA_QUIC_CERT')
+        key = os.environ.get('OMEGA_QUIC_KEY')
+        if cert and key and os.path.exists(cert) and os.path.exists(key) and os.environ.get('OMEGA_QUIC_ENABLE','0') in ('1','true','yes','on'):
+            h = os.environ.get('OMEGA_QUIC_HOST','0.0.0.0')
+            p = int(os.environ.get('OMEGA_QUIC_PORT','4433'))
+            asyncio.create_task(run_quic(cert, key, host=h, port=p))
+    except Exception as e:
+        logging.warning(f"QUIC server launch skipped: {e}")
+    # Mark ready after successful startup tasks
+    try:
+        READY_EVENT.set()
+    except Exception:
+        pass
     logging.info("Omega API Server started (lifespan)")
     yield
     # --- Shutdown phase (future hooks) ---
@@ -2002,6 +2169,59 @@ def require_permissions(*required: str):
             raise HTTPException(status_code=403, detail={'error':'permission_denied','missing':missing})
         return True
     return _dep
+
+# --- ABAC (attribute-based) optional guardrails ---
+ABAC_ENABLED = os.getenv('OMEGA_ENABLE_ABAC','0').lower() in ('1','true','yes','on')
+
+def _get_user_roles(username: str) -> list[str]:
+    _load_rbac_cache()
+    return list(RBAC_CACHE.get('user_roles', {}).get(username, []) or [])
+
+def _build_abac_policy() -> _abac.Policy:
+    try:
+        rules: list[_abac.Rule] = []
+        # Deny sensitive actions after hours unless admin
+        def deny_after_hours_non_admin(inp):
+            sensitive = {"nodes.quarantine","nodes.remove","nodes.approve","nodes.deny","keys.rotate","backup.create"}
+            return (inp["act"] in sensitive) and _abac.after_hours(inp) and (not _abac.is_admin(inp))
+        rules.append(_abac.Rule(
+            name='deny_after_hours_non_admin',
+            when=deny_after_hours_non_admin,
+            effect=False,
+            reason='Denied by ABAC: after hours and not admin'
+        ))
+        # Allow admins override
+        rules.append(_abac.Rule(
+            name='allow_admin',
+            when=lambda i: _abac.is_admin(i),
+            effect=True,
+            reason='Allow: admin override'
+        ))
+        return _abac.Policy(rules=rules, default_allow=True)
+    except Exception:
+        # Fallback permissive policy
+        return _abac.Policy(rules=[], default_allow=True)
+
+_ABAC_POLICY = _build_abac_policy()
+
+def _enforce_abac(session_id: str, action: str, resource: dict | None = None):
+    if not ABAC_ENABLED:
+        return
+    try:
+        meta = SESSION_META.get(session_id, {})
+        username = meta.get('user') or 'anonymous'
+        roles = _get_user_roles(username)
+        subject = {'id': username, 'roles': roles}
+        res = resource or {}
+        ctx = {'now_hour': int(time.localtime().tm_hour)}
+        decision = _ABAC_POLICY.evaluate(subject, res, action, ctx)
+        api_server.database.log_event('abac_decision', username, json.dumps({'action': action, 'resource': res, 'allow': decision.allow, 'reasons': decision.reasons}))
+        if not decision.allow:
+            raise HTTPException(status_code=403, detail='Access denied by ABAC policy')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.debug(f"ABAC evaluation error: {e}")
 
 # Process-specific metric registry to avoid cross-process collisions
 METRICS_REGISTRY = CollectorRegistry()
@@ -3136,6 +3356,7 @@ async def secure_heartbeat(body: Heartbeat, request: Request):
     session_id, key = validate_secure(request.headers)
     # Enforce node-issued credential on node-initiated call
     _validate_node_credential_for_request(body.node_id, request.headers)
+    # ABAC: allow heartbeat by default but gate quarantine/denied statuses via node checks above
     api_server.database.update_node_heartbeat(body.node_id, body.status == 'online')
     # Persist lightweight metrics sample if provided
     try:
@@ -3152,6 +3373,13 @@ async def secure_heartbeat(body: Heartbeat, request: Request):
                 timestamp=time.time()
             )
             api_server.database.add_metrics(nm)
+            # Stream metric to analytics if enabled
+            try:
+                if METRICS_STREAM is not None:
+                    await METRICS_STREAM.publish({'name': 'node.cpu_usage', 'value': float(body.cpu_usage or 0.0)})
+                    await METRICS_STREAM.publish({'name': 'node.memory_usage', 'value': float(body.memory_usage or 0.0)})
+            except Exception:
+                pass
     except Exception as e:
         logging.debug(f"heartbeat metrics insert failed for {body.node_id}: {e}")
     api_server.database.log_event('node_heartbeat', body.node_id, f"Heartbeat {body.status}")
@@ -3186,6 +3414,7 @@ class QuarantineReq(BaseModel):
 @app.post('/api/secure/nodes/quarantine', dependencies=[Depends(require_permissions('nodes:quarantine'))])
 async def secure_quarantine(body: QuarantineReq, request: Request):
     session_id, key = validate_secure(request.headers)
+    _enforce_abac(session_id, 'nodes.quarantine', {'node_id': body.node_id})
     api_server.database.set_quarantine(body.node_id, body.enable)
     api_server.database.log_event('node_quarantine', body.node_id, f"Quarantine={'on' if body.enable else 'off'}")
     return wrap_encrypted(session_id, key, {'node_id': body.node_id, 'quarantine': body.enable})
@@ -3196,6 +3425,7 @@ class RemoveReq(BaseModel):
 @app.post('/api/secure/nodes/remove', dependencies=[Depends(require_permissions('nodes:remove'))])
 async def secure_remove(body: RemoveReq, request: Request):
     session_id, key = validate_secure(request.headers)
+    _enforce_abac(session_id, 'nodes.remove', {'node_id': body.node_id})
     api_server.database.remove_node(body.node_id)
     api_server.database.log_event('node_remove', body.node_id, 'Node removed')
     return wrap_encrypted(session_id, key, {'removed': body.node_id})
@@ -3224,6 +3454,7 @@ class RotateNodeCredReq(BaseModel):
 @app.post('/api/secure/nodes/credential/rotate', dependencies=[Depends(require_permissions('keys:rotate'))])
 async def rotate_node_credential(body: RotateNodeCredReq, request: Request):
     session_id, key = validate_secure(request.headers)
+    _enforce_abac(session_id, 'keys.rotate', {'node_id': body.node_id})
     node_id = body.node_id
     ttl = body.ttl_seconds or int(os.getenv('OMEGA_NODE_CRED_TTL','86400'))
     exp = time.time() + ttl
@@ -3257,6 +3488,7 @@ class ApproveNodeReq(BaseModel):
 @app.post('/api/secure/nodes/approve', dependencies=[Depends(require_permissions('node:approve'))])
 async def secure_approve_node(body: ApproveNodeReq, request: Request):
     session_id, key = validate_secure(request.headers)
+    _enforce_abac(session_id, 'nodes.approve', {'node_id': body.node_id})
     node_id = body.node_id
     ok = True
     # Bootstrap trust and issue a short-lived node credential on approval
@@ -3299,6 +3531,7 @@ class DenyNodeReq(BaseModel):
 @app.post('/api/secure/nodes/deny', dependencies=[Depends(require_permissions('node:approve'))])
 async def secure_deny_node(body: DenyNodeReq, request: Request):
     session_id, key = validate_secure(request.headers)
+    _enforce_abac(session_id, 'nodes.deny', {'node_id': body.node_id})
     node_id = body.node_id
     status='denied'
     fingerprint=None
@@ -4050,6 +4283,15 @@ async def secure_health(request: Request, permitted: bool = Depends(require_perm
         deps['session_storage'] = {'ok': os.path.isdir(base), 'path': base}
     except Exception as e:
         deps['session_storage'] = {'ok': False, 'error': str(e)}
+    # KV store (optional)
+    try:
+        backend = os.getenv('OMEGA_STORE_BACKEND','memory').lower()
+        ok = True
+        if getattr(api_server, 'kv_store', None) is not None and hasattr(api_server.kv_store, 'ping'):
+            ok = await api_server.kv_store.ping()  # type: ignore[func-returns-value]
+        deps['kv_store'] = {'ok': bool(ok), 'backend': backend}
+    except Exception as e:
+        deps['kv_store'] = {'ok': False, 'error': str(e)}
     # Docker availability (optional)
     try:
         deps['docker'] = {'ok': _docker_available()}
