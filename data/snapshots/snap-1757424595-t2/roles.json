@@ -1,0 +1,1 @@
+{"columns": ["role", "description"], "rows": [["admin", "Full administrative access"], ["operator", "Operational management minus security critical actions"], ["viewer", "Read-only access"], ["security", "Security operations and attestation"], ["autoscaler", "Manage autoscaling decisions"], ["user", "Standard User"]]}

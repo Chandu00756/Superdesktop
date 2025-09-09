@@ -30,12 +30,21 @@ app = FastAPI(
     description="Advanced encrypted backend for distributed desktop control"
 )
 
-# Initialize scheduler on startup
+# Initialize advanced engines on startup
 from backend.scheduler_engine import initialize_scheduler
+from backend.resource_predictor import initialize_predictor
+from backend.policy_engine import initialize_policy_engine
+from backend.health_manager import initialize_health_manager
+from backend.orchestrator_persistence import initialize_orchestrator
+from backend.webrtc_streaming import initialize_webrtc_engine
+from backend.memory_fabric import initialize_memory_fabric
+from backend.plugin_framework import initialize_plugin_framework
+from backend.advanced_api_endpoints import advanced_router
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize services on startup"""
+    """Initialize advanced services on startup"""
+    # Initialize scheduler
     await initialize_scheduler({
         'strategy_weights': {
             'weighted_least_loaded': 0.3,
@@ -45,6 +54,61 @@ async def startup_event():
             'thermal_aware': 0.1,
             'latency_optimized': 0.05
         }
+    })
+    
+    # Initialize resource predictor
+    await initialize_predictor({
+        'max_history_points': 10000,
+        'min_training_points': 100,
+        'cache_ttl': 300,
+        'retrain_interval': 3600
+    })
+    
+    # Initialize policy engine
+    await initialize_policy_engine({
+        'cache_ttl': 300,
+        'alert_cooldown': 300
+    })
+    
+    # Initialize health manager
+    await initialize_health_manager({
+        'check_interval': 60.0,
+        'alert_cooldown': 300.0,
+        'db_path': 'backend/health_data.db'
+    })
+    
+    # Initialize orchestrator with persistence
+    await initialize_orchestrator({
+        'persistence_backend': 'sqlite',
+        'connection_string': 'backend/orchestrator.db',
+        'pool_size': 10,
+        'timeout_seconds': 30
+    })
+    
+    # Initialize WebRTC streaming engine
+    await initialize_webrtc_engine({
+        'ice_servers': [
+            {'urls': 'stun:stun.l.google.com:19302'},
+            {'urls': 'stun:stun1.l.google.com:19302'}
+        ],
+        'max_sessions': 100,
+        'adaptive_quality': True
+    })
+    
+    # Initialize unified memory fabric
+    await initialize_memory_fabric({
+        'memory_size': 1024 * 1024 * 1024,  # 1GB
+        'cache_size': 256 * 1024 * 1024,    # 256MB
+        'cache_policy': 'lru',
+        'compression_enabled': True
+    })
+    
+    # Initialize plugin framework
+    await initialize_plugin_framework({
+        'plugin_directories': ['plugins/', 'extensions/'],
+        'registry_path': 'plugins/registry.json',
+        'sandbox_enabled': True,
+        'security_scanning': True
     })
 
 # Hardened security headers middleware (simple inline implementation)
@@ -2458,6 +2522,7 @@ async def get_assignments(target_type: str, target_id: str):
         return {'policies':[r[0] for r in cur.fetchall()]}
 
 app.include_router(policy_router)
+app.include_router(advanced_router)
 
 # Unified health endpoint (override or add if not present)
 @app.get('/health')
