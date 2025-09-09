@@ -4,7 +4,7 @@
 
 A revolutionary distributed computing system that aggregates CPU, GPU, RAM, storage and network of multiple commodity PCs into one low-latency "super desktop" that runs unmodified Windows/Linux/Mac workloads.
 
-## [LAUNCH] Features
+##  Features
 
 ### Core Platform
 
@@ -82,24 +82,24 @@ Notes:
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Production Ready](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)](https://github.com/Chandu00756/Superdesktop)
 
-> **🚀 Latest Update**: Complete system v2.0 with unified architecture, modular frontend system, and enterprise-grade security!
+> ** Latest Update**: Complete system v2.0 with unified architecture, modular frontend system, and enterprise-grade security!
 
-## 🌟 Overview
+##  Overview
 
 **SuperDesktop v2.0** is a revolutionary distributed desktop environment that combines the power of cloud computing with the familiarity of traditional desktop interfaces. Built from the ground up with modern web technologies and distributed systems architecture, it provides a seamless, AI-powered desktop experience that can scale from personal use to enterprise deployments.
 
-### 🎯 Key Features
+###  Key Features
 
-- **🖥️ Distributed Desktop Environment**: Full desktop experience running across multiple nodes
-- **🤖 AI-Powered Intelligence**: Built-in AI assistance for system management and optimization
-- **🔒 Enterprise Security**: AES-256-GCM encryption, JWT authentication, and secure communication
-- **📊 Real-time Monitoring**: Live system metrics, performance tracking, and health monitoring
-- **🌐 Modern Frontend Interface**: Modular ES6-based interface with responsive design
-- **🔄 Fault Tolerance**: Self-healing architecture with automatic failover and recovery
-- **📦 Containerized Deployment**: Docker support for easy deployment and scaling
-- **🎮 Interactive Interface**: Modern, responsive UI with real-time data updates
+- ** Distributed Desktop Environment**: Full desktop experience running across multiple nodes
+- ** AI-Powered Intelligence**: Built-in AI assistance for system management and optimization
+- ** Enterprise Security**: AES-256-GCM encryption, JWT authentication, and secure communication
+- ** Real-time Monitoring**: Live system metrics, performance tracking, and health monitoring
+- ** Modern Frontend Interface**: Modular ES6-based interface with responsive design
+- ** Fault Tolerance**: Self-healing architecture with automatic failover and recovery
+- ** Containerized Deployment**: Docker support for easy deployment and scaling
+- ** Interactive Interface**: Modern, responsive UI with real-time data updates
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### Option 1: One-Command Startup (Recommended)
 
@@ -114,13 +114,13 @@ cd Superdesktop
 
 The startup script will automatically:
 
-- ✅ Check system requirements (Python 3.11+, Node.js 18+)
-- ✅ Create and activate virtual environment
-- ✅ Install all dependencies automatically
-- ✅ Start Backend API Server (Port 8443)
-- ✅ Start Frontend HTTP Server (Port 8081)
-- ✅ Start all node services (Control, Storage, Compute, etc.)
-- ✅ Open the desktop interface in your browser
+-  Check system requirements (Python 3.11+, Node.js 18+)
+-  Create and activate virtual environment
+-  Install all dependencies automatically
+-  Start Backend API Server (Port 8443)
+-  Start Frontend HTTP Server (Port 8081)
+-  Start all node services (Control, Storage, Compute, etc.)
+-  Open the desktop interface in your browser
 
 ### Option 2: Manual Setup
 
@@ -148,61 +148,61 @@ open http://localhost:8081/omega-new.html  # macOS
 # or navigate to the URL in your browser
 ```
 
-### 🌐 Access the System
+###  Access the System
 
 After startup, access the system through:
 
-- **📱 Main Desktop Interface**: `http://localhost:8081/omega-new.html` (Modern modular interface)
-- **🔌 Backend API**: `http://localhost:8443/docs` (FastAPI documentation)
-- **📊 Control Node**: `http://localhost:7777/health` (Node management)
-- **📈 Metrics Dashboard**: `http://localhost:8000/metrics` (System monitoring)
+- ** Main Desktop Interface**: `http://localhost:8081/omega-new.html` (Modern modular interface)
+- ** Backend API**: `http://localhost:8443/docs` (FastAPI documentation)
+- ** Control Node**: `http://localhost:7777/health` (Node management)
+- ** Metrics Dashboard**: `http://localhost:8000/metrics` (System monitoring)
 
-### 🛑 Stop the System
+###  Stop the System
 
 ```bash
 # Stop all services gracefully
 ./stop-omega.sh
 ```
 
-## 🎯 **What You Get**
+##  **What You Get**
 
-### **🖥️ Desktop Interface**
+### ** Desktop Interface**
 
 - **URL**: `http://localhost:8081/omega-new.html`
 - **Features**: Real-time monitoring, node management, performance analytics
 - **Data**: 100% real backend integration (no simulation)
 
-### **🔧 Backend Services**
+### ** Backend Services**
 
 - **API Server**: `http://127.0.0.1:8443` (encrypted endpoints)
 - **Control Node**: `http://127.0.0.1:7777` (orchestration)
 - **Metrics**: `http://127.0.0.1:8000/metrics` (Prometheus-compatible)
 
-### **📊 Key Features**
+### ** Key Features**
 
-- ✅ **Real-time Performance Monitoring**
-- ✅ **AI-Powered Resource Optimization**
-- ✅ **Fault-Tolerant Multi-Master Architecture**
-- ✅ **Heterogeneous Hardware Support** (CPU/GPU/NPU/FPGA)
-- ✅ **Tiered Storage Management**
-- ✅ **Secure Encrypted Communication**
-- ✅ **Hot-Swappable Components**
-- ✅ **Auto-Discovery & Self-Registration**
-
----
-
-## 🏗️ **Architecture Overview**
+-  Real-time Performance Monitoring**
+-  AI-Powered Resource Optimization**
+-  Fault-Tolerant Multi-Master Architecture**
+-  Heterogeneous Hardware Support** (CPU/GPU/NPU/FPGA)
+-  Tiered Storage Management**
+-  Secure Encrypted Communication**
+-  Hot-Swappable Components**
+-  Auto-Discovery & Self-Registration**
 
 ---
 
-## 📂 **Project Structure**
+## Architecture Overview**
+
+---
+
+## Project Structure**
 
 ```text
 SuperDesktop/
-├── 🚀 start-omega.sh               # Main startup script
-├── 🛑 stop-omega.sh                # System shutdown script
-├── 📋 requirements.txt              # Python dependencies
-├── 📖 README.md                     # This file
+├──  start-omega.sh               # Main startup script
+├──  stop-omega.sh                # System shutdown script
+├──  requirements.txt              # Python dependencies
+├──  README.md                     # This file
 │
 ├── 🔧 backend/                      # Backend API services
 │   ├── api_server.py               # FastAPI backend server (Port 8443)
@@ -224,24 +224,24 @@ SuperDesktop/
 │           │   └── sidebarManager.js # Navigation management
 │           └── tabs/               # Tab renderers (dashboard, nodes, etc.)
 │
-├── 💾 storage_node/                # Storage management
-├── ⚡ compute_node/                # Compute resources
-├── 🧠 ai_engine/                   # AI optimization
-├── 🔗 network/                     # Network management
-├── 🔒 security/                    # Security & authentication
-├── 📊 session-daemon/              # Session management
-├── 🎯 omega-orchestrator/          # System orchestration
-├── 🧮 memory-fabric/               # Memory management
-├── 🔮 predictor-service/           # Predictive analytics
-├── 🎨 render-router/               # Rendering router
-├── 🔧 middleware/                  # Middleware services
-├── 📡 edge_node/                   # Edge computing
-├── 🌐 network_node/                # Network node
-├── 📁 data/                        # Data storage (PostgreSQL, Redis, Object storage)
-├── 📝 logs/                        # System logs
-├── 🧪 tests/                       # Test suites
-├── 📚 docs/                        # Documentation
-└── 🐍 omega_env/                   # Python virtual environment
+├──  storage_node/                # Storage management
+├──  compute_node/                # Compute resources
+├──  ai_engine/                   # AI optimization
+├──  network/                     # Network management
+├──  security/                    # Security & authentication
+├──  session-daemon/              # Session management
+├──  omega-orchestrator/          # System orchestration
+├──  memory-fabric/               # Memory management
+├──  predictor-service/           # Predictive analytics
+├──  render-router/               # Rendering router
+├──  middleware/                  # Middleware services
+├──  edge_node/                   # Edge computing
+├──  network_node/                # Network node
+├──  data/                        # Data storage (PostgreSQL, Redis, Object storage)
+├──  logs/                        # System logs
+├──  tests/                       # Test suites
+├──  docs/                        # Documentation
+└──  omega_env/                   # Python virtual environment
 ```
 
 ---
@@ -306,7 +306,7 @@ The system automatically detects development mode when:
 
 ---
 
-## 🌐 **Network Ports**
+##  **Network Ports**
 
 | Service | Port | Description |
 |---------|------|-------------|
@@ -319,17 +319,17 @@ The system automatically detects development mode when:
 
 ---
 
-## 🔐 **Security Features**
+##  **Security Features**
 
-- ✅ **AES-256 Encryption** for all API communication
-- ✅ **HMAC Authentication** for message integrity
-- ✅ **SSL/TLS Support** for production deployments
-- ✅ **Role-Based Access Control** (RBAC)
-- ✅ **Secure Token Management**
+-  **AES-256 Encryption** for all API communication
+-  **HMAC Authentication** for message integrity
+-  **SSL/TLS Support** for production deployments
+-  **Role-Based Access Control** (RBAC)
+-  **Secure Token Management**
 
 ---
 
-## 📈 **Performance Monitoring**
+##  **Performance Monitoring**
 
 ### **Built-in Dashboards**
 
@@ -402,7 +402,7 @@ tail -f logs/*.log
 
 ---
 
-## 🚀 **Production Deployment**
+##  **Production Deployment**
 
 ### **Docker Deployment**
 
@@ -427,10 +427,10 @@ export OMEGA_CLUSTER_NAME="production"
 
 ## 📞 **Support & Contact**
 
-- **📧 Email**: <chandu@portalvii.com>
-- **🐙 Repository**: <https://github.com/Chandu00756/Superdesktop>
-- **📊 Issues**: <https://github.com/Chandu00756/Superdesktop/issues>
-- **📖 Documentation**: `/docs` directory
+- ** Email**: <chandu@portalvii.com>
+- ** Repository**: <https://github.com/Chandu00756/Superdesktop>
+- ** Issues**: <https://github.com/Chandu00756/Superdesktop/issues>
+- ** Documentation**: `/docs` directory
 
 ---
 
@@ -440,7 +440,7 @@ This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) 
 
 ---
 
-## 🙏 **Acknowledgments**
+##  **Acknowledgments**
 
 - **Core Team**: Advanced distributed systems architecture
 - **AI Integration**: Machine learning optimization engines
