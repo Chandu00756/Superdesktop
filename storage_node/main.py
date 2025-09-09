@@ -29,71 +29,8 @@ import psutil
 import numpy as np
 import pathlib
 
-# Pluggable object storage adapters
-class BaseStorageAdapter:
-    async def put_object(self, key: str, data: bytes):
-        raise NotImplementedError
-    async def get_object(self, key: str) -> Optional[bytes]:
-        raise NotImplementedError
-    async def exists(self, key: str) -> bool:
-        raise NotImplementedError
-
-class InMemoryAdapter(BaseStorageAdapter):
-    def __init__(self):
-        self._store = {}
-    async def put_object(self, key: str, data: bytes):
-        self._store[key] = data
-    async def get_object(self, key: str) -> Optional[bytes]:
-        return self._store.get(key)
-    async def exists(self, key: str) -> bool:
-        return key in self._store
-
-class LocalFSAdapter(BaseStorageAdapter):
-    def __init__(self, root: str):
-        self.root = pathlib.Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-    async def put_object(self, key: str, data: bytes):
-        path = self.root / key
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-    async def get_object(self, key: str) -> Optional[bytes]:
-        path = self.root / key
-        if path.exists():
-            return path.read_bytes()
-        return None
-    async def exists(self, key: str) -> bool:
-        return (self.root / key).exists()
-
-class MinioAdapter(BaseStorageAdapter):  # thin wrapper if minio lib present
-    def __init__(self, client, bucket: str):
-        self.client = client
-        self.bucket = bucket
-    async def put_object(self, key: str, data: bytes):  # sync lib -> run in thread if needed
-        import io, asyncio
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: self.client.put_object(self.bucket, key, io.BytesIO(data), length=len(data)))
-    async def get_object(self, key: str) -> Optional[bytes]:
-        import asyncio
-        loop = asyncio.get_running_loop()
-        def _get():
-            try:
-                resp = self.client.get_object(self.bucket, key)
-                data = resp.read()
-                resp.close(); resp.release_conn()
-                return data
-            except Exception:
-                return None
-        return await loop.run_in_executor(None, _get)
-    async def exists(self, key: str) -> bool:
-        import asyncio
-        loop = asyncio.get_running_loop()
-        def _stat():
-            try:
-                self.client.stat_object(self.bucket, key)
-                return True
-            except Exception:
-                return False
-        return await loop.run_in_executor(None, _stat)
+"""Use shared pluggable object storage adapters (filesystem/minio/memory)."""
+from . import adapters as storage_adapters
 import random
 from pathlib import Path
 from aiohttp import web
@@ -1357,9 +1294,11 @@ class ObjectStorageManager:
         self.config = config
         self.s3_client = None
         self.async_s3_client = None
-        self.minio_client = None
+        self.minio_client = None  # legacy direct client (kept for S3 path compatibility)
         self.bucket_name = config.storage_bucket
         self.storage_type = config.object_storage_type.lower()
+        # Unified adapter store for minio/filesystem/memory
+        self.local_store: Optional[storage_adapters.BaseObjectStore] = None
         
     async def initialize(self):
         """Initialize object storage connections"""
@@ -1369,20 +1308,36 @@ class ObjectStorageManager:
             if self.storage_type == "s3":
                 await self._setup_s3_client()
             elif self.storage_type == "minio":
+                # Prefer shared adapter with built-in bucket ensure and soft-fallback
                 try:
-                    await self._setup_minio_client()
+                    self.local_store = storage_adapters.MinioStore(
+                        endpoint=self.config.storage_endpoint,
+                        access_key=self.config.storage_access_key,
+                        secret_key=self.config.storage_secret_key,
+                        bucket=self.bucket_name,
+                        secure=self.config.storage_secure,
+                    )
+                    # For backward compatibility, alias
+                    self.local_adapter = self.local_store
                 except Exception as e:
-                    # Soft-disable MinIO (network/offline) -> fallback to LocalFS adapter
-                    fallback_root = os.path.abspath(os.path.join('data','object_storage','fallback_local_fs'))
-                    logger.warning(f"MinIO unavailable ({e}); switching to LocalFS fallback at {fallback_root}")
-                    self.storage_type = 'localfs'
-                    self.minio_client = None
-                    self.local_adapter = LocalFSAdapter(fallback_root)  # type: ignore[attr-defined]
+                    fallback_root = os.path.abspath(os.path.join('data','object_storage','objects'))
+                    logger.warning(f"MinIO unavailable ({e}); switching to FileSystem fallback at {fallback_root}")
+                    self.storage_type = 'filesystem'
+                    self.local_store = storage_adapters.FileSystemStore(fallback_root)
+                    self.local_adapter = self.local_store
+            elif self.storage_type in ("filesystem", "localfs", "fs", "file", "memory"):
+                # Use configured local adapter directly
+                if self.storage_type == "memory":
+                    self.local_store = storage_adapters.MemoryStore()
+                else:
+                    root = os.getenv('OMEGA_FS_STORE', os.path.abspath(os.path.join('data','object_storage','objects')))
+                    self.local_store = storage_adapters.FileSystemStore(root)
+                self.local_adapter = self.local_store
             else:
                 raise ValueError(f"Unsupported storage type: {self.storage_type}")
             
             # Ensure bucket exists
-            if self.storage_type in ('s3','minio'):
+            if self.storage_type == 's3':
                 await self._ensure_bucket_exists()
             
             logger.info("Object storage manager initialized successfully")
@@ -1470,13 +1425,16 @@ class ObjectStorageManager:
         try:
             object_key = f"objects/{object_id}"
             
-            if getattr(self, 'local_adapter', None):  # Fallback path
-                await self.local_adapter.put_object(object_key, data)  # type: ignore[attr-defined]
-                return True
+            # Unified adapter path (filesystem/minio/memory)
+            if self.local_store is not None:
+                try:
+                    await self.local_store.put(object_key, data)
+                    return True
+                except Exception as e:
+                    logger.error(f"Local adapter store failed: {e}")
+                    return False
             if self.storage_type == "s3":
                 return await self._store_s3_object(object_key, data, metadata)
-            elif self.storage_type == "minio":
-                return await self._store_minio_object(object_key, data, metadata)
             
             return False
             
@@ -1538,10 +1496,14 @@ class ObjectStorageManager:
         try:
             object_key = f"objects/{object_id}"
             
+            if self.local_store is not None:
+                try:
+                    return await self.local_store.get(object_key)
+                except Exception as e:
+                    logger.error(f"Local adapter retrieval failed: {e}")
+                    return None
             if self.storage_type == "s3":
                 return await self._retrieve_s3_object(object_key)
-            elif self.storage_type == "minio":
-                return await self._retrieve_minio_object(object_key)
             
             return None
             
@@ -1585,10 +1547,14 @@ class ObjectStorageManager:
         try:
             object_key = f"objects/{object_id}"
             
+            if self.local_store is not None:
+                try:
+                    return await self.local_store.delete(object_key)
+                except Exception as e:
+                    logger.error(f"Local adapter delete failed: {e}")
+                    return False
             if self.storage_type == "s3":
                 return await self._delete_s3_object(object_key)
-            elif self.storage_type == "minio":
-                return await self._delete_minio_object(object_key)
             
             return False
             
@@ -1629,10 +1595,19 @@ class ObjectStorageManager:
     async def list_objects(self, prefix: str = "", limit: int = 1000) -> List[Dict[str, Any]]:
         """List objects in storage"""
         try:
-            if self.storage_type == "s3":
+            if self.local_store is not None:
+                objects: List[Dict[str, Any]] = []
+                count = 0
+                async for key in self.local_store.list(f"objects/{prefix}"):
+                    objects.append({
+                        'key': key,
+                    })
+                    count += 1
+                    if count >= limit:
+                        break
+                return objects
+            elif self.storage_type == "s3":
                 return await self._list_s3_objects(prefix, limit)
-            elif self.storage_type == "minio":
-                return await self._list_minio_objects(prefix, limit)
             
             return []
             
@@ -1715,7 +1690,29 @@ class ObjectStorageManager:
                 'total_size_bytes': 0
             }
             
-            if self.storage_type == "s3":
+            if self.local_store is not None:
+                # FileSystem optimization: count via filesystem walk
+                if isinstance(self.local_store, storage_adapters.FileSystemStore):
+                    root = self.local_store.root  # type: ignore[attr-defined]
+                    total_objects = 0
+                    total_size = 0
+                    for dirpath, _, filenames in os.walk(root):
+                        for fname in filenames:
+                            total_objects += 1
+                            try:
+                                total_size += os.path.getsize(os.path.join(dirpath, fname))
+                            except OSError:
+                                pass
+                    stats['total_objects'] = total_objects
+                    stats['total_size_bytes'] = total_size
+                else:
+                    # Generic adapter: approximate via listing
+                    total = 0
+                    async for _ in self.local_store.list():
+                        total += 1
+                    stats['total_objects'] = total
+                return stats
+            elif self.storage_type == "s3":
                 async with self.async_s3_client as s3:
                     # Get bucket metrics (simplified)
                     paginator = s3.get_paginator('list_objects_v2')
@@ -1725,26 +1722,6 @@ class ObjectStorageManager:
                         if 'Contents' in page:
                             stats['total_objects'] += len(page['Contents'])
                             stats['total_size_bytes'] += sum(obj['Size'] for obj in page['Contents'])
-            
-            elif self.storage_type == "minio":
-                from concurrent.futures import ThreadPoolExecutor
-                
-                def _sync_get_stats():
-                    total_objects = 0
-                    total_size = 0
-                    
-                    objects = self.minio_client.list_objects(self.bucket_name, recursive=True)
-                    for obj in objects:
-                        total_objects += 1
-                        total_size += obj.size
-                    
-                    return total_objects, total_size
-                
-                loop = asyncio.get_event_loop()
-                with ThreadPoolExecutor() as executor:
-                    total_objects, total_size = await loop.run_in_executor(executor, _sync_get_stats)
-                    stats['total_objects'] = total_objects
-                    stats['total_size_bytes'] = total_size
             
             return stats
             
@@ -11204,17 +11181,27 @@ class IsolationForestAnomalyDetector:
             norm: List[float] = []
             for v in values:
                 if isinstance(v, (int, float)):
-                    norm.append(float(v))
+                    fv = float(v)
+                    if math.isfinite(fv):
+                        norm.append(fv)
                 elif hasattr(v, 'value') and isinstance(getattr(v, 'value'), (int, float)):
-                    norm.append(float(getattr(v, 'value')))
+                    fv = float(getattr(v, 'value'))
+                    if math.isfinite(fv):
+                        norm.append(fv)
                 else:
                     try:
-                        norm.append(float(str(v)))
+                        fv = float(str(v))
+                        if math.isfinite(fv):
+                            norm.append(fv)
                     except Exception:
                         continue
             if not norm:
                 return [0.0] * 8
             arr = np.asarray(norm, dtype=float)
+            # Guard against any remaining NaN/Inf via sanitization
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                return [0.0] * 8
             if arr.size < 2:
                 arr = np.pad(arr, (0, 2-arr.size), 'edge')
             mean_val = float(np.mean(arr))
@@ -20609,6 +20596,44 @@ class EnhancedStorageNodeV2:
         self.server = None
         self.start_time = time.time()
         
+    def build_health(self) -> Dict[str, Any]:
+        """Build a unified health payload aligned with orchestrator schema."""
+        try:
+            # Dependencies status
+            deps: Dict[str, Any] = {
+                'object_storage': {'ok': bool(getattr(self.storage_manager, 'initialized', False))},
+                'predictive_layer': {'ok': bool(getattr(self.predictive_layer, 'is_initialized', False))},
+                'server': {'ok': bool(self.is_running)},
+            }
+            degraded = [k for k, v in deps.items() if not v.get('ok')]
+            health: Dict[str, Any] = {
+                'status': 'healthy' if not degraded else 'degraded',
+                'version': '2.1.0',
+                'uptime_seconds': int(time.time() - self.start_time),
+                'dependencies': deps,
+                'degraded': degraded,
+                'node': {
+                    'node_id': self.node_id,
+                    'data_store_size': len(self.data_store),
+                },
+                'metrics': {
+                    'total_operations': self.metrics.get('total_operations', 0),
+                    'success_rate': (
+                        self.metrics.get('successful_operations', 0)
+                        / max(1, self.metrics.get('total_operations', 0))
+                    ),
+                },
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }
+            return health
+        except Exception as e:
+            logger.error(f"Health build failed: {e}")
+            return {
+                'status': 'error',
+                'error': str(e),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }
+
     async def initialize(self) -> bool:
         """Initialize enhanced storage node with predictive capabilities"""
         try:
@@ -20957,16 +20982,7 @@ class EnhancedStorageNodeV2:
     async def _handle_health(self, request):
         """Handle health check requests"""
         try:
-            health_status = {
-                'status': 'healthy' if self.is_running else 'stopped',
-                'node_id': self.node_id,
-                'uptime': time.time() - self.start_time,
-                'predictive_layer_active': self.predictive_layer.is_initialized,
-                'total_operations': self.metrics['total_operations'],
-                'success_rate': (self.metrics['successful_operations'] / 
-                               max(1, self.metrics['total_operations']))
-            }
-            return web.json_response(health_status)
+            return web.json_response(self.build_health())
             
         except Exception as e:
             return web.json_response({'status': 'error', 'error': str(e)})
@@ -21050,21 +21066,19 @@ async def test_core_services():
         logger.error(f"Service test failed: {e}")
         raise
 
-# Main execution
+# Main execution (single entrypoint with optional test mode)
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-    
+    # Avoid duplicate basicConfig calls
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     try:
-        asyncio.run(test_core_services())
+        # Enable test mode by setting OMEGA_TEST_CORE_SERVICES=1
+        import os
+        if os.environ.get('OMEGA_TEST_CORE_SERVICES') == '1':
+            asyncio.run(test_core_services())
+        else:
+            asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Shutdown requested by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         raise
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())

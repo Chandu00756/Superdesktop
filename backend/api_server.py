@@ -130,7 +130,7 @@ from common.secret_providers import default_manager
 from fastapi import FastAPI, WebSocket, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import Field, validator
 import uvicorn
 import websockets
@@ -138,6 +138,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, CollectorRegistry, Counter, Gauge, Histogram
 import ssl
 import base64
 import binascii
@@ -312,6 +313,36 @@ class SecurityManager:
         self.rsa_public_key = self.rsa_private_key.public_key()
         self.session_keys: Dict[str, bytes] = {}
         self.security_level = SecurityLevel.MAXIMUM
+    
+    def get_public_key_pem(self) -> str:
+        try:
+            pub = self.rsa_public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            return pub.decode()
+        except Exception as e:
+            logging.error(f"get_public_key_pem failed: {e}")
+            raise
+    
+    def _generate_rsa_keypair(self):
+        try:
+            self.rsa_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            self.rsa_public_key = self.rsa_private_key.public_key()
+            # persist if path configured
+            rsa_path = os.environ.get('OMEGA_RSA_KEY_PATH') or os.path.join(os.path.dirname(__file__), 'omega_keys', 'rsa_key.pem')
+            os.makedirs(os.path.dirname(rsa_path), exist_ok=True)
+            pem = self.rsa_private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            with open(rsa_path, 'wb') as f:
+                f.write(pem)
+            os.chmod(rsa_path, 0o600)
+        except Exception as e:
+            logging.error(f"RSA key rotation failed: {e}")
+            raise
         
     def generate_session_key(self, session_id: str) -> bytes:
         key = Fernet.generate_key()
@@ -518,6 +549,18 @@ class DatabaseManager:
                     FOREIGN KEY (node_id) REFERENCES nodes(node_id)
                 )
             """)
+            # Node credentials (issued on approval)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS node_credentials (
+                    node_id TEXT PRIMARY KEY,
+                    token TEXT,
+                    issued_at REAL,
+                    expires_at REAL,
+                    FOREIGN KEY(node_id) REFERENCES nodes(node_id)
+                )
+                """
+            )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS audit_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -632,8 +675,12 @@ class DatabaseManager:
                         ('policy:manage','Manage policies'),
                         ('market:account','Access resource marketplace account'),
                         ('benchmark:run','Run benchmarks'),
-                        ('key:rotate','Rotate cryptographic keys'),
-                        ('key:revoke','Revoke cryptographic keys'),
+                        ('keys:view','List cryptographic keys'),
+                        ('keys:rotate','Rotate cryptographic keys'),
+                        ('keys:revoke','Revoke cryptographic keys'),
+                        # Backward-compat legacy codes
+                        ('key:rotate','Rotate cryptographic keys (legacy)'),
+                        ('key:revoke','Revoke cryptographic keys (legacy)'),
                         ('attest:verify','Verify node attestation'),
                         ('storage:manage','Manage storage backends'),
                         ('model:manage','Manage predictive models'),
@@ -660,7 +707,7 @@ class DatabaseManager:
                         'admin': [p[0] for p in base_permissions],
                         'operator': ['dashboard:view','resources:view','network:view','performance:view','nodes:view','sessions:view','processes:view','processes:kill','benchmark:run','migration:execute','storage:manage'],
                         'viewer': ['dashboard:view','resources:view','network:view','performance:view','nodes:view','sessions:view'],
-                        'security': ['security:view','attest:verify','policy:manage','key:rotate','key:revoke','rbac:manage'],
+                        'security': ['security:view','attest:verify','policy:manage','keys:view','keys:rotate','keys:revoke','rbac:manage'],
                         'autoscaler': ['autoscale:manage','performance:view','nodes:view']
                     }
                     rows = []
@@ -749,14 +796,21 @@ class DatabaseManager:
                     ("session:start_override", "Start session override"),
                     ("node:register", "Register nodes"),
                     ("node:approve", "Approve pending nodes"),
-                    ("crypto:rotate_keys", "Rotate cryptographic keys"),
+                    ("keys:view", "List cryptographic keys"),
+                    ("keys:rotate", "Rotate cryptographic keys"),
+                    ("keys:revoke", "Revoke cryptographic keys"),
+                    ("crypto:rotate_keys", "Rotate cryptographic keys (legacy)"),
                     ("rbac:manage", "Manage roles and permissions"),
-                    ("node:join", "Submit node join request")
+                    ("node:join", "Submit node join request"),
+                    ("backup:create", "Create configuration snapshot"),
+                    ("backup:view", "View configuration snapshots"),
+                    ("market:view", "View marketplace credits"),
+                    ("market:adjust", "Adjust marketplace credits"),
                 ]
                 for code, desc in base_perms:
                     conn.execute("INSERT OR IGNORE INTO permissions (code, description) VALUES (?, ?)", (code, desc))
                 # Assign permissions to roles (admin gets all, user limited view)
-                user_allowed = {"dashboard:view","resources:view","network:view","performance:view","plugins:view","security:view","nodes:view","sessions:view","processes:view","logs:view"}
+                user_allowed = {"dashboard:view","resources:view","network:view","performance:view","plugins:view","security:view","nodes:view","sessions:view","processes:view","logs:view","backup:view","market:view"}
                 for code, _ in base_perms:
                     # admin
                     conn.execute("INSERT OR IGNORE INTO role_permissions (role, permission_code) VALUES (?, ?)", ("admin", code))
@@ -1284,6 +1338,32 @@ class OmegaAPIServer:
         # Global monitors (module-level coroutines)
         asyncio.create_task(node_heartbeat_monitor())
         asyncio.create_task(protocol_health_monitor())
+        asyncio.create_task(self.node_credential_maintenance())
+
+    async def node_credential_maintenance(self):
+        """Expire node credentials and optionally quarantine nodes whose credentials are stale."""
+        interval = int(os.environ.get('OMEGA_NODE_CRED_MAINT_INTERVAL','60'))
+        quarantine_on_expiry = os.environ.get('OMEGA_NODE_CRED_EXPIRE_QUARANTINE','1') in ('1','true','yes','on')
+        while True:
+            try:
+                now = time.time()
+                with sqlite3.connect(self.database.db_path, timeout=30, check_same_thread=False) as conn:
+                    cur = conn.execute('SELECT node_id, expires_at FROM node_credentials')
+                    rows = cur.fetchall()
+                    for node_id, exp in rows:
+                        try:
+                            if exp and now > float(exp):
+                                # remove credential
+                                conn.execute('DELETE FROM node_credentials WHERE node_id=?', (node_id,))
+                                if quarantine_on_expiry:
+                                    conn.execute('UPDATE nodes SET quarantine=1, status=? WHERE node_id=?', ('quarantined', node_id))
+                                self.database.log_event('node_cred_expired', node_id, 'Credential expired; access revoked', 'warning')
+                        except Exception:
+                            pass
+                    conn.commit()
+            except Exception as e:
+                logging.debug(f'node_credential_maintenance error: {e}')
+            await asyncio.sleep(interval)
 
     async def session_maintenance(self):
         """Periodic cleanup of expired sessions from memory & DB."""
@@ -1842,6 +1922,21 @@ def require_permissions(*required: str):
         return True
     return _dep
 
+# Process-specific metric registry to avoid cross-process collisions
+METRICS_REGISTRY = CollectorRegistry()
+
+# Core metrics with custom registry
+API_REQUESTS_TOTAL = Counter('omega_api_requests_total', 'Total API requests', ['method', 'endpoint', 'status'], registry=METRICS_REGISTRY)
+SESSION_COUNT = Gauge('omega_active_sessions', 'Active sessions count', registry=METRICS_REGISTRY)
+NODE_COUNT = Gauge('omega_nodes_total', 'Total registered nodes', ['status'], registry=METRICS_REGISTRY)
+SECURITY_EVENTS = Counter('omega_security_events_total', 'Security events', ['type', 'severity'], registry=METRICS_REGISTRY)
+REQUEST_DURATION = Histogram('omega_request_duration_seconds', 'Request duration', ['method', 'endpoint'], registry=METRICS_REGISTRY)
+
+# Custom advanced metrics
+SEAMLESSNESS_INDEX = Gauge('omega_seamlessness_index', 'Latency variance and failover transparency score', registry=METRICS_REGISTRY)
+SCALING_EFFICIENCY = Gauge('omega_scaling_efficiency', 'Performance per dollar efficiency', registry=METRICS_REGISTRY)
+COLLABORATION_COEFFICIENT = Gauge('omega_collaboration_coefficient', 'Multi-user session uplift factor', registry=METRICS_REGISTRY)
+
 # Unified health schema helper
 SERVICE_START_TIME = time.time()
 def build_health(deps: dict, version: str = "1.0.0"):
@@ -1920,6 +2015,19 @@ async def assign_role_to_user(username: str, body: dict):
             conn.commit()
         RBAC_LAST_LOAD = 0
         return {'status': 'ok'}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@rbac_router.delete("/user/{username}/roles/{role}", dependencies=[Depends(require_permissions('rbac:manage'))])
+async def remove_role_from_user(username: str, role: str):
+    """Remove a role assignment from a user."""
+    try:
+        with db_connect() as conn:
+            conn.execute('DELETE FROM user_roles WHERE username=? AND role=?', (username, role))
+            conn.commit()
+        global RBAC_LAST_LOAD
+        RBAC_LAST_LOAD = 0
+        return {'status': 'ok', 'removed': True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2451,6 +2559,31 @@ async def secure_register(request: Request, body: NodeRegistrationRequest):
         raise HTTPException(status_code=401, detail='Invalid registration token')
     # Insert minimal node (pending approval) if not exists
     api_server.database.add_node(body.node_id, body.node_type, body.hostname, body.ip_address, body.port, body.resources)
+    # Mark node as pending and create an approval record
+    try:
+        with db_connect() as conn:
+            conn.execute('UPDATE nodes SET status=? WHERE node_id=?', ('pending', body.node_id))
+            conn.execute('INSERT OR IGNORE INTO node_approvals (node_id, approved_by, approved_at, status) VALUES (?, ?, ?, ?)', (body.node_id, None, None, 'pending'))
+            # Persist attestation details to support later deny/revocation workflows
+            try:
+                conn.execute(
+                    'INSERT INTO node_attestations (node_id, device_fingerprint, public_key_pem, device_certificate, health_attestation, geoip, behavioral_baseline, attested_at) VALUES (?,?,?,?,?,?,?,?)',
+                    (
+                        body.node_id,
+                        body.device_fingerprint,
+                        body.public_key_pem,
+                        body.device_certificate,
+                        json.dumps(body.health_attestation or {}),
+                        body.geoip,
+                        json.dumps(body.behavioral_baseline or {}),
+                        time.time(),
+                    )
+                )
+            except Exception as _e:
+                logging.debug(f"secure_register: attestation persist failed for {body.node_id}: {_e}")
+            conn.commit()
+    except Exception as e:
+        logging.debug(f"secure_register: failed to persist pending approval for {body.node_id}: {e}")
     api_server.database.log_event('node_register', body.node_id, 'Secure registration submitted')
     return {'status':'pending_approval','node_id': body.node_id}
 
@@ -2488,7 +2621,7 @@ async def list_keys():
         pass
     return {'keys': keys}
 
-@app.post('/secure/keys/revoke', dependencies=[Depends(require_permissions('keys:revoke'))])
+@app.post('/secure/session/revoke', dependencies=[Depends(require_permissions('keys:revoke'))])
 async def revoke_session(body: dict):
     sid = body.get('session_id')
     if not sid:
@@ -2499,8 +2632,8 @@ async def revoke_session(body: dict):
         api_server.database.log_event('session_revoked', sid, 'Session revoked via API')
     return {'status':'revoked','session_id':sid}
 
-@app.post('/secure/keys/rotate', dependencies=[Depends(require_permissions('keys:rotate'))])
-async def rotate_keys(req: KeyRotationRequest):
+@app.post('/secure/session/keys/rotate', dependencies=[Depends(require_permissions('keys:rotate'))])
+async def rotate_session_keys(req: KeyRotationRequest):
     rotated = {}
     if req.rotate_session_keys:
         count = 0
@@ -2523,6 +2656,52 @@ async def rotate_keys(req: KeyRotationRequest):
             rotated['rsa_error'] = str(e)
     api_server.database.log_event('keys_rotated','system', json.dumps({'rotated':rotated,'reason':req.reason}))
     return {'status':'ok','rotated':rotated}
+
+# --- API-consistent aliases under /api/secure/* ---
+@app.get('/api/secure/keys', dependencies=[Depends(require_permissions('keys:view'))])
+async def api_secure_list_keys(request: Request):
+    # Reuse existing logic
+    return await list_keys()
+
+
+@app.post('/api/secure/keys/revoke', dependencies=[Depends(require_permissions('keys:revoke'))])
+async def api_secure_revoke_session(body: dict, request: Request):
+    return await revoke_session(body)
+
+
+@app.post('/api/secure/keys/rotate', dependencies=[Depends(require_permissions('keys:rotate'))])
+async def api_secure_rotate_keys(req: KeyRotationRequest, request: Request):
+    return await rotate_session_keys(req)
+
+
+# --- Self-revocation for current session ---
+@app.post('/api/secure/session/revoke_self')
+async def revoke_self(request: Request):
+    sid, key = validate_secure(request.headers)
+    persist_revocation(sid, 'self')
+    # cleanup in-memory; close websocket best-effort
+    ws_closed = False
+    try:
+        with SESSION_LOCK:
+            SESSION_META.pop(sid, None)
+            SESSION_NONCES.pop(sid, None)
+            ws = SESSION_WS.pop(sid, None)
+        if ws:
+            try:
+                await ws.close()
+                ws_closed = True
+            except Exception:
+                pass
+        with db_connect() as conn:
+            try:
+                conn.execute('DELETE FROM session_meta WHERE session_id=?', (sid,))
+                conn.commit()
+            except Exception:
+                pass
+        api_server.database.log_event('session_revoke_self', sid, 'self-revoked', 'info')
+    except Exception as e:
+        logging.debug(f'revoke_self: cleanup failed for {sid}: {e}')
+    return wrap_encrypted(sid, key, {'ok': True, 'revoked': sid, 'ws_closed': ws_closed})
 
 # === Resource Marketplace Scaffold ===
 class CreditAdjust(BaseModel):
@@ -2728,7 +2907,7 @@ async def action_discover_nodes():  # lightweight placeholder (shadowed by full 
     except Exception:
         return {'success': True, 'discovered': 0, 'nodes': [], 'scanned': 0, 'placeholder': True}
 
-@app.post('/api/secure/action')
+@app.post('/api/secure/action', dependencies=[Depends(require_permissions('nodes:view'))])
 async def secure_action(request: Request, body: ActionRequest):
     session_id, key = validate_secure(request.headers)
     if body.action not in SECURE_ACTIONS:
@@ -2794,7 +2973,7 @@ async def secure_action(request: Request, body: ActionRequest):
         data = json.loads(payload)
     return wrap_encrypted(session_id, key, {'action': body.action, 'result': data, 'ok': True})
 
-@app.post('/api/secure/discover')
+@app.post('/api/secure/discover', dependencies=[Depends(require_permissions('nodes:view'))])
 async def secure_discover(request: Request):
     """Dedicated discovery endpoint returning encrypted payload; never 501."""
     session_id, key = validate_secure(request.headers)
@@ -2807,7 +2986,21 @@ async def secure_discover(request: Request):
         result={'success':False,'error':str(e)}
     return wrap_encrypted(session_id, key, {'action':'discover_nodes','result':result,'ok':True})
 
-@app.get('/api/secure/nodes/{node_id}/protocol/health')
+# Alias under nodes path for frontend consistency
+@app.get('/api/secure/nodes/discover', dependencies=[Depends(require_permissions('nodes:view'))])
+@rate_limited(per_minute=12, burst=6)
+async def secure_nodes_discover(request: Request):
+    session_id, key = validate_secure(request.headers)
+    try:
+        result = await action_discover_nodes()
+        if 'success' not in result:
+            result['success'] = True
+    except Exception as e:
+        logging.error(f"secure_nodes_discover error: {e}")
+        result = {'success': False, 'error': str(e)}
+    return wrap_encrypted(session_id, key, {'action': 'discover_nodes', 'result': result, 'ok': True})
+
+@app.get('/api/secure/nodes/{node_id}/protocol/health', dependencies=[Depends(require_permissions('nodes:view'))])
 async def get_protocol_health(node_id: str, request: Request):
     session_id, key = validate_secure(request.headers)
     # Return recent protocol health statuses
@@ -2820,9 +3013,47 @@ class Heartbeat(BaseModel):
     cpu_usage: Optional[float] = None
     memory_usage: Optional[float] = None
 
+def _validate_node_credential_for_request(node_id: str, headers: dict):
+    """Validate node credential token from headers against DB for the given node.
+    - Requires header X-Node-Token to be present and match node_credentials.token
+    - Token must not be expired (expires_at > now)
+    - Node must not be quarantined or denied; status should be active
+    Raises HTTPException 401/403 on failure.
+    """
+    token = headers.get('X-Node-Token') or headers.get('x-node-token')
+    if not token:
+        raise HTTPException(status_code=401, detail='Missing node credential')
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT token, expires_at FROM node_credentials WHERE node_id=?', (node_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=401, detail='No credential issued')
+            db_token, expires_at = row
+            if not secrets.compare_digest(str(token), str(db_token)):
+                raise HTTPException(status_code=401, detail='Invalid node credential')
+            if expires_at and time.time() > float(expires_at):
+                raise HTTPException(status_code=401, detail='Node credential expired')
+            # Check node status/quarantine
+            cur2 = conn.execute('SELECT status, quarantine FROM nodes WHERE node_id=?', (node_id,))
+            n = cur2.fetchone()
+            if n:
+                status, quarantine = n
+                if quarantine:
+                    raise HTTPException(status_code=403, detail='Node quarantined')
+                if (status or '').lower() in ('denied','pending','pending_approval'):
+                    raise HTTPException(status_code=403, detail='Node not approved')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.debug(f"node credential validation error for {node_id}: {e}")
+        raise HTTPException(status_code=401, detail='Node credential check failed')
+
 @app.post('/api/secure/nodes/heartbeat', dependencies=[Depends(require_permissions('nodes:view'))])
 async def secure_heartbeat(body: Heartbeat, request: Request):
     session_id, key = validate_secure(request.headers)
+    # Enforce node-issued credential on node-initiated call
+    _validate_node_credential_for_request(body.node_id, request.headers)
     api_server.database.update_node_heartbeat(body.node_id, body.status == 'online')
     # Persist lightweight metrics sample if provided
     try:
@@ -2847,6 +3078,8 @@ async def secure_heartbeat(body: Heartbeat, request: Request):
 @app.post('/api/secure/nodes/{node_id}/probe', dependencies=[Depends(require_permissions('nodes:view'))])
 async def secure_probe(node_id: str, request: Request):
     session_id, key = validate_secure(request.headers)
+    # Enforce node-issued credential on node-initiated probe
+    _validate_node_credential_for_request(node_id, request.headers)
     node = next((n for n in api_server.database.get_nodes() if n['node_id']==node_id), None)
     if not node:
         raise HTTPException(status_code=404, detail='node not found')
@@ -2884,6 +3117,139 @@ async def secure_remove(body: RemoveReq, request: Request):
     api_server.database.remove_node(body.node_id)
     api_server.database.log_event('node_remove', body.node_id, 'Node removed')
     return wrap_encrypted(session_id, key, {'removed': body.node_id})
+
+# --- Secure approval workflow endpoints ---
+
+# --- Node credential management ---
+@app.get('/api/secure/nodes/{node_id}/credential', dependencies=[Depends(require_permissions('keys:view'))])
+async def get_node_credential(node_id: str, request: Request):
+    session_id, key = validate_secure(request.headers)
+    rec=None
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT token, issued_at, expires_at FROM node_credentials WHERE node_id=?', (node_id,))
+            r = cur.fetchone()
+            if r:
+                rec = {'token': r[0], 'issued_at': r[1], 'expires_at': r[2]}
+    except Exception as e:
+        logging.debug(f'get_node_credential error: {e}')
+    return wrap_encrypted(session_id, key, {'node_id': node_id, 'credential': rec})
+
+class RotateNodeCredReq(BaseModel):
+    node_id: str
+    ttl_seconds: Optional[int] = None
+
+@app.post('/api/secure/nodes/credential/rotate', dependencies=[Depends(require_permissions('keys:rotate'))])
+async def rotate_node_credential(body: RotateNodeCredReq, request: Request):
+    session_id, key = validate_secure(request.headers)
+    node_id = body.node_id
+    ttl = body.ttl_seconds or int(os.getenv('OMEGA_NODE_CRED_TTL','86400'))
+    exp = time.time() + ttl
+    token=None
+    try:
+        with db_connect() as conn:
+            import base64 as _b64
+            token = _b64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('=')
+            conn.execute('INSERT OR REPLACE INTO node_credentials (node_id, token, issued_at, expires_at) VALUES (?,?,?,?)', (node_id, token, time.time(), exp))
+            conn.commit()
+        api_server.database.log_event('node_cred_rotate', node_id, 'Credential rotated', 'info')
+    except Exception as e:
+        logging.error(f'rotate_node_credential error: {e}')
+        raise HTTPException(status_code=500, detail='rotate failed')
+    return wrap_encrypted(session_id, key, {'node_id': node_id, 'credential': {'token': token, 'expires_at': exp}})
+@app.get('/api/secure/nodes/pending', dependencies=[Depends(require_permissions('node:approve'))])
+async def secure_pending_nodes(request: Request):
+    session_id, key = validate_secure(request.headers)
+    rows = []
+    try:
+        with db_connect() as conn:
+            cur = conn.execute('SELECT node_id, approved_by, approved_at, status FROM node_approvals WHERE status=?', ('pending',))
+            rows = [{'node_id': r[0], 'approved_by': r[1], 'approved_at': r[2], 'status': r[3]} for r in cur.fetchall()]
+    except Exception as e:
+        logging.error(f'secure_pending_nodes error: {e}')
+    return wrap_encrypted(session_id, key, {'pending': rows})
+
+class ApproveNodeReq(BaseModel):
+    node_id: str
+
+@app.post('/api/secure/nodes/approve', dependencies=[Depends(require_permissions('node:approve'))])
+async def secure_approve_node(body: ApproveNodeReq, request: Request):
+    session_id, key = validate_secure(request.headers)
+    node_id = body.node_id
+    ok = True
+    # Bootstrap trust and issue a short-lived node credential on approval
+    base_trust = int(os.getenv('OMEGA_APPROVAL_TRUST_BASE', '50'))
+    cred_ttl = int(os.getenv('OMEGA_NODE_CRED_TTL', '86400'))  # 24h default
+    token = None
+    expires_at = time.time() + cred_ttl
+    try:
+        with db_connect() as conn:
+            # Mark approved and activate node
+            conn.execute('UPDATE node_approvals SET status=?, approved_by=?, approved_at=? WHERE node_id=?', ('approved', SESSION_META.get(session_id,{}).get('user','admin'), time.time(), node_id))
+            conn.execute('UPDATE nodes SET status=?, trust_score=? WHERE node_id=?', ('active', base_trust, node_id))
+            # Ensure credential table and issue credential
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS node_credentials (
+                    node_id TEXT PRIMARY KEY,
+                    token TEXT,
+                    issued_at REAL,
+                    expires_at REAL,
+                    FOREIGN KEY(node_id) REFERENCES nodes(node_id)
+                )
+            ''')
+            import base64 as _b64
+            token = _b64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('=')
+            conn.execute('INSERT OR REPLACE INTO node_credentials (node_id, token, issued_at, expires_at) VALUES (?,?,?,?)', (node_id, token, time.time(), expires_at))
+            conn.commit()
+        api_server.database.log_event('node_approve', node_id, f'Approved via secure API', 'info')
+    except Exception as e:
+        ok = False
+        logging.error(f'secure_approve_node error: {e}')
+    payload = {'ok': ok, 'node_id': node_id, 'status': 'approved' if ok else 'error'}
+    if ok:
+        payload['trust_score'] = base_trust
+        payload['credential'] = {'token': token, 'expires_at': expires_at}
+    return wrap_encrypted(session_id, key, payload)
+
+class DenyNodeReq(BaseModel):
+    node_id: str
+
+@app.post('/api/secure/nodes/deny', dependencies=[Depends(require_permissions('node:approve'))])
+async def secure_deny_node(body: DenyNodeReq, request: Request):
+    session_id, key = validate_secure(request.headers)
+    node_id = body.node_id
+    status='denied'
+    fingerprint=None
+    try:
+        with db_connect() as conn:
+            # if node exists, mark denied; else return not_found status
+            cur = conn.execute('SELECT 1 FROM node_approvals WHERE node_id=?', (node_id,))
+            if cur.fetchone():
+                conn.execute('UPDATE node_approvals SET status=?, approved_by=?, approved_at=? WHERE node_id=?', ('denied', SESSION_META.get(session_id,{}).get('user','admin'), time.time(), node_id))
+                conn.execute('UPDATE nodes SET status=? WHERE node_id=?', ('denied', node_id))
+                # Revoke any issued credentials
+                try:
+                    conn.execute('DELETE FROM node_credentials WHERE node_id=?', (node_id,))
+                except Exception:
+                    pass
+                # Add public key fingerprint to revoked_keys if attestation exists
+                try:
+                    cur2 = conn.execute('SELECT public_key_pem FROM node_attestations WHERE node_id=? ORDER BY id DESC LIMIT 1', (node_id,))
+                    row = cur2.fetchone()
+                    if row and row[0]:
+                        import hashlib as _hash
+                        fingerprint = _hash.sha256((row[0] or '').encode()).hexdigest()
+                        conn.execute('INSERT OR IGNORE INTO revoked_keys (key_id, revoked_at) VALUES (?, ?)', (fingerprint, time.time()))
+                except Exception as _e:
+                    logging.debug(f'deny: revoke key failed for {node_id}: {_e}')
+                conn.commit()
+                api_server.database.log_event('node_deny', node_id, 'Denied via secure API', 'warning')
+            else:
+                status='not_found'
+    except Exception as e:
+        logging.error(f'secure_deny_node error: {e}')
+        status='error'
+    return wrap_encrypted(session_id, key, {'node_id': node_id, 'status': status, 'fingerprint': fingerprint})
 
 class VdStartRequest(BaseModel):
     node_id: str
@@ -3165,7 +3531,7 @@ async def action_discover_nodes():
 class LatencyStartReq(BaseModel):
     node_id: str
 
-@app.post('/api/secure/nodes/latency/start')
+@app.post('/api/secure/nodes/latency/start', dependencies=[Depends(require_permissions('nodes:view'))])
 async def latency_start(body: LatencyStartReq, request: Request):
     session_id, key = validate_secure(request.headers)
     # Generate ephemeral token & record (placeholder, real negotiation later)
@@ -3187,7 +3553,7 @@ async def latency_start(body: LatencyStartReq, request: Request):
     payload={'success':True,'token':token,'protocols':protocols,'recommended':protocols[-1],'node_id':body.node_id}
     return wrap_encrypted(session_id, key, payload)
 
-@app.get('/api/secure/nodes/latency/measure')
+@app.get('/api/secure/nodes/latency/measure', dependencies=[Depends(require_permissions('nodes:view'))])
 async def latency_measure(node_id: str, request: Request):
     session_id, key = validate_secure(request.headers)
     # Placeholder synthetic latency measurement
@@ -3326,7 +3692,7 @@ async def secure_nodes(request: Request, permitted: bool = Depends(require_permi
     return wrap_encrypted(session_id, key, payload)
 
 # --- Advanced Node Endpoints ---
-@app.get('/api/secure/nodes/{node_id}/protocol')
+@app.get('/api/secure/nodes/{node_id}/protocol', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_protocol_get(request: Request, node_id: str):
     sid, key = validate_secure(request.headers)
     active = NODE_PROTOCOL_STATE.get(node_id, 'gRPC/QUIC')
@@ -3335,7 +3701,7 @@ async def node_protocol_get(request: Request, node_id: str):
 class ProtocolSetRequest(BaseModel):
     protocol: str
 
-@app.post('/api/secure/nodes/{node_id}/protocol')
+@app.post('/api/secure/nodes/{node_id}/protocol', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_protocol_set(request: Request, node_id: str, body: ProtocolSetRequest):
     sid, key = validate_secure(request.headers)
     proto = body.protocol.strip()
@@ -3348,7 +3714,7 @@ async def node_protocol_set(request: Request, node_id: str, body: ProtocolSetReq
         pass
     return wrap_encrypted(sid, key, {'node_id': node_id, 'active': proto})
 
-@app.get('/api/secure/nodes/{node_id}/telemetry')
+@app.get('/api/secure/nodes/{node_id}/telemetry', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_telemetry(request: Request, node_id: str, limit: int = 60):
     sid, key = validate_secure(request.headers)
     limit = max(5, min(240, limit))
@@ -3362,7 +3728,7 @@ async def node_telemetry(request: Request, node_id: str, limit: int = 60):
     }
     return wrap_encrypted(sid, key, {'node_id': node_id, 'series': series})
 
-@app.get('/api/secure/nodes/{node_id}/policies')
+@app.get('/api/secure/nodes/{node_id}/policies', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_policies_get(request: Request, node_id: str):
     sid, key = validate_secure(request.headers)
     pol = NODE_POLICIES.get(node_id, {})
@@ -3372,7 +3738,7 @@ class PolicySetRequest(BaseModel):
     key: str
     value: str | None = ''
 
-@app.post('/api/secure/nodes/{node_id}/policies')
+@app.post('/api/secure/nodes/{node_id}/policies', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_policies_set(request: Request, node_id: str, body: PolicySetRequest):
     sid, key = validate_secure(request.headers)
     if not body.key.strip():
@@ -3384,7 +3750,7 @@ async def node_policies_set(request: Request, node_id: str, body: PolicySetReque
         pass
     return wrap_encrypted(sid, key, {'ok': True, 'policies': NODE_POLICIES[node_id]})
 
-@app.delete('/api/secure/nodes/{node_id}/policies/{pkey}')
+@app.delete('/api/secure/nodes/{node_id}/policies/{pkey}', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_policies_delete(request: Request, node_id: str, pkey: str):
     sid, key = validate_secure(request.headers)
     pol = NODE_POLICIES.setdefault(node_id, {})
@@ -3396,7 +3762,7 @@ async def node_policies_delete(request: Request, node_id: str, pkey: str):
             pass
     return wrap_encrypted(sid, key, {'ok': True, 'policies': pol})
 
-@app.get('/api/secure/nodes/{node_id}/trust')
+@app.get('/api/secure/nodes/{node_id}/trust', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_trust_get(request: Request, node_id: str):
     sid, key = validate_secure(request.headers)
     # look up in nodes table
@@ -3417,7 +3783,7 @@ async def node_trust_get(request: Request, node_id: str):
 class DiagnosticsRequest(BaseModel):
     level: str = 'basic'
 
-@app.post('/api/secure/nodes/{node_id}/diagnostics')
+@app.post('/api/secure/nodes/{node_id}/diagnostics', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_diagnostics(request: Request, node_id: str, body: DiagnosticsRequest):
     sid, key = validate_secure(request.headers)
     # Simple simulated diagnostics leveraging latest metrics
@@ -3443,7 +3809,7 @@ class OTARequest(BaseModel):
     action: str  # update | rollback
     version: str | None = None
 
-@app.post('/api/secure/nodes/{node_id}/ota')
+@app.post('/api/secure/nodes/{node_id}/ota', dependencies=[Depends(require_permissions('nodes:view'))])
 async def node_ota(request: Request, node_id: str, body: OTARequest):
     sid, key = validate_secure(request.headers)
     if body.action not in ('update','rollback'):
@@ -3567,6 +3933,49 @@ async def secure_logs(request: Request, permitted: bool = Depends(require_permis
         logging.error(f'log fetch error {e}')
     payload={'events':events,'timestamp':time.time()}
     return wrap_encrypted(session_id, key, payload)
+
+
+# --- Secure Prometheus metrics exposure (for control-plane only) ---
+@app.get('/api/secure/metrics')
+async def secure_metrics(request: Request, permitted: bool = Depends(require_permissions('security:view'))):
+    """Return Prometheus metrics for the backend process.
+    Protected behind secure session and security:view permission.
+    """
+    # validate but do not wrap; Prometheus expects plaintext exposition format
+    validate_secure(request.headers)
+    data = generate_latest(METRICS_REGISTRY)  # bytes
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+# Secure health with unified schema, encrypted response
+@app.get('/api/secure/health')
+@rate_limited(per_minute=120, burst=60)
+async def secure_health(request: Request, permitted: bool = Depends(require_permissions('security:view'))):
+    sid, key = validate_secure(request.headers)
+    deps = {}
+    # DB check
+    try:
+        with db_connect() as conn:
+            conn.execute('SELECT 1')
+        deps['database'] = {'ok': True}
+    except Exception as e:
+        deps['database'] = {'ok': False, 'error': str(e)}
+    # Crypto checks
+    deps['rsa_key'] = {'ok': bool(getattr(api_server.security_manager, 'rsa_private_key', None))}
+    deps['fernet'] = {'ok': bool(getattr(api_server.security_manager, 'cipher_suite', None))}
+    # Storage/session dir
+    try:
+        base = api_server.session_storage_base
+        deps['session_storage'] = {'ok': os.path.isdir(base), 'path': base}
+    except Exception as e:
+        deps['session_storage'] = {'ok': False, 'error': str(e)}
+    # Docker availability (optional)
+    try:
+        deps['docker'] = {'ok': _docker_available()}
+    except Exception:
+        deps['docker'] = {'ok': False}
+    # Build health payload
+    payload = build_health(deps, version='2.0.0')
+    return wrap_encrypted(sid, key, payload)
 
 @app.websocket('/ws/secure/realtime')
 async def ws_secure_realtime(ws: WebSocket):
@@ -3914,6 +4323,58 @@ class SecureSessionRotate(BaseModel):
     encrypted_key: str
 
 
+@app.post('/api/secure/session/start')
+@rate_limited(per_minute=60, burst=30)
+async def secure_session_start(body: SecureSessionStart, request: Request):
+    """Secure session bootstrap.
+    Client generates an AES-256-GCM key, encrypts with server RSA-OAEP public key, and POSTs here.
+    Server decrypts, registers session, and issues an HMAC JWT tied to the session id.
+    """
+    # Decrypt AES session key
+    if not body.encrypted_key:
+        raise HTTPException(status_code=400, detail='encrypted_key required')
+    try:
+        enc = base64.b64decode(body.encrypted_key)
+        raw_key = api_server.rsa_private_key.decrypt(
+            enc,
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+        )
+        if len(raw_key) != 32:
+            raise ValueError('invalid key length')
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f'secure_session_start decrypt failed: {e}')
+        raise HTTPException(status_code=400, detail='Invalid encrypted_key')
+
+    # Create session id and register
+    session_id = uuid.uuid4().hex
+    key_b64 = base64.b64encode(raw_key).decode()
+    register_session_meta(session_id, key_b64)
+    # Attach user/roles and persist user to DB row
+    user = (body.user_id or 'admin').strip() or 'admin'
+    roles = ['admin'] if user == 'admin' else RBAC_CACHE.get('user_roles', {}).get(user, ['user'])
+    with SESSION_LOCK:
+        meta = SESSION_META.get(session_id, {})
+        meta['user'] = user
+        meta['roles'] = roles
+        SESSION_META[session_id] = meta
+    try:
+        with db_connect() as conn:
+            conn.execute('UPDATE session_meta SET user=? WHERE session_id=?', (user, session_id))
+            conn.commit()
+    except Exception as e:
+        logging.debug(f'secure_session_start: user persist failed for {session_id}: {e}')
+
+    # Issue JWT for Authorization header with sid claim
+    token = api_server.security_manager.issue_jwt(session_id=session_id, user=user, ttl=6*3600)
+    try:
+        api_server.database.log_event('secure_session_start', session_id, f'user={user}', 'info')
+    except Exception:
+        pass
+    return {'session_id': session_id, 'token': token, 'expires_in': 6*3600}
+
+
 @app.post('/api/secure/session/rotate')
 @rate_limited(per_minute=60, burst=20)
 async def secure_session_rotate(body: SecureSessionRotate, request: Request):
@@ -3963,9 +4424,142 @@ async def secure_session_rotate(body: SecureSessionRotate, request: Request):
     return {'success': True, 'session_id': body.session_id}
 
 
+# --- Admin session operations ---
+class AdminSessionOp(BaseModel):
+    session_id: str
+    reason: Optional[str] = ''
+
+
+@app.post('/api/secure/admin/session/revoke', dependencies=[Depends(require_permissions('rbac:manage'))])
+async def admin_session_revoke(body: AdminSessionOp, request: Request):
+    """Revoke a session immediately. Requires admin (rbac:manage)."""
+    admin_sid, key = validate_secure(request.headers)
+    target = body.session_id
+    # Persist revocation and cleanup in-memory state
+    persist_revocation(target, body.reason or '')
+    ws_closed = False
+    try:
+        with SESSION_LOCK:
+            SESSION_META.pop(target, None)
+            SESSION_NONCES.pop(target, None)
+            ws = SESSION_WS.pop(target, None)
+        if ws is not None:
+            try:
+                await ws.close()
+                ws_closed = True
+            except Exception:
+                pass
+        with db_connect() as conn:
+            try:
+                conn.execute('DELETE FROM session_meta WHERE session_id=?', (target,))
+                conn.commit()
+            except Exception:
+                pass
+        api_server.database.log_event('session_revoke', target, f"revoked by {SESSION_META.get(admin_sid,{}).get('user','admin')} reason={body.reason or ''}", 'warning')
+    except Exception as e:
+        logging.error(f'admin_session_revoke error for {target}: {e}')
+    return wrap_encrypted(admin_sid, key, {'ok': True, 'revoked': target, 'ws_closed': ws_closed})
+
+
+@app.post('/api/secure/admin/session/rotate', dependencies=[Depends(require_permissions('rbac:manage'))])
+async def admin_session_rotate(body: AdminSessionOp, request: Request):
+    """Request a client rekey. Records a pending rekey and signals via WS if available.
+    Actual key change completes when client calls /api/secure/session/rotate.
+    """
+    admin_sid, key = validate_secure(request.headers)
+    target = body.session_id
+    # Record a pending rotate request (no key material transmitted here)
+    try:
+        persist_pending_rekey(target, '')  # empty placeholder; client-initiated rotate will overwrite
+    except Exception:
+        pass
+    # Best-effort WS notification
+    notified = False
+    try:
+        with SESSION_LOCK:
+            ws = SESSION_WS.get(target)
+            tmeta = SESSION_META.get(target, {})
+            tkey_b64 = tmeta.get('key')
+        if ws and tkey_b64:
+            tkey = base64.b64decode(tkey_b64)
+            pkt = wrap_encrypted(target, tkey, {'type': 'rekey_request', 'ts': time.time()})
+            try:
+                await ws.send_json(pkt)
+                notified = True
+            except Exception:
+                notified = False
+        api_server.database.log_event('session_rotate_request', target, f"requested by {SESSION_META.get(admin_sid,{}).get('user','admin')}")
+    except Exception as e:
+        logging.debug(f'admin_session_rotate notify failed for {target}: {e}')
+    return wrap_encrypted(admin_sid, key, {'ok': True, 'rotate_requested': target, 'notified': notified})
+
+
+class SessionPollReq(BaseModel):
+    session_id: str
+
+
+@app.post('/api/secure/session/poll')
+async def secure_session_poll(body: SessionPollReq, request: Request):
+    """Frontend helper: check session validity and whether admin requested rekey.
+    Requires a valid secure session in headers; returns info for the caller's session.
+    """
+    sid, key = validate_secure(request.headers)
+    # Only allow polling for own session
+    if body.session_id != sid:
+        raise HTTPException(status_code=403, detail='may only poll current session')
+    # Determine if a pending rekey exists
+    pending = False
+    try:
+        with db_connect() as conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS session_pending_rekey (session_id TEXT PRIMARY KEY, new_key TEXT, created_at REAL)')
+            cur = conn.execute('SELECT 1 FROM session_pending_rekey WHERE session_id=?', (sid,))
+            pending = bool(cur.fetchone())
+    except Exception:
+        pending = False
+    meta = SESSION_META.get(sid, {})
+    return wrap_encrypted(sid, key, {
+        'ok': True,
+        'session_id': sid,
+        'user': meta.get('user','admin'),
+        'roles': meta.get('roles',[]),
+        'expires_at': meta.get('expires_at'),
+        'rekey_requested': pending
+    })
+
+# Convenience: current session info (encrypted)
+@app.get('/api/secure/session/info')
+async def secure_session_info(request: Request, permitted: bool = Depends(require_permissions('sessions:view'))):
+    sid, key = validate_secure(request.headers)
+    meta = SESSION_META.get(sid, {})
+    return wrap_encrypted(sid, key, {
+        'session_id': sid,
+        'user': meta.get('user','admin'),
+        'roles': meta.get('roles',[]),
+        'expires_at': meta.get('expires_at'),
+        'counter': meta.get('counter',0)
+    })
+
+# Convenience: effective permissions for current user
+@app.get('/api/secure/policy/effective')
+async def secure_policy_effective(request: Request, permitted: bool = Depends(require_permissions('security:view'))):
+    sid, key = validate_secure(request.headers)
+    meta = SESSION_META.get(sid, {})
+    username = meta.get('user','admin')
+    base = get_user_permissions(username)
+    roles = meta.get('roles', [])
+    eff, denied = evaluate_policies(username, roles, base)
+    return wrap_encrypted(sid, key, {
+        'username': username,
+        'base': sorted(list(base)),
+        'effective': sorted(list(eff)),
+        'denied': sorted(list(denied))
+    })
+
+
 
 # --- Most advanced, secure, and bug-free node registration ---
-@app.post('/api/secure/nodes/register', include_in_schema=False)
+# Note: Keep this under a distinct path to avoid duplicate route collisions with the basic secure register above
+@app.post('/api/secure/nodes/register/advanced', include_in_schema=False)
 async def register_node_advanced(request: Request, body: NodeRegistrationRequest = Body(...)):
     import ipaddress, socket, re
     session_id, key = validate_secure(request.headers)

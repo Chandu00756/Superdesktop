@@ -372,17 +372,25 @@ CREATE TABLE IF NOT EXISTS autoscaling_events (
                 is_sqlite = getattr(self.postgres_pool, 'kind', '') == 'sqlite'
                 async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
                     if is_sqlite:
+                        await conn.execute(
+                            'INSERT OR REPLACE INTO nodes (node_id, node_type, resources, status, last_heartbeat, labels, annotations, network_config, trust_score, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,COALESCE((SELECT created_at FROM nodes WHERE node_id = ?), datetime("now")), datetime("now"))'.replace('?,?,?,?,?,?,?,?,?,', '?,?,?,?,?,?,?,?,?,'),
+                                (
+                                    node_spec.node_id,
+                                    node_spec.node_type,
+                                    json.dumps(node_spec.resources),
+                                    node_spec.status,
+                                    node_spec.last_heartbeat.isoformat(),
+                                    json.dumps(node_spec.labels),
+                                    json.dumps(node_spec.annotations),
+                                    json.dumps(node_spec.network_config),
+                                    float(getattr(node_spec, 'trust_score', 1.0)),
+                                    node_spec.node_id,
+                                ),
+                        )
                         try:
-                            await conn.execute(
-                                'INSERT OR REPLACE INTO nodes (node_id, node_type, resources, status, last_heartbeat, labels, annotations, network_config, trust_score, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,COALESCE((SELECT created_at FROM nodes WHERE node_id = ?), datetime("now")), datetime("now"))',
-                                node_spec.node_id, node_spec.node_type, json.dumps(node_spec.resources), node_spec.status, node_spec.last_heartbeat.isoformat(), json.dumps(node_spec.labels), json.dumps(node_spec.annotations), json.dumps(node_spec.network_config), float(getattr(node_spec, 'trust_score', 1.0)), node_spec.node_id
-                            )
-                            try:
-                                await conn.commit()  # type: ignore[attr-defined]
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            self.logger.debug(f"SQLite insert node failed: {e}")
+                            await conn.commit()  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
                     else:
                         await conn.execute('''
                             INSERT INTO nodes (node_id, node_type, resources, status, 
@@ -440,7 +448,7 @@ CREATE TABLE IF NOT EXISTS autoscaling_events (
                 is_sqlite = getattr(self.postgres_pool, 'kind', '') == 'sqlite'
                 async with self.postgres_pool.acquire() as conn:  # type: ignore[attr-defined]
                     if is_sqlite:
-                        await conn.execute('UPDATE nodes SET status = ?, updated_at = datetime("now") WHERE node_id = ?', 'deregistered', node_id)
+                        await conn.execute('UPDATE nodes SET status = ?, updated_at = datetime("now") WHERE node_id = ?', ('deregistered', node_id))
                         try:
                             await conn.commit()  # type: ignore[attr-defined]
                         except Exception:
@@ -593,7 +601,8 @@ CREATE TABLE IF NOT EXISTS autoscaling_events (
             except Exception:
                 pass
             try:
-                asyncio.create_task(self._emit_event('node.trust.updated', {'node_id': node_id, 'trust': new_val, 'delta': delta, 'reason': reason}))
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._emit_event('node.trust.updated', {'node_id': node_id, 'trust': new_val, 'delta': delta, 'reason': reason}))
             except Exception:
                 pass
         return new_val
@@ -812,7 +821,14 @@ CREATE TABLE IF NOT EXISTS autoscaling_events (
                     try:
                         await conn.execute(
                             'INSERT INTO autoscaling_events (id, ts, action, reason, util_before, active_nodes) VALUES (?,?,?,?,?,?)',
-                            str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(), evt['action'], evt['reason'], float(evt['util_before']), int(evt['active_nodes'])
+                            (
+                                str(uuid.uuid4()),
+                                datetime.now(timezone.utc).isoformat(),
+                                evt['action'],
+                                evt['reason'],
+                                float(evt['util_before']),
+                                int(evt['active_nodes']),
+                            ),
                         )
                     except Exception as ie:
                         self.logger.debug(f"SQLite persist autoscale event failed: {ie}")
@@ -1244,6 +1260,28 @@ async def adjust_trust(node_id: str, body: TrustAdjust):
     if node_id not in orch.nodes:
         return {'status':'not_found','node_id': node_id}
     val = orch.update_node_trust(node_id, body.delta, body.reason)
+    # Ensure persistence for tests/consumers relying on immediate durability
+    try:
+        await orch._persist_trust_score(node_id, val)
+        # Verify and correct if SQLite fallback did not update for any reason
+        pool = getattr(orch, 'postgres_pool', None)
+        if pool is not None and getattr(pool, 'kind', '') == 'sqlite':
+            async with pool.acquire() as conn:  # type: ignore[attr-defined]
+                try:
+                    cursor = await conn.execute('SELECT trust_score FROM nodes WHERE node_id = ?', (node_id,))
+                    row = await cursor.fetchone()
+                    if row is not None:
+                        db_val = float(row[0])
+                        if abs(db_val - float(val)) > 1e-6:
+                            await conn.execute('UPDATE nodes SET trust_score = ?, updated_at = datetime("now") WHERE node_id = ?', (float(val), node_id))
+                            try:
+                                await conn.commit()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return {'status':'ok','node_id': node_id, 'trust': val}
 
 # --- Node approval workflow endpoints ---

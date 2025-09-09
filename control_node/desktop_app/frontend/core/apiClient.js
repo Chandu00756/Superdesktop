@@ -450,12 +450,24 @@ export class ApiClient {
     const pkt = await this._req('/api/secure/whoami');
     return pkt;
   }
+  async getRbacMatrix() {
+    const pkt = await this._req('/secure/rbac/matrix');
+    return pkt;
+  }
+  async listRoles() {
+    const pkt = await this._req('/secure/rbac/roles');
+    return pkt;
+  }
+  async listPermissions() {
+    const pkt = await this._req('/secure/rbac/permissions');
+    return pkt;
+  }
   async assignRole(username, role) {
-    const pkt = await this._req('/api/secure/admin/roles/assign', { method: 'POST', body: JSON.stringify({ username, role }) });
+    const pkt = await this._req(`/secure/rbac/user/${encodeURIComponent(username)}/roles`, { method: 'POST', body: JSON.stringify({ role }) });
     return pkt;
   }
   async removeRole(username, role) {
-    const pkt = await this._req('/api/secure/admin/roles/remove', { method: 'POST', body: JSON.stringify({ username, role }) });
+    const pkt = await this._req(`/secure/rbac/user/${encodeURIComponent(username)}/roles/${encodeURIComponent(role)}`, { method: 'DELETE' });
     return pkt;
   }
 }

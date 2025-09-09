@@ -242,6 +242,7 @@ export function renderSecurity(root, state) {
               </div>
             </div>
           </div>
+          <div id="rbac-matrix" style="margin:8px 0; padding:8px; background: var(--omega-dark-3); border:1px solid var(--omega-gray-1); border-radius:4px; font: 400 10px var(--font-mono);"></div>
           <div id="rbac-banner" style="display:none; margin: 8px 0; padding: 8px; border-radius: 6px;"></div>
           <div class="users-table-container">
             <table class="users-table">
@@ -401,6 +402,7 @@ export function renderSecurity(root, state) {
   renderFirewallActivity(state);
   renderAuditLog(state);
   renderPoliciesList(state);
+  try { renderRbacMatrix().catch(()=>{}); } catch (e) { /* non-fatal */ }
 
   // Admin session control wiring (deferred until elements exist)
   setTimeout(() => {
@@ -479,6 +481,33 @@ export function renderSecurity(root, state) {
       userEl.textContent = 'error';
       rolesEl.textContent = '—';
       showBanner(`Failed to load identity: ${e?.message || e}`, true);
+    }
+  }
+
+  async function renderRbacMatrix() {
+    const el = root.querySelector('#rbac-matrix');
+    if (!el) return;
+    try {
+      const matrix = await window.api?.getRbacMatrix?.();
+      if (!matrix || !matrix.roles) { el.textContent = 'RBAC matrix unavailable'; return; }
+      // Simple compact render
+      const roles = Object.keys(matrix.roles);
+      const permsSet = new Set();
+      roles.forEach(r => (matrix.roles[r]||[]).forEach(p => permsSet.add(p)));
+      const perms = Array.from(permsSet).sort();
+      const header = ['Role', ...perms];
+      const rows = roles.map(r => [r, ...perms.map(p => (matrix.roles[r]||[]).includes(p) ? '✓' : '')]);
+      const html = [
+        `<div style='margin-bottom:6px;color:#9dd;'>RBAC Matrix (roles x permissions)</div>`,
+        `<table style='width:100%; border-collapse:collapse;'>`,
+        `<thead><tr>${header.map(h=>`<th style='border-bottom:1px solid #333; padding:4px; text-align:left;'>${h}</th>`).join('')}</tr></thead>`,
+        `<tbody>`,
+        rows.map(cells=>`<tr>${cells.map((v,i)=>`<td style='padding:4px; border-bottom:1px dashed #333; ${i===0?'font-weight:600;color:#ccc;':''}'>${v}</td>`).join('')}</tr>`).join(''),
+        `</tbody></table>`
+      ].join('');
+      el.innerHTML = html;
+    } catch (e) {
+      el.textContent = `Failed to load RBAC matrix: ${e?.message || e}`;
     }
   }
 

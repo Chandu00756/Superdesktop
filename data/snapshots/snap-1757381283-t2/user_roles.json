@@ -1,0 +1,1 @@
+{"columns": ["id", "username", "role"], "rows": [[1, "admin", "admin"], [2, "v1", "viewer"], [3, "v2", "viewer"]]}

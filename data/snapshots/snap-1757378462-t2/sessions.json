@@ -1,0 +1,1 @@
+{"columns": ["session_id", "user_id", "node_id", "application", "cpu_cores", "gpu_units", "memory_gb", "status", "created_at", "last_activity"], "rows": []}

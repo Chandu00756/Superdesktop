@@ -1,0 +1,1 @@
+{"columns": ["node_id", "node_type", "hostname", "ip_address", "port", "status", "trust_score", "quarantine", "last_heartbeat", "last_protocol_check", "created_at", "device_class"], "rows": [["cred-view-node-2", "compute", "hn", "127.0.0.1", 8443, "active", 50, 0, 1757382763.018255, null, 1757382763.018255, "generic"]]}
