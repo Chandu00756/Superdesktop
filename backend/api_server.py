@@ -5,6 +5,11 @@ from typing import Optional
 from pydantic import BaseModel
 import os, logging
 
+# Import advanced enterprise modules
+from backend.advanced_vd_manager import vd_manager, VDProtocol, VDState
+from backend.multi_cloud_orchestrator import orchestrator, CloudProvider, DeploymentStrategy, DeploymentConfig
+from backend.advanced_ml_pipeline import ml_pipeline, ModelType, PredictionTimeframe, MetricData
+
 class NodeRegistrationRequest(BaseModel):
     node_id: str
     node_type: str
