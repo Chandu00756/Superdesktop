@@ -19,6 +19,7 @@ numpy>=2.0.0
 # scikit-learn, torch, onnx, onnxruntime omitted for test baseline on Python 3.13; add back when needed
 grpcio>=1.59.0
 grpcio-tools>=1.59.0
+grpcio-health-checking>=1.59.0
 protobuf>=4.25.0
 websockets>=12.0
 aiofiles>=23.2.1
