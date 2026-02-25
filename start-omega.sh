@@ -87,28 +87,31 @@ echo "  📦 Installing Python dependencies..."
 
 # Core requirements
 pip install \
-    fastapi>=0.104.0 \
-    uvicorn[standard]>=0.24.0 \
-    pydantic>=2.5.0 \
-    aiohttp>=3.9.0 \
-    websockets>=11.0.0 \
-    cryptography>=41.0.0 \
-    psutil>=5.9.0 \
-    numpy>=1.25.0 \
-    requests>=2.31.0 \
-    pyjwt>=2.8.0 \
-    sqlalchemy>=2.0.0 \
-    python-multipart>=0.0.6 \
-    prometheus-client>=0.19.0 \
-    pyyaml>=6.0.1 \
-    rich>=13.7.0 \
-    click>=8.1.7 >/dev/null 2>&1
+    "fastapi>=0.104.0" \
+    "uvicorn[standard]>=0.24.0" \
+    "pydantic>=2.5.0" \
+    "aiohttp>=3.9.0" \
+    "websockets>=11.0.0" \
+    "cryptography>=41.0.0" \
+    "psutil>=5.9.0" \
+    "numpy>=1.25.0" \
+    "requests>=2.31.0" \
+    "pyjwt>=2.8.0" \
+    "sqlalchemy>=2.0.0" \
+    "python-multipart>=0.0.6" \
+    "prometheus-client>=0.19.0" \
+    "pyyaml>=6.0.1" \
+    "rich>=13.7.0" \
+    "asyncpg>=0.28.0" \
+    "torch>=2.0.0" \
+    "docker>=6.1.0" \
+    "click>=8.1.7" >/dev/null 2>&1
 
 # Optional ML dependencies
-pip install scikit-learn>=1.3.0 >/dev/null 2>&1 || echo "  ⚠️  ML libraries not installed (optional)"
+pip install "scikit-learn>=1.3.0" >/dev/null 2>&1 || echo "  ⚠️  ML libraries not installed (optional)"
 
 # Optional monitoring dependencies  
-pip install redis>=5.0.0 >/dev/null 2>&1 || echo "  ⚠️  Redis not installed (will use fallback)"
+pip install "redis>=5.0.0" >/dev/null 2>&1 || echo "  ⚠️  Redis not installed (will use fallback)"
 
 echo "  ✅ Python environment ready"
 echo ""

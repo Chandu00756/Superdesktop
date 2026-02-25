@@ -30,7 +30,7 @@ import numpy as np
 import pathlib
 
 """Use shared pluggable object storage adapters (filesystem/minio/memory)."""
-from . import adapters as storage_adapters
+from storage_node import adapters as storage_adapters
 import random
 from pathlib import Path
 from aiohttp import web
