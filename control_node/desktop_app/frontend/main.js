@@ -63,7 +63,7 @@ window.vd = new VirtualDesktopManager(window.api);
 // Tab registry
 const tabs = {
   'dashboard': renderDashboard,
-  'nodes': renderNodes, 
+  'nodes': renderNodes,
   'sessions': renderSessions,
   'network': renderNetwork,
   'performance': renderPerformance,
@@ -74,21 +74,21 @@ const tabs = {
 };
 
 // Global tab switching function
-window.switchTab = function(tabName) {
+window.switchTab = function (tabName) {
   console.log(`[Omega] Switching to tab: ${tabName}`);
   console.log(`[Omega] Current state:`, window.state);
   console.log(`[Omega] State data:`, window.state?.data);
-  
+
   // Update tab navigation
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-  
+
   const tabBtn = document.querySelector(`[data-tab="${tabName}"]`);
   const tabContent = document.getElementById(tabName);
-  
+
   if (tabBtn) tabBtn.classList.add('active');
   if (tabContent) tabContent.classList.add('active');
-  
+
   // Render tab content
   const tabRoot = document.getElementById('tab-root');
   if (tabRoot && tabs[tabName]) {
@@ -107,19 +107,19 @@ window.switchTab = function(tabName) {
 // Initialize the application
 async function initializeOmega() {
   console.log('[Omega] Initializing SuperDesktop v2.0...');
-  
+
   // Initialize sidebar
   const sidebarContainer = document.getElementById('omega-sidebar');
   if (sidebarContainer) {
     window.sidebarManager = new SidebarManager(sidebarContainer, window.state, window.api);
   }
-  
+
   // Initialize widgets
   const widgetsContainer = document.getElementById('floating-widgets');
   if (widgetsContainer) {
     window.widgetManager = new WidgetManager(widgetsContainer, window.state, window.api);
   }
-  
+
   // Load initial data
   try {
     console.log('[Omega] Loading dashboard data...');
@@ -130,19 +130,19 @@ async function initializeOmega() {
     console.error('[Omega] Failed to load dashboard data:', error);
     // Data structure is already initialized, no need to set empty data
   }
-  
+
   // Set up initial tab
   setTimeout(() => {
     window.switchTab('dashboard');
   }, 100);
-  
+
   // Start data refresh intervals
   setInterval(() => {
     if (window.state && typeof window.state.refreshData === 'function') {
       window.state.refreshData();
     }
   }, 5000);
-  
+
   console.log('[Omega] Initialization complete');
 }
 
